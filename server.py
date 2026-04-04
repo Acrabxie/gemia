@@ -3,6 +3,8 @@
 Endpoints:
   GET  /                        → web UI (static/index.html)
   GET  /file/<rel-path>         → serve output files (outputs/, frames/, styled/, demo/)
+  GET  /config                  → {"has_key": bool}
+  POST /config                  → save API keys to ~/.gemia/config.json
   POST /run-skill               body: {"skill_id": str, "inputs": {...}}
   GET  /task/<task_id>
   GET  /task/<task_id>/assets
@@ -13,9 +15,32 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+
+_CONFIG_PATH = Path.home() / ".gemia" / "config.json"
+
+
+def _load_config_keys() -> None:
+    """Load API keys from ~/.gemia/config.json into env vars (if not already set)."""
+    if _CONFIG_PATH.exists():
+        try:
+            cfg = json.loads(_CONFIG_PATH.read_text())
+            if key := cfg.get("openrouter_api_key"):
+                os.environ.setdefault("OPENROUTER_API_KEY", key)
+            if key := cfg.get("gemini_api_key"):
+                os.environ.setdefault("GEMINI_API_KEY", key)
+            if key := cfg.get("laozhang_api_key"):
+                os.environ.setdefault("LAOZHANG_API_KEY", key)
+        except Exception:
+            pass
+
+
+def _has_valid_key() -> bool:
+    key = os.environ.get("OPENROUTER_API_KEY", "")
+    return bool(key) and key not in ("test", "sk-or-...") and len(key) > 10
 
 from gemia.orchestrator import GemiaOrchestrator, get_assets, get_task, run_skill
 
@@ -117,6 +142,11 @@ class _Handler(BaseHTTPRequestHandler):
         # Web UI
         if path == "/":
             _file_response(self, _STATIC_DIR / "index.html", body=body)
+            return
+
+        # Config status (for first-run key check)
+        if path == "/config":
+            _json_response(self, 200, {"has_key": _has_valid_key()})
             return
 
         # Safe file serving: /file/outputs/..., /file/demo/...
@@ -237,6 +267,29 @@ class _Handler(BaseHTTPRequestHandler):
                     f.write(chunk)
                     remaining -= len(chunk)
             _json_response(self, 200, {"name": dest.name, "path": str(dest.resolve())})
+            return
+
+        if route == "/config":
+            # Save API keys to ~/.gemia/config.json and reload into env
+            try:
+                cfg_dir = _CONFIG_PATH.parent
+                cfg_dir.mkdir(parents=True, exist_ok=True)
+                existing = {}
+                if _CONFIG_PATH.exists():
+                    try:
+                        existing = json.loads(_CONFIG_PATH.read_text())
+                    except Exception:
+                        pass
+                if key := payload.get("openrouter_api_key", "").strip():
+                    existing["openrouter_api_key"] = key
+                    os.environ["OPENROUTER_API_KEY"] = key
+                if key := payload.get("gemini_api_key", "").strip():
+                    existing["gemini_api_key"] = key
+                    os.environ["GEMINI_API_KEY"] = key
+                _CONFIG_PATH.write_text(json.dumps(existing, indent=2, ensure_ascii=False))
+                _json_response(self, 200, {"ok": True})
+            except Exception as exc:
+                _json_response(self, 500, {"error": str(exc)})
             return
 
         if route not in ("/run-skill", "/run-prompt") \
@@ -376,6 +429,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def main(host: str = "127.0.0.1", port: int = 8000) -> None:
+    _load_config_keys()  # Load API keys from ~/.gemia/config.json on startup
     server = HTTPServer((host, port), _Handler)
     print(f"Gemia server listening on http://{host}:{port}")
     try:

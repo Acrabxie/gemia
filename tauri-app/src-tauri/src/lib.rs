@@ -128,9 +128,20 @@ fn save_config(openrouter_key: String, gemini_key: String) -> Result<(), String>
 
 #[tauri::command]
 fn config_exists() -> bool {
-    dirs_next::home_dir()
-        .map(|h| h.join(".gemia").join("config.json").exists())
-        .unwrap_or(false)
+    let path = match dirs_next::home_dir() {
+        Some(h) => h.join(".gemia").join("config.json"),
+        None => return false,
+    };
+    if !path.exists() {
+        return false;
+    }
+    // Validate that openrouter_api_key is present, non-empty, and not a placeholder
+    let Ok(text) = std::fs::read_to_string(&path) else { return false };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else { return false };
+    let key = json.get("openrouter_api_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    !key.is_empty() && key != "test" && key != "sk-or-..." && key.len() > 10
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

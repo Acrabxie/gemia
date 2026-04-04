@@ -262,10 +262,83 @@ let currentAskId = null;   // pending ask session id
 
 // ── Init ───────────────────────────────────────────────────────────────
 (async function init() {
+  await checkApiKey();
   await loadSkills();
   await loadTasks();
   scheduleTaskRefresh();
 })();
+
+// ── First-run API key check ─────────────────────────────────────────────
+async function checkApiKey() {
+  try {
+    const res = await fetch('/config');
+    const { has_key } = await res.json();
+    if (!has_key) showApiKeyModal();
+  } catch (e) { /* server not ready yet, ignore */ }
+}
+
+function showApiKeyModal() {
+  const overlay = document.createElement('div');
+  overlay.id = 'key-modal-overlay';
+  overlay.style.cssText = `
+    position:fixed;inset:0;background:rgba(0,0,0,.85);
+    display:flex;align-items:center;justify-content:center;z-index:9999;
+  `;
+  overlay.innerHTML = `
+    <div style="background:#1a1a2e;border:1px solid #0f3460;border-radius:14px;
+                padding:28px;width:400px;max-width:92vw;">
+      <h2 style="color:#e94560;font-size:18px;margin-bottom:8px;">设置 API Key</h2>
+      <p style="color:#888;font-size:13px;line-height:1.55;margin-bottom:20px;">
+        Gemia 需要 OpenRouter API Key 来规划和执行任务。
+        Key 保存在 <code style="color:#aaa">~/.gemia/config.json</code>，不上传。
+      </p>
+      <div style="margin-bottom:14px;">
+        <label style="display:block;font-size:12px;color:#ccc;margin-bottom:5px;">
+          OpenRouter API Key <span style="color:#e94560">*</span>
+        </label>
+        <input id="modal-or-key" type="password" placeholder="sk-or-..."
+          style="width:100%;background:#111;border:1px solid #333;border-radius:7px;
+                 color:#e0e0e0;font-size:14px;padding:9px 11px;" autocomplete="off">
+        <div style="font-size:11px;color:#555;margin-top:4px;">
+          必填 · 在 openrouter.ai 获取
+        </div>
+      </div>
+      <div style="margin-bottom:20px;">
+        <label style="display:block;font-size:12px;color:#ccc;margin-bottom:5px;">
+          Gemini API Key <span style="color:#555">（可选）</span>
+        </label>
+        <input id="modal-gemini-key" type="password" placeholder="AIza..."
+          style="width:100%;background:#111;border:1px solid #333;border-radius:7px;
+                 color:#e0e0e0;font-size:14px;padding:9px 11px;" autocomplete="off">
+        <div style="font-size:11px;color:#555;margin-top:4px;">
+          可选 · 用于 Nano Banana 图像生成
+        </div>
+      </div>
+      <div style="display:flex;justify-content:flex-end;">
+        <button id="modal-save-btn"
+          style="background:#e94560;color:#fff;border:none;border-radius:8px;
+                 padding:9px 22px;font-size:14px;font-weight:600;cursor:pointer;">
+          保存并继续
+        </button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  document.getElementById('modal-save-btn').addEventListener('click', async () => {
+    const orKey = document.getElementById('modal-or-key').value.trim();
+    if (!orKey) { alert('请输入 OpenRouter API Key'); return; }
+    const geminiKey = document.getElementById('modal-gemini-key').value.trim();
+    try {
+      const res = await fetch('/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ openrouter_api_key: orKey, gemini_api_key: geminiKey }),
+      });
+      if (res.ok) { overlay.remove(); }
+      else { alert('保存失败，请重试'); }
+    } catch (e) { alert('保存失败: ' + e.message); }
+  });
+}
 
 // ── Skills ─────────────────────────────────────────────────────────────
 async function loadSkills() {
