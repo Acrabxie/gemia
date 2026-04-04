@@ -167,6 +167,24 @@ fn config_exists() -> bool {
     !key.is_empty() && key != "test" && key != "sk-or-..." && key.len() > 10
 }
 
+/// Read current API keys from ~/.gemia/config.json (returns empty strings if missing).
+#[tauri::command]
+fn get_config() -> serde_json::Value {
+    let path = match dirs_next::home_dir() {
+        Some(h) => h.join(".gemia").join("config.json"),
+        None => return serde_json::json!({"openrouter_api_key": "", "gemini_api_key": ""}),
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return serde_json::json!({"openrouter_api_key": "", "gemini_api_key": ""});
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return serde_json::json!({"openrouter_api_key": "", "gemini_api_key": ""});
+    };
+    let or_key = json.get("openrouter_api_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let gm_key = json.get("gemini_api_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    serde_json::json!({"openrouter_api_key": or_key, "gemini_api_key": gm_key})
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -194,6 +212,7 @@ pub fn run() {
             reveal_in_finder,
             save_config,
             config_exists,
+            get_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

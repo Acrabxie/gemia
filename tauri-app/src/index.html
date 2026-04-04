@@ -38,6 +38,16 @@ body {
 .status-badge.done      { background: #162616; color: #86efac; }
 .status-badge.error     { background: #2e1a1a; color: #f87171; }
 
+.header-spacer { flex: 1; }
+
+.settings-btn {
+  -webkit-app-region: no-drag;
+  background: none; border: 1px solid #333; border-radius: 7px;
+  color: #888; font-size: 14px; padding: 4px 10px; cursor: pointer;
+  transition: all 0.15s; line-height: 1;
+}
+.settings-btn:hover { border-color: #a78bfa; color: #a78bfa; }
+
 /* ── Layout ── */
 .main { display: flex; flex: 1; overflow: hidden; }
 
@@ -149,7 +159,7 @@ textarea#prompt::placeholder { color: #444; }
 }
 .reveal-btn:hover { background: #2a2a2a; color: #ddd; }
 
-/* ── Modal ── */
+/* ── Modal (shared for first-run & settings) ── */
 .modal-overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,0.88);
   display: none; align-items: center; justify-content: center; z-index: 100;
@@ -157,10 +167,10 @@ textarea#prompt::placeholder { color: #444; }
 .modal-overlay.visible { display: flex; }
 .modal {
   background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 14px;
-  padding: 28px; width: 400px; max-width: 92vw;
+  padding: 28px; width: 420px; max-width: 92vw;
 }
 .modal h2 { font-size: 19px; font-weight: 700; margin-bottom: 6px; color: #a78bfa; }
-.modal p { font-size: 13px; color: #888; margin-bottom: 22px; line-height: 1.55; }
+.modal-subtitle { font-size: 13px; color: #888; margin-bottom: 22px; line-height: 1.55; }
 .form-group { margin-bottom: 14px; }
 .form-group label { display: block; font-size: 12px; color: #ccc; margin-bottom: 5px; }
 .form-group input {
@@ -169,21 +179,44 @@ textarea#prompt::placeholder { color: #444; }
 }
 .form-group input:focus { outline: none; border-color: #a78bfa; }
 .form-hint { font-size: 11px; color: #555; margin-top: 4px; }
-.modal-actions { display: flex; justify-content: flex-end; margin-top: 22px; }
+
+.storage-note {
+  font-size: 11px; color: #444; margin-top: 18px; padding-top: 14px;
+  border-top: 1px solid #222; line-height: 1.6;
+}
+.storage-note code {
+  color: #666; background: #111; padding: 2px 6px;
+  border-radius: 4px; font-size: 11px; user-select: text;
+}
+
+.modal-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 20px; }
+.modal-cancel {
+  background: none; border: 1px solid #333; border-radius: 8px;
+  color: #666; padding: 9px 18px; font-size: 14px; cursor: pointer;
+}
+.modal-cancel:hover { border-color: #555; color: #aaa; }
 .save-btn {
   background: #a78bfa; color: white; border: none;
   border-radius: 8px; padding: 9px 22px; font-size: 14px; font-weight: 600; cursor: pointer;
 }
 .save-btn:hover { background: #8b5cf6; }
+
+/* key status dot in header */
+.key-dot {
+  width: 7px; height: 7px; border-radius: 50%; display: inline-block;
+  margin-right: 5px; background: #555;
+}
+.key-dot.ok { background: #4ade80; }
+.key-dot.warn { background: #fbbf24; }
 </style>
 </head>
 <body>
 
-<!-- First-run modal -->
+<!-- Settings / first-run modal -->
 <div class="modal-overlay" id="api-modal">
   <div class="modal">
-    <h2>欢迎使用 Gemia</h2>
-    <p>首次使用需要配置 API Key。Gemia 通过 OpenRouter 连接 Gemini 规划视频处理流程。</p>
+    <h2 id="modal-title">API Keys 设置</h2>
+    <p class="modal-subtitle" id="modal-subtitle">配置后保存到本地，Gemia 不会上传任何 key。</p>
     <div class="form-group">
       <label>OpenRouter API Key <span style="color:#f87171">*</span></label>
       <input type="password" id="or-key" placeholder="sk-or-..." autocomplete="off">
@@ -194,8 +227,13 @@ textarea#prompt::placeholder { color: #444; }
       <input type="password" id="gemini-key" placeholder="AIza..." autocomplete="off">
       <div class="form-hint">可选 · 用于 Nano Banana 图像生成</div>
     </div>
+    <div class="storage-note">
+      Key 存储于本地：<code>~/.gemia/config.json</code><br>
+      不加密，请勿在共享机器上使用。
+    </div>
     <div class="modal-actions">
-      <button class="save-btn" id="save-config-btn">保存并继续</button>
+      <button class="modal-cancel" id="modal-cancel-btn" style="display:none">取消</button>
+      <button class="save-btn" id="save-config-btn">保存</button>
     </div>
   </div>
 </div>
@@ -204,6 +242,8 @@ textarea#prompt::placeholder { color: #444; }
 <div class="header">
   <div class="logo">Gemia</div>
   <div class="status-badge" id="status-badge">启动中...</div>
+  <div class="header-spacer"></div>
+  <button class="settings-btn" id="settings-btn" title="API Keys 设置">⚙ Keys</button>
 </div>
 
 <!-- Main -->
@@ -267,6 +307,7 @@ let uploadedVideoPath = null;
 let pollInterval = null;
 let pendingAskId = null;
 let lastOutputPath = null;
+let isFirstRun = false;
 
 // ── Status helpers ─────────────────────────────────────────────────────
 function setStatus(text, cls = '') {
@@ -296,11 +337,67 @@ async function api(method, path, body = null) {
   return { ok: raw.status < 400, status: raw.status, data: JSON.parse(raw.body) };
 }
 
-// ── Init: config check → wait for server ──────────────────────────────
+// ── Settings modal ────────────────────────────────────────────────────
+async function openSettings(firstRun = false) {
+  isFirstRun = firstRun;
+  document.getElementById('modal-title').textContent = firstRun ? '欢迎使用 Gemia' : 'API Keys 设置';
+  document.getElementById('modal-subtitle').textContent = firstRun
+    ? '首次使用需要配置 OpenRouter API Key，保存到本地后即可开始。'
+    : '修改后立即生效，无需重启应用。';
+  document.getElementById('modal-cancel-btn').style.display = firstRun ? 'none' : '';
+
+  // Pre-fill existing keys
+  try {
+    const cfg = await invoke('get_config');
+    document.getElementById('or-key').value = cfg.openrouter_api_key || '';
+    document.getElementById('gemini-key').value = cfg.gemini_api_key || '';
+  } catch (e) { /* ignore */ }
+
+  document.getElementById('api-modal').classList.add('visible');
+}
+
+function closeSettings() {
+  document.getElementById('api-modal').classList.remove('visible');
+}
+
+async function saveConfig() {
+  const orKey = document.getElementById('or-key').value.trim();
+  if (!orKey) { alert('请输入 OpenRouter API Key'); return; }
+  const geminiKey = document.getElementById('gemini-key').value.trim();
+
+  const btn = document.getElementById('save-config-btn');
+  btn.textContent = '保存中...';
+  btn.disabled = true;
+
+  try {
+    await invoke('save_config', { openrouterKey: orKey, geminiKey });
+    closeSettings();
+    updateKeyDot(true);
+    if (isFirstRun) {
+      await waitForServer();
+    } else {
+      setStatus('Keys 已更新', 'done');
+      setTimeout(() => setStatus('就绪'), 2000);
+    }
+  } catch (e) {
+    alert('保存失败: ' + e);
+  } finally {
+    btn.textContent = '保存';
+    btn.disabled = false;
+  }
+}
+
+function updateKeyDot(hasKey) {
+  const btn = document.getElementById('settings-btn');
+  btn.innerHTML = `<span class="key-dot ${hasKey ? 'ok' : 'warn'}"></span>Keys`;
+}
+
+// ── Init ──────────────────────────────────────────────────────────────
 async function init() {
   const exists = await invoke('config_exists');
+  updateKeyDot(exists);
   if (!exists) {
-    document.getElementById('api-modal').classList.add('visible');
+    await openSettings(true);
     return;
   }
   await waitForServer();
@@ -318,17 +415,7 @@ async function waitForServer(attempts = 40) {
   setStatus('服务启动失败', 'error');
 }
 
-// ── Config save ────────────────────────────────────────────────────────
-async function saveConfig() {
-  const orKey = document.getElementById('or-key').value.trim();
-  if (!orKey) { alert('请输入 OpenRouter API Key'); return; }
-  const geminiKey = document.getElementById('gemini-key').value.trim();
-  await invoke('save_config', { openrouterKey: orKey, geminiKey });
-  document.getElementById('api-modal').classList.remove('visible');
-  await waitForServer();
-}
-
-// ── File selection via Tauri dialog ───────────────────────────────────
+// ── File selection ────────────────────────────────────────────────────
 async function pickFile() {
   const { open } = window.__TAURI__.dialog;
   const path = await open({
@@ -359,12 +446,10 @@ async function handleFilePath(filePath) {
   zone.classList.add('has-file');
   setStatus('就绪');
   updateRunBtn();
-
-  // Preview original video
   showVideoFromServerPath('inputs/' + data.name);
 }
 
-// ── Video preview via Rust (no proxy) ─────────────────────────────────
+// ── Video preview ─────────────────────────────────────────────────────
 async function showVideoFromServerPath(relPath) {
   try {
     const b64 = await invoke('fetch_video_b64', { serverRelPath: relPath });
@@ -498,7 +583,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ── Events ────────────────────────────────────────────────────────────
 document.getElementById('upload-zone').addEventListener('click', pickFile);
+document.getElementById('settings-btn').addEventListener('click', () => openSettings(false));
 document.getElementById('save-config-btn').addEventListener('click', saveConfig);
+document.getElementById('modal-cancel-btn').addEventListener('click', closeSettings);
 document.getElementById('run-btn').addEventListener('click', runPrompt);
 document.getElementById('ask-submit-btn').addEventListener('click', submitAskAnswer);
 
