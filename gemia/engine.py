@@ -20,6 +20,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from gemia.registry import get_info, resolve
 
 
@@ -101,6 +103,9 @@ class PlanEngine:
         # Execute
         final_output = self.execute(plan, input_path, output_path)
 
+        # Detect which models were used by the plan steps
+        models_used = _detect_models_used(plan.get("steps", []))
+
         # Save task
         task = {
             "task_id": task_id,
@@ -110,6 +115,7 @@ class PlanEngine:
             "outputs": [final_output],
             "created_at": datetime.now().isoformat(),
             "version": "2.0",
+            "models_used": models_used,
         }
         task_path = self.tasks_dir / f"{task_id}.json"
         task_path.write_text(json.dumps(task, ensure_ascii=False, indent=2) + "\n")
@@ -134,6 +140,11 @@ class PlanEngine:
 
         input_is_path = isinstance(input_val, str)
         input_is_frames = isinstance(input_val, list)
+
+        # ── Generative picture: generate_image (no image input) ───────
+        if domain == "picture" and info.name == "generate_image":
+            result_img = func(**args)
+            return _save_image_to_path(result_img, output_path)
 
         # ── Picture function on a video file → auto-wrap ──────────────
         if domain == "picture" and input_is_path:
@@ -167,6 +178,14 @@ class PlanEngine:
         """Route video functions based on their signature."""
         sig = inspect.signature(func)
         param_names = list(sig.parameters.keys())
+
+        # Generative video functions: generate_video (no input_path needed)
+        if info.name == "generate_video":
+            return func(**args)
+
+        # Generative video functions: take input_path as first positional arg
+        if info.name in ("generate_video_from_image", "extend_video"):
+            return func(input_path, **args)
 
         # Analysis functions: func(path, **kwargs) — no output_path
         if info.name in ("get_metadata", "detect_scenes"):
@@ -210,3 +229,54 @@ def _make_picture_op(func: Any, args: dict) -> Any:
     def op(frame: Any) -> Any:
         return func(frame, **args)
     return op
+
+
+def _save_image_to_path(img: np.ndarray, path: str) -> str:
+    """Save a float32 BGR ndarray to disk. Creates parent dirs. Returns actual path.
+
+    If ``path`` ends with ``.mp4`` the extension is changed to ``.png`` so the
+    image is written as a valid image file rather than a video container.
+
+    Args:
+        img: float32 BGR ndarray to save.
+        path: Desired output path (may be ``.mp4``; will be rewritten to ``.png``).
+
+    Returns:
+        Actual path where the image was written.
+
+    Raises:
+        RuntimeError: If ``cv2.imwrite`` fails.
+    """
+    import cv2 as _cv2
+    from gemia.primitives_common import to_uint8
+    actual_path = path[:-4] + ".png" if path.endswith(".mp4") else path
+    Path(actual_path).parent.mkdir(parents=True, exist_ok=True)
+    img_u8 = to_uint8(img)
+    if not _cv2.imwrite(actual_path, img_u8):
+        raise RuntimeError(f"Failed to write image to {actual_path}")
+    return actual_path
+
+
+def _detect_models_used(steps: list[dict]) -> list[str]:
+    """Detect which backend models are used by a plan's steps.
+
+    Args:
+        steps: List of step dicts from a v2 plan.
+
+    Returns:
+        Sorted list of model/backend identifiers, e.g.
+        ``["ffmpeg", "nano_banana_flash", "opencv"]``.
+    """
+    models: set[str] = set()
+    for step in steps:
+        fqn = step.get("function", "")
+        if "generative" in fqn and "picture" in fqn:
+            tier = step.get("args", {}).get("model_tier", "flash")
+            models.add(f"nano_banana_{tier}")
+        elif "generative" in fqn and "video" in fqn:
+            models.add("veo")
+        elif "picture" in fqn or "audio" in fqn:
+            models.add("opencv")
+        elif "video" in fqn:
+            models.add("ffmpeg")
+    return sorted(models)

@@ -9,6 +9,7 @@ from gemia.picture.pixel import blur, sharpen, denoise, add_grain, convolve
 from gemia.picture.color import color_grade, adjust_exposure, adjust_temperature, apply_lut
 from gemia.picture.analysis import histogram, dominant_colors, edge_detect
 from gemia.picture.composite import create_mask, blend, composite
+from gemia.picture.generative import generate_image, edit_image, style_transfer, blend_images
 
 __all__ = [
     # geometry
@@ -21,4 +22,6 @@ __all__ = [
     "histogram", "dominant_colors", "edge_detect",
     # composite
     "create_mask", "blend", "composite",
+    # generative (Nano Banana)
+    "generate_image", "edit_image", "style_transfer", "blend_images",
 ]
