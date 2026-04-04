@@ -64,12 +64,20 @@ class SkillStore:
         # Build the reusable skill template
         template_steps = _strip_concrete_paths(plan.get("steps", []))
 
+        # Extract models used from task metadata
+        models_used: list[str] = task.get("models_used", [])
+
+        # Extract parameterizable values from plan steps
+        parameters = _extract_parameters(template_steps)
+
         skill = {
             "name": name,
             "description": description or plan.get("goal", ""),
             "version": "2.0",
             "origin_task_id": task_id,
             "created_at": datetime.now().isoformat(),
+            "models_used": models_used,
+            "parameters": parameters,
             "plan": {
                 "version": "2.0",
                 "goal": plan.get("goal", name),
@@ -102,10 +110,43 @@ class SkillStore:
                     "origin_task_id": data.get("origin_task_id"),
                     "created_at": data.get("created_at"),
                     "step_count": len(data.get("plan", {}).get("steps", [])),
+                    "models_used": data.get("models_used", []),
                 })
             except Exception:
                 continue
         return skills
+
+    def apply_parameters(self, skill_data: dict, overrides: dict) -> dict:
+        """Apply parameter overrides to a skill's plan.
+
+        Returns a deep copy of the plan with the specified parameter values
+        replaced.  The plan itself is not mutated.
+
+        Args:
+            skill_data: Loaded skill dict (as returned by :meth:`load`).
+            overrides: Dict mapping ``"step_id.arg"`` to the new value, e.g.
+                ``{"step_1.preset": "vintage", "step_2.style_prompt": "watercolor"}``.
+
+        Returns:
+            Modified plan dict with overrides applied.  The ``"steps"``
+            list entries have their ``"args"`` dicts updated in-place on
+            copies — the original ``skill_data`` is not modified.
+        """
+        import copy
+        plan = copy.deepcopy(skill_data.get("plan", {}))
+        steps = plan.get("steps", [])
+
+        # Build a lookup from step_id → step dict for O(1) access
+        step_by_id: dict[str, dict] = {s["id"]: s for s in steps}
+
+        for key, value in overrides.items():
+            if "." not in key:
+                continue
+            step_id, arg = key.split(".", 1)
+            if step_id in step_by_id:
+                step_by_id[step_id].setdefault("args", {})[arg] = value
+
+        return plan
 
     def load(self, name: str) -> dict[str, Any]:
         """Load a skill by name. Searches by exact name match in JSON files."""
@@ -176,6 +217,46 @@ def _strip_concrete_paths(steps: list[dict]) -> list[dict]:
             s["depends_on"] = step["depends_on"]
         cleaned.append(s)
     return cleaned
+
+
+def _extract_parameters(steps: list[dict]) -> list[dict]:
+    """Extract parameterizable values from plan step args.
+
+    Iterates over all steps and their ``args`` dicts.  For each arg whose
+    value is a JSON-primitive (``str``, ``int``, or ``float``) and is **not**
+    a file path (does not contain ``/`` or ``\\``), a parameter entry is
+    created.
+
+    Args:
+        steps: List of step dicts from a plan (after path stripping).
+
+    Returns:
+        List of parameter dicts with keys:
+        - ``step_id``: ID of the owning step.
+        - ``arg``: Argument name.
+        - ``type``: ``"str"``, ``"int"``, or ``"float"``.
+        - ``current_value``: Current value of the argument.
+        - ``description``: Human-readable label.
+    """
+    params: list[dict] = []
+    for step in steps:
+        step_id = step.get("id", "")
+        args = step.get("args", {})
+        for arg_name, value in args.items():
+            if not isinstance(value, (str, int, float)):
+                continue
+            # Skip file paths
+            if isinstance(value, str) and ("/" in value or "\\" in value):
+                continue
+            type_name = type(value).__name__  # "str", "int", or "float"
+            params.append({
+                "step_id": step_id,
+                "arg": arg_name,
+                "type": type_name,
+                "current_value": value,
+                "description": f"{arg_name} for {step_id}",
+            })
+    return params
 
 
 def _slugify(text: str) -> str:
