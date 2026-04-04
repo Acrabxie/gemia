@@ -110,20 +110,43 @@ async fn reveal_in_finder(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn save_config(openrouter_key: String, gemini_key: String) -> Result<(), String> {
+async fn save_config(openrouter_key: String, gemini_key: String) -> Result<(), String> {
+    // 1. Write to ~/.gemia/config.json
     let config_dir = dirs_next::home_dir()
         .ok_or("Cannot find home directory")?
         .join(".gemia");
     std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
     let config = serde_json::json!({
-        "openrouter_api_key": openrouter_key,
-        "gemini_api_key": gemini_key,
+        "openrouter_api_key": &openrouter_key,
+        "gemini_api_key": &gemini_key,
     });
     std::fs::write(
         config_dir.join("config.json"),
         serde_json::to_string_pretty(&config).unwrap(),
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+
+    // 2. Push keys to the running sidecar so env vars take effect immediately
+    //    (sidecar started before the file existed, so it has empty env vars)
+    if let Ok(client) = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        let _ = client
+            .post("http://127.0.0.1:7788/config")
+            .header("Content-Type", "application/json")
+            .body(
+                serde_json::json!({
+                    "openrouter_api_key": openrouter_key,
+                    "gemini_api_key": gemini_key,
+                })
+                .to_string(),
+            )
+            .send()
+            .await;
+    }
+    Ok(())
 }
 
 #[tauri::command]
