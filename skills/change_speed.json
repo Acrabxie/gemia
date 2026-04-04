@@ -1,0 +1,17 @@
+{
+  "skill_id": "change_speed",
+  "description": "Change playback speed of a video.",
+  "parameters": {
+    "video": {"type": "string", "description": "Absolute path to input video"},
+    "speed": {"type": "number", "description": "Playback speed multiplier"}
+  },
+  "pipeline": [
+    {
+      "id": "step_speed",
+      "type": "change_speed",
+      "params": {
+        "speed": "{{parameters.speed}}"
+      }
+    }
+  ]
+}

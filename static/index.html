@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gemia</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #1a1a2e; color: #e0e0e0; height: 100vh;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+
+header {
+  padding: 10px 20px; background: #16213e;
+  border-bottom: 1px solid #0f3460;
+  display: flex; align-items: center; gap: 12px; flex-shrink: 0;
+}
+header h1 { font-size: 18px; font-weight: 700; color: #e94560; letter-spacing: -0.5px; }
+header span { font-size: 12px; color: #666; }
+
+.layout { display: flex; flex: 1; overflow: hidden; min-height: 0; }
+
+/* ── Sidebars ── */
+.sidebar {
+  width: 200px; padding: 12px 8px; overflow-y: auto;
+  background: #16213e; flex-shrink: 0;
+}
+.sidebar-left  { border-right: 1px solid #0f3460; }
+.sidebar-right { border-left:  1px solid #0f3460; }
+.sidebar h2 {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px;
+  color: #555; margin-bottom: 8px; padding: 0 6px;
+}
+.list-item {
+  padding: 7px 10px; border-radius: 6px; cursor: pointer;
+  font-size: 12px; margin-bottom: 3px;
+  border: 1px solid transparent; transition: all 0.12s;
+}
+.list-item:hover { background: #0f3460; border-color: #1d4d8c; }
+.list-item.active { background: #0f3460; border-color: #e94560; }
+.task-id { font-size: 10px; color: #999; word-break: break-all; margin-top: 2px; }
+.badge {
+  display: inline-block; font-size: 9px; padding: 1px 5px;
+  border-radius: 3px; margin-top: 3px; font-weight: 600;
+}
+.badge.running { background: #3d2d00; color: #fbbf24; }
+.badge.done    { background: #0d2e1a; color: #4ade80; }
+.badge.error   { background: #2e0d0d; color: #f87171; }
+.badge.pending { background: #1a1a3e; color: #818cf8; }
+
+/* ── Main area ── */
+.main { flex: 1; display: flex; flex-direction: column; padding: 14px; gap: 12px; overflow: hidden; min-width: 0; }
+
+.preview {
+  flex: 1; background: #0a0a18; border-radius: 10px;
+  border: 1px solid #0f3460; display: flex; align-items: center;
+  justify-content: center; overflow: hidden; min-height: 0;
+  position: relative;
+}
+.preview video { max-width: 100%; max-height: 100%; border-radius: 8px; display: block; }
+.preview-placeholder { color: #333; text-align: center; user-select: none; }
+.preview-placeholder svg { display: block; margin: 0 auto 10px; }
+.preview-placeholder p { font-size: 13px; }
+
+.input-area {
+  background: #16213e; border-radius: 10px;
+  border: 1px solid #0f3460; padding: 14px; flex-shrink: 0;
+}
+.input-row { display: flex; gap: 10px; margin-bottom: 10px; align-items: flex-end; }
+.input-row:last-child { margin-bottom: 0; }
+.field { flex: 1; }
+.field label {
+  display: block; font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.8px; color: #666; margin-bottom: 5px;
+}
+.field input, .field textarea, .field select {
+  width: 100%; background: #0a0a18; border: 1px solid #1d2d50;
+  color: #e0e0e0; border-radius: 6px; padding: 7px 10px;
+  font-size: 13px; outline: none; resize: none;
+  transition: border-color 0.12s; font-family: inherit;
+}
+.field input:focus, .field textarea:focus, .field select:focus { border-color: #e94560; }
+.field select { appearance: none; }
+
+.run-btn {
+  padding: 9px 22px; background: #e94560; color: #fff;
+  border: none; border-radius: 6px; font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: background 0.12s; white-space: nowrap; height: fit-content;
+}
+.run-btn:hover:not(:disabled) { background: #c73652; }
+.run-btn:disabled { background: #444; cursor: not-allowed; }
+
+.status-line {
+  font-size: 11px; color: #666; margin-top: 8px; min-height: 16px;
+  transition: color 0.15s;
+}
+.status-line.running { color: #fbbf24; }
+.status-line.done    { color: #4ade80; }
+.status-line.error   { color: #f87171; }
+
+/* ── Ask panel ── */
+.ask-panel {
+  background: #0f2040; border: 1px solid #2563eb; border-radius: 10px;
+  padding: 14px; flex-shrink: 0; display: none; flex-direction: column; gap: 10px;
+}
+.ask-panel.visible { display: flex; }
+.ask-panel-header {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
+  color: #60a5fa; font-weight: 600;
+}
+.ask-question {
+  display: flex; flex-direction: column; gap: 5px;
+}
+.ask-question label { font-size: 12px; color: #cbd5e1; }
+.ask-question input {
+  background: #0a0a18; border: 1px solid #1d2d50; color: #e0e0e0;
+  border-radius: 6px; padding: 7px 10px; font-size: 13px; outline: none;
+  transition: border-color 0.12s; font-family: inherit; width: 100%;
+}
+.ask-question input:focus { border-color: #2563eb; }
+.ask-actions { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.ask-btn {
+  padding: 8px 18px; background: #2563eb; color: #fff;
+  border: none; border-radius: 6px; font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: background 0.12s;
+}
+.ask-btn:hover:not(:disabled) { background: #1d4ed8; }
+.ask-btn:disabled { background: #444; cursor: not-allowed; }
+.ask-dismiss { font-size: 11px; color: #555; cursor: pointer; }
+.ask-dismiss:hover { color: #999; }
+
+/* ── Mode tabs ── */
+.mode-tabs { display: flex; gap: 4px; margin-bottom: 10px; }
+.mode-tab {
+  padding: 4px 12px; border-radius: 5px; font-size: 11px; font-weight: 600;
+  cursor: pointer; border: 1px solid transparent; color: #555;
+  text-transform: uppercase; letter-spacing: 0.6px; transition: all 0.12s;
+}
+.mode-tab.active { background: #0f3460; border-color: #e94560; color: #e0e0e0; }
+.mode-tab:not(.active):hover { background: #1a1a3e; color: #aaa; }
+.mode-section { display: none; }
+.mode-section.visible { display: block; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Gemia</h1>
+  <span>AI Video Stylization</span>
+</header>
+
+<div class="layout">
+
+  <!-- Left: task history -->
+  <div class="sidebar sidebar-left">
+    <h2>Tasks</h2>
+    <div id="task-list"><span style="font-size:11px;color:#444;padding:6px">No tasks yet</span></div>
+  </div>
+
+  <!-- Center: preview + input -->
+  <div class="main">
+    <div class="preview" id="preview">
+      <div class="preview-placeholder">
+        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#333" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="3" width="20" height="14" rx="2"/>
+          <path d="m10 8 5 4-5 4V8z"/>
+          <path d="M8 21h8M12 17v4"/>
+        </svg>
+        <p>Output video will appear here</p>
+      </div>
+    </div>
+
+    <div class="input-area">
+      <!-- Video + upload row (shared) -->
+      <div class="input-row">
+        <div class="field" style="flex:1.6">
+          <label>Input Video</label>
+          <select id="inp-video"></select>
+        </div>
+        <div class="field">
+          <label>Upload MP4</label>
+          <input id="upload-video" type="file" accept="video/mp4" onchange="uploadVideo(this)">
+        </div>
+      </div>
+
+      <!-- Mode tabs -->
+      <div class="mode-tabs">
+        <div class="mode-tab active" id="tab-ai" onclick="switchMode('ai')">✦ AI</div>
+        <div class="mode-tab" id="tab-skill" onclick="switchMode('skill')">Skill</div>
+      </div>
+
+      <!-- AI mode -->
+      <div class="mode-section visible" id="mode-ai">
+        <div class="input-row">
+          <div class="field">
+            <label>Tell AI what to do</label>
+            <textarea id="inp-prompt" rows="2"
+              placeholder="e.g. 裁前10秒，加速1.5倍，叠加字幕 Gemia Demo&#10;e.g. make it look cinematic with warm tones"></textarea>
+          </div>
+          <button class="run-btn" id="ai-run-btn" onclick="runPrompt()">✦ Ask AI</button>
+        </div>
+      </div>
+
+      <!-- Skill mode -->
+      <div class="mode-section" id="mode-skill">
+        <div class="input-row">
+          <div class="field">
+            <label>Skill</label>
+            <input id="inp-skill" type="text" placeholder="select from list →" readonly
+                   style="cursor:pointer">
+          </div>
+          <div class="field">
+            <label>Style / Prompt</label>
+            <textarea id="inp-style" rows="2"
+              placeholder="e.g. cyberpunk cinematic, neon lights"></textarea>
+          </div>
+          <button class="run-btn" id="run-btn" onclick="runSkill()">&#9654;&#xFE0E; Run</button>
+        </div>
+        <div class="input-row">
+          <div class="field">
+            <label>Revise Feedback</label>
+            <textarea id="inp-feedback" rows="2"
+              placeholder="e.g. make it more vintage, softer color"></textarea>
+          </div>
+          <button class="run-btn" id="revise-btn" onclick="reviseTask()">Revise</button>
+        </div>
+      </div>
+
+      <div class="status-line" id="status"></div>
+    </div>
+
+    <!-- Ask panel (appears when AI needs clarification) -->
+    <div class="ask-panel" id="ask-panel">
+      <div class="ask-panel-header">✦ Gemia needs a bit more info</div>
+      <div id="ask-questions"></div>
+      <div class="ask-actions">
+        <button class="ask-btn" id="ask-submit-btn" onclick="submitAnswers()">Submit answers</button>
+        <span class="ask-dismiss" onclick="dismissAsk()">cancel</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right: skills list -->
+  <div class="sidebar sidebar-right">
+    <h2>Skills</h2>
+    <div id="skill-list"><span style="font-size:11px;color:#444;padding:6px">Loading...</span></div>
+  </div>
+
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────
+let selectedSkill = null;
+let selectedVideoPath = null;
+let tasks = [];
+let pollTimer = null;
+let taskRefreshTimer = null;
+let activeTaskId = null;
+let currentAskId = null;   // pending ask session id
+
+// ── Init ───────────────────────────────────────────────────────────────
+(async function init() {
+  await loadSkills();
+  await loadTasks();
+  scheduleTaskRefresh();
+})();
+
+// ── Skills ─────────────────────────────────────────────────────────────
+async function loadSkills() {
+  try {
+    const res = await fetch('/skills');
+    const { skills, inputs } = await res.json();
+    const el = document.getElementById('skill-list');
+    el.innerHTML = '';
+    skills.forEach((s, i) => {
+      const div = document.createElement('div');
+      div.className = 'list-item' + (i === 0 ? ' active' : '');
+      div.textContent = s;
+      div.onclick = () => pickSkill(s, div);
+      el.appendChild(div);
+      if (i === 0) pickSkill(s, div);
+    });
+    if (!skills.length) el.innerHTML = '<span style="font-size:11px;color:#444;padding:6px">No skills found</span>';
+    loadInputs(inputs || []);
+  } catch (e) {
+    document.getElementById('skill-list').innerHTML = '<span style="font-size:11px;color:#f87171;padding:6px">Error</span>';
+  }
+}
+
+function pickSkill(skill, el) {
+  selectedSkill = skill;
+  document.getElementById('inp-skill').value = skill;
+  document.querySelectorAll('#skill-list .list-item').forEach(e => e.classList.remove('active'));
+  if (el) el.classList.add('active');
+}
+
+function loadInputs(inputs, preferredPath = null) {
+  const select = document.getElementById('inp-video');
+  select.innerHTML = '';
+  if (!inputs.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = 'No input videos found';
+    select.appendChild(option);
+    selectedVideoPath = '';
+    return;
+  }
+  inputs.forEach((item, i) => {
+    const option = document.createElement('option');
+    option.value = item.path;
+    option.textContent = item.name;
+    select.appendChild(option);
+    if (i === 0 && !selectedVideoPath) selectedVideoPath = item.path;
+  });
+  select.onchange = () => {
+    selectedVideoPath = select.value;
+  };
+  select.value = preferredPath || selectedVideoPath || inputs[0].path;
+  selectedVideoPath = select.value;
+}
+
+async function refreshInputs(preferredPath = null) {
+  const res = await fetch('/skills');
+  const data = await res.json();
+  loadInputs(data.inputs || [], preferredPath);
+}
+
+async function uploadVideo(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  setStatus('Uploading video…', 'running');
+  setRunBusy(true);
+  try {
+    const res = await fetch('/upload-video', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-Filename': file.name
+      },
+      body: file
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Upload failed');
+    await refreshInputs(data.path);
+    setStatus('Uploaded and selected: ' + data.name, 'done');
+  } catch (e) {
+    setStatus('Upload error: ' + e.message, 'error');
+  } finally {
+    setRunBusy(false);
+    input.value = '';
+  }
+}
+
+// ── Run ────────────────────────────────────────────────────────────────
+async function runSkill() {
+  const video = (document.getElementById('inp-video').value || '').trim();
+  const style = document.getElementById('inp-style').value.trim();
+  const skill = document.getElementById('inp-skill').value.trim();
+
+  if (!skill) { setStatus('Select a skill first.', 'error'); return; }
+  if (!video) { setStatus('Enter a video path.', 'error'); return; }
+  if (!style) { setStatus('Enter a style or prompt.', 'error'); return; }
+
+  setRunBusy(true);
+  setStatus('Submitting task…', 'running');
+
+  try {
+    const res = await fetch('/run-skill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skill_id: skill, inputs: { video, style } })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Server error');
+
+    const taskId = data.task_id;
+    addTask(taskId, 'running');
+    activeTaskId = taskId;
+    setStatus(`Task ${shortId(taskId)} started — polling…`, 'running');
+    schedulePoll(taskId);
+  } catch (e) {
+    setStatus('Error: ' + e.message, 'error');
+    setRunBusy(false);
+  }
+}
+
+async function reviseTask() {
+  const feedback = document.getElementById('inp-feedback').value.trim();
+  if (!activeTaskId) { setStatus('Select or run a task first.', 'error'); return; }
+  if (!feedback) { setStatus('Enter revise feedback first.', 'error'); return; }
+
+  setRunBusy(true);
+  setStatus(`Revising ${shortId(activeTaskId)}…`, 'running');
+
+  try {
+    const res = await fetch('/revise-task/' + activeTaskId, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feedback })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Server error');
+
+    const taskId = data.revision_task_id;
+    addTask(taskId, 'running');
+    activeTaskId = taskId;
+    setStatus(`Revision ${shortId(taskId)} started — polling…`, 'running');
+    schedulePoll(taskId);
+  } catch (e) {
+    setStatus('Revise error: ' + e.message, 'error');
+    setRunBusy(false);
+  }
+}
+
+// ── Polling ────────────────────────────────────────────────────────────
+function schedulePoll(taskId, delay = 1500) {
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = setTimeout(() => poll(taskId), delay);
+}
+
+async function poll(taskId) {
+  try {
+    const res = await fetch('/task/' + taskId);
+    const task = await res.json();
+    const status = (task.status || 'unknown').toLowerCase();
+
+    if (status === 'done' || status === 'completed' || status === 'succeeded') {
+      updateTask(taskId, 'done');
+      setStatus('Done! Loading preview…', 'done');
+      await showPreview(taskId);
+      setRunBusy(false);
+    } else if (status === 'error' || status === 'failed') {
+      updateTask(taskId, 'error');
+      setStatus('Task failed: ' + (task.error || status), 'error');
+      setRunBusy(false);
+    } else {
+      updateTask(taskId, status === 'running' ? 'running' : 'pending');
+      setStatus(`Status: ${status} — polling…`, 'running');
+      schedulePoll(taskId, 2000);
+    }
+  } catch (e) {
+    setStatus('Poll error: ' + e.message, 'error');
+    schedulePoll(taskId, 3000);
+  }
+}
+
+// ── Preview ────────────────────────────────────────────────────────────
+async function showPreview(taskId) {
+  try {
+    const previewContainer = document.getElementById('preview');
+    const originalContent = previewContainer.innerHTML;
+    // show loading spinner or text overlaid on existing content if any
+    setStatus('Loading preview for ' + shortId(taskId) + '…', 'running');
+
+    const taskRes = await fetch('/task/' + taskId);
+    const task = await taskRes.json();
+    const previewTaskId = task.latest_preview_task_id || taskId;
+
+    const res = await fetch('/task/' + previewTaskId + '/assets');
+    const data = await res.json();
+    const mp4 = (data.assets || []).find(a => a.kind === 'mp4' && a.exists);
+    if (mp4) {
+      loadVideo('/file/' + mp4.path);
+      if (previewTaskId !== taskId) {
+        setStatus('Loaded latest revision preview: ' + shortId(previewTaskId), 'done');
+      } else {
+        setStatus('Loaded: ' + shortId(taskId), 'done');
+      }
+    } else {
+      setStatus('Task done but no mp4 found.', 'done');
+    }
+  } catch (e) {
+    setStatus('Could not load assets: ' + e.message, 'error');
+  }
+}
+
+function loadVideo(url) {
+  const preview = document.getElementById('preview');
+  preview.innerHTML = '';
+  const video = document.createElement('video');
+  video.src = url;
+  video.controls = true;
+  video.autoplay = true;
+  video.style.maxWidth = '100%';
+  video.style.maxHeight = '100%';
+  video.style.borderRadius = '8px';
+  preview.appendChild(video);
+}
+
+// ── Task history sidebar ───────────────────────────────────────────────
+async function loadTasks() {
+  try {
+    const res = await fetch('/tasks');
+    const data = await res.json();
+    tasks = (data.tasks || []).map((t) => ({
+      taskId: t.task_id,
+      status: String(t.status || 'unknown').toLowerCase() === 'succeeded' ? 'done' : String(t.status || 'unknown').toLowerCase(),
+      revisionCount: Number(t.revision_count || 0),
+      createdAt: t.created_at || null,
+      latestFeedback: t.latest_feedback || '',
+      latestStyle: t.latest_style || '',
+      latestPreviewTaskId: t.latest_preview_task_id || t.task_id
+    }));
+    if (activeTaskId) {
+      const index = tasks.findIndex(t => t.taskId === activeTaskId);
+      if (index > 0) {
+        const [task] = tasks.splice(index, 1);
+        tasks.unshift(task);
+      }
+    }
+    renderTasks();
+  } catch (e) {
+    // keep default empty state
+  }
+}
+
+function scheduleTaskRefresh(delay = 5000) {
+  if (taskRefreshTimer) clearTimeout(taskRefreshTimer);
+  taskRefreshTimer = setTimeout(async () => {
+    await loadTasks();
+    scheduleTaskRefresh(delay);
+  }, delay);
+}
+
+function addTask(taskId, status) {
+  tasks = tasks.filter(t => t.taskId !== taskId);
+  tasks.unshift({ taskId, status, revisionCount: 0, createdAt: new Date().toISOString(), latestFeedback: '', latestPreviewTaskId: taskId });
+  renderTasks();
+}
+
+function updateTask(taskId, status) {
+  const index = tasks.findIndex(t => t.taskId === taskId);
+  if (index >= 0) {
+    tasks[index].status = status;
+    const [task] = tasks.splice(index, 1);
+    tasks.unshift(task);
+  }
+  renderTasks();
+}
+
+function renderTasks() {
+  const el = document.getElementById('task-list');
+  el.innerHTML = '';
+  if (!tasks.length) {
+    el.innerHTML = '<span style="font-size:11px;color:#444;padding:6px">No tasks yet</span>';
+    return;
+  }
+  tasks.forEach(({ taskId, status, revisionCount, createdAt, latestFeedback, latestStyle, latestPreviewTaskId }) => {
+    const div = document.createElement('div');
+    div.className = 'list-item' + (taskId === activeTaskId ? ' active' : '');
+    div.innerHTML = `<div style="font-weight:500;font-size:12px">Task${revisionCount ? ` · rev ${revisionCount}` : ''}${latestPreviewTaskId !== taskId ? ' · latest→rev' : ''}</div>
+      <div class="task-id">${shortId(taskId)}</div>
+      <div class="task-id">${formatTime(createdAt)}</div>
+      ${latestStyle ? `<div class="task-id" title="${escapeHtmlAttr(latestStyle)}">${truncateFeedback(latestStyle)}</div>` : ''}
+      ${latestFeedback && latestFeedback !== latestStyle ? `<div class="task-id" title="${escapeHtmlAttr(latestFeedback)}">${truncateFeedback(latestFeedback)}</div>` : ''}
+      <span class="badge ${status}">${status}</span>`;
+    div.onclick = () => loadTaskById(taskId);
+    el.appendChild(div);
+  });
+}
+
+function escapeHtmlAttr(str) {
+  return String(str || '').replace(/"/g, '&quot;');
+}
+
+async function loadTaskById(taskId) {
+  activeTaskId = taskId;
+  renderTasks();
+  const t = tasks.find(t => t.taskId === taskId);
+  try {
+    const res = await fetch('/task/' + taskId);
+    const task = await res.json();
+    const latestRevision = (task.revisions || []).at?.(-1) || (task.revisions || [])[task.revisions?.length - 1];
+    if (latestRevision?.feedback) {
+      document.getElementById('inp-feedback').value = latestRevision.feedback;
+      document.getElementById('inp-style').value = latestRevision.feedback;
+    } else {
+      const style = extractStyleFromGoal(task.goal || '');
+      if (style) document.getElementById('inp-style').value = style;
+    }
+  } catch (e) {
+    // ignore preload failures
+  }
+  if (t && t.status === 'done') {
+    await showPreview(taskId);
+    setStatus('Loaded: ' + shortId(taskId), 'done');
+  } else if (t && t.status === 'running') {
+    setStatus('Task is still running…', 'running');
+  }
+}
+
+// ── Mode switching ─────────────────────────────────────────────────────
+function switchMode(mode) {
+  ['ai', 'skill'].forEach(m => {
+    document.getElementById('tab-' + m).classList.toggle('active', m === mode);
+    document.getElementById('mode-' + m).classList.toggle('visible', m === mode);
+  });
+  dismissAsk();
+}
+
+// ── AI Prompt flow ─────────────────────────────────────────────────────
+async function runPrompt() {
+  const video = (document.getElementById('inp-video').value || '').trim();
+  const prompt = (document.getElementById('inp-prompt').value || '').trim();
+  if (!video) { setStatus('Select or upload a video first.', 'error'); return; }
+  if (!prompt) { setStatus('Tell AI what to do first.', 'error'); return; }
+
+  setAllBusy(true);
+  dismissAsk();
+  setStatus('Asking AI…', 'running');
+
+  try {
+    const res = await fetch('/run-prompt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, video }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Server error');
+
+    if (data.ask) {
+      showAskPanel(data.ask_id, data.questions);
+      setStatus('AI has a few questions before proceeding…', 'running');
+    } else {
+      const taskId = data.task_id;
+      addTask(taskId, 'running');
+      activeTaskId = taskId;
+      setStatus(`Plan generated — executing task ${shortId(taskId)}…`, 'running');
+      schedulePoll(taskId);
+    }
+  } catch (e) {
+    setStatus('Error: ' + e.message, 'error');
+    setAllBusy(false);
+  }
+}
+
+function showAskPanel(askId, questions) {
+  currentAskId = askId;
+  const panel = document.getElementById('ask-panel');
+  const container = document.getElementById('ask-questions');
+  container.innerHTML = '';
+  (questions || []).forEach((q, i) => {
+    const div = document.createElement('div');
+    div.className = 'ask-question';
+    div.innerHTML = `<label>${escapeHtml(q)}</label><input type="text" id="ask-q-${i}" placeholder="Your answer…">`;
+    container.appendChild(div);
+  });
+  panel.classList.add('visible');
+  setAllBusy(false);
+  const first = document.getElementById('ask-q-0');
+  if (first) first.focus();
+}
+
+function dismissAsk() {
+  currentAskId = null;
+  document.getElementById('ask-panel').classList.remove('visible');
+  document.getElementById('ask-questions').innerHTML = '';
+}
+
+async function submitAnswers() {
+  if (!currentAskId) return;
+  const inputs = document.querySelectorAll('#ask-questions .ask-question input');
+  const labels = document.querySelectorAll('#ask-questions .ask-question label');
+  const answers = {};
+  inputs.forEach((inp, i) => {
+    const q = labels[i] ? labels[i].textContent : `q${i}`;
+    answers[q] = inp.value.trim();
+  });
+  const emptyCount = Object.values(answers).filter(v => !v).length;
+  if (emptyCount === inputs.length) {
+    setStatus('Please answer at least one question.', 'error'); return;
+  }
+
+  setAllBusy(true);
+  setStatus('Sending answers to AI…', 'running');
+  document.getElementById('ask-submit-btn').disabled = true;
+
+  try {
+    const res = await fetch('/answer-ask/' + currentAskId, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ answers }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Server error');
+
+    if (data.ask) {
+      // AI still needs more info — show updated questions
+      showAskPanel(data.ask_id, data.questions);
+      setStatus('AI needs a bit more info…', 'running');
+    } else {
+      dismissAsk();
+      const taskId = data.task_id;
+      addTask(taskId, 'running');
+      activeTaskId = taskId;
+      setStatus(`Plan ready — executing ${shortId(taskId)}…`, 'running');
+      schedulePoll(taskId);
+    }
+  } catch (e) {
+    setStatus('Error: ' + e.message, 'error');
+    setAllBusy(false);
+  }
+}
+
+// ── Utils ──────────────────────────────────────────────────────────────
+function shortId(id) {
+  // task_20260329_120000_abcd1234 → 20260329_…1234
+  return id.replace(/^task_/, '').slice(-18);
+}
+
+function formatTime(value) {
+  if (!value) return 'time unknown';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return 'time unknown';
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function truncateFeedback(text, max = 22) {
+  const s = String(text || '').trim();
+  if (!s) return '';
+  return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
+function extractStyleFromGoal(goal) {
+  const s = String(goal || '');
+  const marker = 'with style:';
+  const idx = s.toLowerCase().indexOf(marker);
+  if (idx === -1) return '';
+  return s.slice(idx + marker.length).trim();
+}
+
+function setStatus(msg, cls) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = 'status-line ' + (cls || '');
+}
+
+function setRunBusy(busy) {
+  document.getElementById('run-btn').disabled = busy;
+  document.getElementById('revise-btn').disabled = busy;
+}
+
+function setAllBusy(busy) {
+  setRunBusy(busy);
+  const aiBtn = document.getElementById('ai-run-btn');
+  if (aiBtn) aiBtn.disabled = busy;
+  const askBtn = document.getElementById('ask-submit-btn');
+  if (askBtn) askBtn.disabled = busy;
+}
+
+function escapeHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+</script>
+</body>
+</html>

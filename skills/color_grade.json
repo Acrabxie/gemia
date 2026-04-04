@@ -1,0 +1,17 @@
+{
+  "skill_id": "color_grade",
+  "description": "Apply a preset color grade to a video.",
+  "parameters": {
+    "video": {"type": "string", "description": "Absolute path to input video"},
+    "preset": {"type": "string", "description": "warm | cool | vintage | cyberpunk"}
+  },
+  "pipeline": [
+    {
+      "id": "step_grade",
+      "type": "color_grade",
+      "params": {
+        "preset": "{{parameters.preset}}"
+      }
+    }
+  ]
+}

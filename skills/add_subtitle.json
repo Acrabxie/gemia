@@ -1,0 +1,19 @@
+{
+  "skill_id": "add_subtitle",
+  "description": "Overlay subtitle text on a video.",
+  "parameters": {
+    "video": {"type": "string", "description": "Absolute path to input video"},
+    "text": {"type": "string", "description": "Subtitle text"},
+    "duration_sec": {"type": "number", "description": "Subtitle duration in seconds"}
+  },
+  "pipeline": [
+    {
+      "id": "step_subtitle",
+      "type": "add_subtitle",
+      "params": {
+        "text": "{{parameters.text}}",
+        "duration_sec": "{{parameters.duration_sec}}"
+      }
+    }
+  ]
+}

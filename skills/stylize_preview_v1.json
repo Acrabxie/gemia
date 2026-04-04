@@ -1,0 +1,39 @@
+{
+  "skill_id": "stylize_preview_v1",
+  "description": "Extract keyframes from a video, stylize the first keyframe using AI, and compose a before/after comparison video.",
+  "parameters": {
+    "video": {
+      "type": "string",
+      "description": "Path to the input video file"
+    },
+    "style": {
+      "type": "string",
+      "description": "Natural language description of the visual style"
+    }
+  },
+  "pipeline": [
+    {
+      "id": "step_extract",
+      "type": "extract_keyframes",
+      "params": {
+        "num_keyframes": 1
+      }
+    },
+    {
+      "id": "step_stylize",
+      "type": "stylize_images",
+      "depends_on": ["step_extract"],
+      "params": {
+        "style_prompt": "{{parameters.style}}"
+      }
+    },
+    {
+      "id": "step_compose",
+      "type": "compose_preview_video",
+      "depends_on": ["step_extract", "step_stylize"],
+      "params": {
+        "output_format": "before_after_hstack"
+      }
+    }
+  ]
+}

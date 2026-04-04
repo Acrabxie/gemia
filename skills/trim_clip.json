@@ -1,0 +1,19 @@
+{
+  "skill_id": "trim_clip",
+  "description": "Trim a video to a start and end time.",
+  "parameters": {
+    "video": {"type": "string", "description": "Absolute path to input video"},
+    "start_sec": {"type": "number", "description": "Trim start time in seconds"},
+    "end_sec": {"type": "number", "description": "Trim end time in seconds"}
+  },
+  "pipeline": [
+    {
+      "id": "step_trim",
+      "type": "trim_clip",
+      "params": {
+        "start_sec": "{{parameters.start_sec}}",
+        "end_sec": "{{parameters.end_sec}}"
+      }
+    }
+  ]
+}

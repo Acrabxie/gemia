@@ -1,0 +1,16 @@
+{
+  "skill_id": "merge_clips",
+  "description": "Merge multiple video clips into one.",
+  "parameters": {
+    "videos": {"type": "array", "description": "Absolute paths to input videos"}
+  },
+  "pipeline": [
+    {
+      "id": "step_merge",
+      "type": "merge_clips",
+      "params": {
+        "videos": "{{parameters.videos}}"
+      }
+    }
+  ]
+}

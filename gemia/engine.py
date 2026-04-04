@@ -1,0 +1,212 @@
+"""Plan v2 execution engine.
+
+Executes structured plans where each step references a primitive function
+by its fully-qualified name. Handles I/O type bridging automatically:
+picture functions applied to video paths are wrapped with
+``apply_picture_op_to_video``.
+
+Usage::
+
+    from gemia.engine import PlanEngine
+    engine = PlanEngine()
+    output = engine.execute(plan_dict, "input.mp4", "output.mp4")
+"""
+from __future__ import annotations
+
+import inspect
+import json
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from gemia.registry import get_info, resolve
+
+
+class PlanEngine:
+    """Execute v2 plans that reference primitive functions directly."""
+
+    def __init__(self, root_dir: str | Path | None = None) -> None:
+        this_file = Path(__file__).resolve()
+        self.root_dir = Path(root_dir) if root_dir else this_file.parent.parent
+        self.temp_dir = self.root_dir / "temp"
+        self.outputs_dir = self.root_dir / "outputs"
+        self.tasks_dir = self.root_dir / "tasks"
+        self.plans_dir = self.root_dir / "plans"
+        for d in (self.temp_dir, self.outputs_dir, self.tasks_dir, self.plans_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+    def execute(self, plan: dict, input_path: str, output_path: str) -> str:
+        """Execute a v2 plan and return the final output path.
+
+        Args:
+            plan: Plan dict with ``version: "2.0"`` and ``steps``.
+            input_path: User's input video/audio file.
+            output_path: Desired output file path.
+
+        Returns:
+            Path to the output file.
+        """
+        bindings: dict[str, Any] = {
+            "$input": input_path,
+            "$output": output_path,
+        }
+        steps = plan.get("steps", [])
+        if not steps:
+            raise ValueError("Plan has no steps.")
+
+        for i, step in enumerate(steps):
+            step_id = step["id"]
+            fqn = step["function"]
+            args = dict(step.get("args", {}))
+            is_last = (i == len(steps) - 1)
+
+            # Resolve input reference
+            input_ref = step.get("input")
+            if input_ref is None:
+                input_ref = f"${steps[i - 1]['id']}" if i > 0 else "$input"
+            input_val = self._resolve_ref(input_ref, bindings)
+
+            # Resolve output path
+            output_ref = step.get("output")
+            if output_ref == "$output":
+                out_path = output_path
+            elif output_ref is not None and output_ref.startswith("$") and output_ref not in bindings:
+                # Self-reference like "$step_1" on step_1 — treat as auto temp
+                out_path = str(self.temp_dir / f"{step_id}_{uuid.uuid4().hex[:8]}.mp4")
+            elif output_ref is not None:
+                out_path = self._resolve_ref(output_ref, bindings)
+            elif is_last:
+                out_path = output_path
+            else:
+                out_path = str(self.temp_dir / f"{step_id}_{uuid.uuid4().hex[:8]}.mp4")
+
+            # Execute with auto-bridging
+            result = self._execute_step(fqn, args, input_val, out_path)
+            bindings[f"${step_id}"] = result
+
+        last_id = steps[-1]["id"]
+        return bindings[f"${last_id}"]
+
+    def run_with_task(self, plan: dict, input_path: str, output_path: str | None = None) -> str:
+        """Execute plan, persist as a task, return task_id."""
+        task_id = f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        if output_path is None:
+            output_path = str((self.outputs_dir / f"{task_id}_out.mp4").resolve())
+
+        # Save plan
+        plan_path = self.plans_dir / f"{task_id}_plan.json"
+        plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
+
+        # Execute
+        final_output = self.execute(plan, input_path, output_path)
+
+        # Save task
+        task = {
+            "task_id": task_id,
+            "status": "succeeded",
+            "plan_id": plan.get("plan_id", f"plan_{task_id}"),
+            "goal": plan.get("goal", ""),
+            "outputs": [final_output],
+            "created_at": datetime.now().isoformat(),
+            "version": "2.0",
+        }
+        task_path = self.tasks_dir / f"{task_id}.json"
+        task_path.write_text(json.dumps(task, ensure_ascii=False, indent=2) + "\n")
+        return task_id
+
+    # ── Internal ───────────────────────────────────────────────────────
+
+    def _resolve_ref(self, ref: str, bindings: dict[str, Any]) -> Any:
+        """Resolve a variable reference like ``$input`` or ``$step_1``."""
+        if isinstance(ref, str) and ref.startswith("$"):
+            val = bindings.get(ref)
+            if val is None:
+                raise ValueError(f"Unresolved reference: {ref}")
+            return val
+        return ref
+
+    def _execute_step(self, fqn: str, args: dict, input_val: Any, output_path: str) -> Any:
+        """Execute a single step with automatic I/O bridging."""
+        info = get_info(fqn)
+        func = info.func
+        domain = info.domain
+
+        input_is_path = isinstance(input_val, str)
+        input_is_frames = isinstance(input_val, list)
+
+        # ── Picture function on a video file → auto-wrap ──────────────
+        if domain == "picture" and input_is_path:
+            from gemia.video.frames import apply_picture_op_to_video
+            op = _make_picture_op(func, args)
+            return apply_picture_op_to_video(input_val, output_path, op=op)
+
+        # ── Picture function on frame list → @batchable handles it ────
+        if domain == "picture" and input_is_frames:
+            return func(input_val, **args)
+
+        # ── Video function on frame list → write frames first ─────────
+        if domain == "video" and input_is_frames:
+            from gemia.video.frames import frames_to_video
+            temp = str(self.temp_dir / f"frames_{uuid.uuid4().hex[:8]}.mp4")
+            frames_to_video(input_val, output_path=temp)
+            return self._call_video_func(func, info, temp, output_path, args)
+
+        # ── Video function on file path → direct call ─────────────────
+        if domain == "video" and input_is_path:
+            return self._call_video_func(func, info, input_val, output_path, args)
+
+        # ── Audio function ────────────────────────────────────────────
+        if domain == "audio":
+            return self._call_audio_func(func, info, input_val, args)
+
+        raise ValueError(f"Cannot execute {fqn}: domain={domain}, input type={type(input_val).__name__}")
+
+    def _call_video_func(self, func: Any, info: Any, input_path: str,
+                         output_path: str, args: dict) -> str:
+        """Route video functions based on their signature."""
+        sig = inspect.signature(func)
+        param_names = list(sig.parameters.keys())
+
+        # Analysis functions: func(path, **kwargs) — no output_path
+        if info.name in ("get_metadata", "detect_scenes"):
+            return func(input_path, **args)
+
+        # extract_frames: func(path, **kwargs) → list[Image]
+        if info.name == "extract_frames":
+            return func(input_path, **args)
+
+        # frames_to_video: func(frames, *, output_path, ...)
+        if info.name == "frames_to_video":
+            return func(input_path, output_path=output_path, **args)
+
+        # concat: func(paths, output_path)
+        if param_names and param_names[0] == "paths":
+            paths = input_path if isinstance(input_path, list) else [input_path]
+            return func(paths, output_path, **args)
+
+        # apply_picture_op_to_video: skip (handled by picture auto-bridge)
+        if info.name == "apply_picture_op_to_video":
+            raise ValueError("apply_picture_op_to_video should not be called directly in plans; "
+                             "use a picture function instead.")
+
+        # Standard: func(input_path, output_path, **kwargs)
+        return func(input_path, output_path, **args)
+
+    def _call_audio_func(self, func: Any, info: Any, input_val: Any, args: dict) -> Any:
+        """Route audio functions."""
+        # load: func(path, **kwargs) → (audio, sr)
+        if info.name == "load":
+            return func(input_val, **args)
+        # save: func(path, audio, **kwargs)
+        if info.name == "save":
+            return func(input_val, **args)
+        # Others: func(audio, **kwargs)
+        return func(input_val, **args)
+
+
+def _make_picture_op(func: Any, args: dict) -> Any:
+    """Create a closure for use with apply_picture_op_to_video."""
+    def op(frame: Any) -> Any:
+        return func(frame, **args)
+    return op

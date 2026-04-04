@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.*
+
+# Gemia runtime data
+inputs/
+outputs/
+temp/
+tasks/
+plans/
+skills_v2/
+frames/
+styled/
+logs/
+demo/
+notes/
+
+# Logs
+*.log
