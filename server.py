@@ -27,7 +27,7 @@ _SKILLS_DIR = _BASE_DIR / "skills"
 _STATIC_DIR = _BASE_DIR / "static"
 _INPUTS_DIR = _BASE_DIR / "inputs"
 # Directories that may be served via /file/
-_ALLOWED_ROOTS = {"outputs", "frames", "styled", "demo"}
+_ALLOWED_ROOTS = {"outputs", "frames", "styled", "demo", "inputs"}
 _TASKS_DIR = _BASE_DIR / "tasks"
 _PLANS_DIR = _BASE_DIR / "plans"
 

@@ -46,3 +46,7 @@ notes/
 
 # Logs
 *.log
+
+# PyInstaller artifacts
+*.spec
+gemia-server.spec
