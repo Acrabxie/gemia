@@ -8,10 +8,13 @@ from gemia.video.frames import extract_frames, frames_to_video, apply_picture_op
 from gemia.video.timeline import cut, concat, speed, reverse
 from gemia.video.compositing import overlay, add_audio_track
 from gemia.video.analysis import detect_scenes, get_metadata
+from gemia.video.generative import generate_video, generate_video_from_image, extend_video
 
 __all__ = [
     "extract_frames", "frames_to_video", "apply_picture_op_to_video",
     "cut", "concat", "speed", "reverse",
     "overlay", "add_audio_track",
     "detect_scenes", "get_metadata",
+    # generative (Veo 3.1)
+    "generate_video", "generate_video_from_image", "extend_video",
 ]
