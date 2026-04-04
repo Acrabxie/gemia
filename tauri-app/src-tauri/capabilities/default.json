@@ -7,9 +7,7 @@
     "shell:allow-execute",
     "shell:allow-open",
     "shell:allow-spawn",
-    "fs:default",
-    "fs:allow-read-text-file",
-    "fs:allow-write-text-file",
-    "fs:allow-mkdir"
+    "dialog:default",
+    "dialog:allow-open"
   ]
 }

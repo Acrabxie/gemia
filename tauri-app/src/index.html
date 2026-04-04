@@ -14,6 +14,7 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  user-select: none;
 }
 
 /* ── Header ── */
@@ -28,475 +29,387 @@ body {
 }
 .logo { font-size: 18px; font-weight: 700; color: #a78bfa; letter-spacing: 0.5px; }
 .status-badge {
-  font-size: 12px;
-  padding: 3px 10px;
-  border-radius: 20px;
-  background: #2a2a2a;
-  color: #888;
+  font-size: 12px; padding: 3px 10px; border-radius: 20px;
+  background: #2a2a2a; color: #888;
   -webkit-app-region: no-drag;
 }
-.status-badge.planning { background: #1e3a5f; color: #60a5fa; }
-.status-badge.executing { background: #1e3a2a; color: #4ade80; }
-.status-badge.done { background: #1e2a1e; color: #86efac; }
-.status-badge.error { background: #3a1e1e; color: #f87171; }
+.status-badge.planning  { background: #1e3a5f; color: #60a5fa; }
+.status-badge.executing { background: #1a2e1a; color: #4ade80; }
+.status-badge.done      { background: #162616; color: #86efac; }
+.status-badge.error     { background: #2e1a1a; color: #f87171; }
 
-/* ── Main layout ── */
-.main {
-  display: flex;
-  flex: 1;
-  overflow: hidden;
-  gap: 0;
-}
+/* ── Layout ── */
+.main { display: flex; flex: 1; overflow: hidden; }
 
 /* ── Left panel ── */
 .left-panel {
-  width: 340px;
+  width: 320px; min-width: 260px;
   border-right: 1px solid #2a2a2a;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
+  display: flex; flex-direction: column; overflow: hidden;
 }
 
 /* ── Upload zone ── */
 .upload-zone {
-  border: 2px dashed #333;
-  border-radius: 10px;
-  margin: 16px;
-  padding: 24px 16px;
-  text-align: center;
-  cursor: pointer;
-  transition: all 0.2s;
-  min-height: 120px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
+  border: 2px dashed #333; border-radius: 10px;
+  margin: 16px; padding: 20px 12px;
+  text-align: center; cursor: pointer;
+  transition: all 0.2s; min-height: 110px;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 6px;
+  -webkit-app-region: no-drag;
 }
-.upload-zone:hover, .upload-zone.drag-over {
-  border-color: #a78bfa;
-  background: #1a1428;
-}
-.upload-zone.has-file { border-color: #4ade80; border-style: solid; background: #0f1f0f; }
-.upload-icon { font-size: 28px; }
-.upload-label { font-size: 14px; color: #999; line-height: 1.4; }
-.upload-label strong { color: #ccc; display: block; }
-.upload-file-name { font-size: 12px; color: #4ade80; word-break: break-all; padding: 0 8px; }
-#file-input { display: none; }
+.upload-zone:hover { border-color: #a78bfa; background: #1a1428; }
+.upload-zone.has-file { border-color: #4ade80; border-style: solid; background: #0f1a0f; }
+.upload-icon { font-size: 26px; }
+.upload-hint { font-size: 13px; color: #999; line-height: 1.4; }
+.upload-hint strong { color: #ddd; display: block; margin-bottom: 2px; }
+.file-name-display { font-size: 11px; color: #4ade80; padding: 0 16px 8px; word-break: break-all; }
 
-/* ── Prompt area ── */
-.prompt-area {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 0 16px 16px;
-  flex: 1;
-}
-.prompt-label { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
-textarea#prompt {
-  flex: 1;
-  background: #1a1a1a;
-  border: 1px solid #333;
-  border-radius: 8px;
-  color: #e0e0e0;
-  font-size: 14px;
-  padding: 12px;
-  resize: none;
-  min-height: 100px;
-  font-family: inherit;
-  line-height: 1.5;
-}
-textarea#prompt:focus { outline: none; border-color: #a78bfa; }
-textarea#prompt::placeholder { color: #555; }
-.run-btn {
-  background: #a78bfa;
-  color: white;
-  border: none;
-  border-radius: 8px;
-  padding: 12px;
-  font-size: 15px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.2s;
-  width: 100%;
-}
-.run-btn:hover { background: #8b5cf6; }
-.run-btn:disabled { background: #444; color: #888; cursor: not-allowed; }
-
-/* ── Right panel — video preview ── */
-.right-panel {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  background: #0a0a0a;
-  position: relative;
-}
-.preview-placeholder {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  color: #444;
-}
-.preview-placeholder .icon { font-size: 48px; }
-.preview-placeholder p { font-size: 14px; }
-#video-preview {
-  max-width: 100%;
-  max-height: 100%;
-  border-radius: 6px;
-  display: none;
-}
-.progress-overlay {
-  position: absolute;
-  inset: 0;
-  background: rgba(0,0,0,0.7);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  display: none;
-}
-.spinner {
-  width: 40px; height: 40px;
-  border: 3px solid #333;
-  border-top-color: #a78bfa;
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-@keyframes spin { to { transform: rotate(360deg); } }
-.progress-text { font-size: 16px; color: #e0e0e0; }
-.output-path { font-size: 11px; color: #888; padding: 6px 16px; text-align: center; word-break: break-all; }
-
-/* ── Modal ── */
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.85);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-}
-.modal {
-  background: #1a1a1a;
-  border: 1px solid #333;
-  border-radius: 16px;
-  padding: 32px;
-  width: 420px;
-  max-width: 90vw;
-}
-.modal h2 { font-size: 20px; font-weight: 700; margin-bottom: 8px; color: #a78bfa; }
-.modal p { font-size: 14px; color: #999; margin-bottom: 24px; line-height: 1.5; }
-.form-group { margin-bottom: 16px; }
-.form-group label { display: block; font-size: 13px; color: #ccc; margin-bottom: 6px; }
-.form-group input {
-  width: 100%;
-  background: #111;
-  border: 1px solid #333;
-  border-radius: 8px;
-  color: #e0e0e0;
-  font-size: 14px;
-  padding: 10px 12px;
-}
-.form-group input:focus { outline: none; border-color: #a78bfa; }
-.form-hint { font-size: 12px; color: #666; margin-top: 4px; }
-.modal-actions { display: flex; justify-content: flex-end; margin-top: 24px; }
-.save-btn {
-  background: #a78bfa;
-  color: white;
-  border: none;
-  border-radius: 8px;
-  padding: 10px 24px;
-  font-size: 15px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.save-btn:hover { background: #8b5cf6; }
-
-/* ── Ask dialog ── */
+/* ── Ask area ── */
 .ask-area {
-  background: #1a1428;
-  border: 1px solid #4a3f7a;
-  border-radius: 8px;
-  padding: 12px;
-  margin: 0 16px 16px;
-  display: none;
+  background: #1a1428; border: 1px solid #4a3f7a; border-radius: 8px;
+  padding: 12px; margin: 0 16px 12px; display: none;
 }
 .ask-area.visible { display: block; }
-.ask-title { font-size: 12px; color: #a78bfa; margin-bottom: 8px; font-weight: 600; }
+.ask-title { font-size: 11px; color: #a78bfa; margin-bottom: 8px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
 .ask-questions { font-size: 13px; color: #ccc; margin-bottom: 10px; line-height: 1.6; }
 textarea#ask-answer {
-  width: 100%;
-  background: #111;
-  border: 1px solid #4a3f7a;
-  border-radius: 6px;
-  color: #e0e0e0;
-  font-size: 13px;
-  padding: 8px;
-  resize: none;
-  height: 60px;
-  font-family: inherit;
+  width: 100%; background: #111; border: 1px solid #4a3f7a;
+  border-radius: 6px; color: #e0e0e0; font-size: 13px;
+  padding: 8px; resize: none; height: 56px; font-family: inherit;
 }
 textarea#ask-answer:focus { outline: none; border-color: #a78bfa; }
 .ask-submit {
-  background: #4a3f7a;
-  color: white;
-  border: none;
-  border-radius: 6px;
-  padding: 7px 14px;
-  font-size: 13px;
-  cursor: pointer;
-  margin-top: 8px;
-  float: right;
+  float: right; margin-top: 8px;
+  background: #4a3f7a; color: white; border: none;
+  border-radius: 6px; padding: 6px 14px; font-size: 13px; cursor: pointer;
 }
 .ask-submit:hover { background: #5b4e8c; }
+
+/* ── Prompt area ── */
+.prompt-area {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 0 16px 16px; flex: 1;
+}
+.prompt-label { font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; }
+textarea#prompt {
+  flex: 1; background: #1a1a1a; border: 1px solid #333; border-radius: 8px;
+  color: #e0e0e0; font-size: 14px; padding: 12px; resize: none;
+  min-height: 90px; font-family: inherit; line-height: 1.5;
+  -webkit-app-region: no-drag;
+}
+textarea#prompt:focus { outline: none; border-color: #a78bfa; }
+textarea#prompt::placeholder { color: #444; }
+.run-btn {
+  background: #a78bfa; color: white; border: none; border-radius: 8px;
+  padding: 11px; font-size: 14px; font-weight: 600; cursor: pointer;
+  transition: background 0.15s; -webkit-app-region: no-drag;
+}
+.run-btn:hover:not(:disabled) { background: #8b5cf6; }
+.run-btn:disabled { background: #2a2a2a; color: #555; cursor: not-allowed; }
+
+/* ── Right panel ── */
+.right-panel {
+  flex: 1; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  background: #080808; position: relative; overflow: hidden;
+}
+.preview-placeholder {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 10px; color: #333; text-align: center; padding: 20px;
+}
+.preview-placeholder .icon { font-size: 52px; opacity: 0.4; }
+.preview-placeholder p { font-size: 13px; line-height: 1.5; }
+#video-preview {
+  max-width: 100%; max-height: 100%; border-radius: 4px; display: none;
+}
+.progress-overlay {
+  position: absolute; inset: 0; background: rgba(0,0,0,0.75);
+  display: none; flex-direction: column;
+  align-items: center; justify-content: center; gap: 14px;
+}
+.spinner {
+  width: 38px; height: 38px;
+  border: 3px solid #2a2a2a; border-top-color: #a78bfa;
+  border-radius: 50%; animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.progress-text { font-size: 15px; color: #ddd; }
+.output-bar {
+  position: absolute; bottom: 0; left: 0; right: 0;
+  background: #111; border-top: 1px solid #222;
+  padding: 8px 14px; display: flex; align-items: center; gap: 10px;
+  display: none;
+}
+.output-bar.visible { display: flex; }
+.output-path-text { font-size: 11px; color: #666; flex: 1; word-break: break-all; }
+.reveal-btn {
+  background: #222; color: #aaa; border: 1px solid #333;
+  border-radius: 6px; padding: 5px 12px; font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.reveal-btn:hover { background: #2a2a2a; color: #ddd; }
+
+/* ── Modal ── */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.88);
+  display: none; align-items: center; justify-content: center; z-index: 100;
+}
+.modal-overlay.visible { display: flex; }
+.modal {
+  background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 14px;
+  padding: 28px; width: 400px; max-width: 92vw;
+}
+.modal h2 { font-size: 19px; font-weight: 700; margin-bottom: 6px; color: #a78bfa; }
+.modal p { font-size: 13px; color: #888; margin-bottom: 22px; line-height: 1.55; }
+.form-group { margin-bottom: 14px; }
+.form-group label { display: block; font-size: 12px; color: #ccc; margin-bottom: 5px; }
+.form-group input {
+  width: 100%; background: #111; border: 1px solid #2a2a2a;
+  border-radius: 7px; color: #e0e0e0; font-size: 14px; padding: 9px 11px;
+}
+.form-group input:focus { outline: none; border-color: #a78bfa; }
+.form-hint { font-size: 11px; color: #555; margin-top: 4px; }
+.modal-actions { display: flex; justify-content: flex-end; margin-top: 22px; }
+.save-btn {
+  background: #a78bfa; color: white; border: none;
+  border-radius: 8px; padding: 9px 22px; font-size: 14px; font-weight: 600; cursor: pointer;
+}
+.save-btn:hover { background: #8b5cf6; }
 </style>
 </head>
 <body>
 
-<!-- Header -->
-<div class="header">
-  <div class="logo">Gemia</div>
-  <div class="status-badge" id="status-badge">就绪</div>
-</div>
-
-<!-- API Key Modal -->
-<div class="modal-overlay" id="api-modal" style="display:none">
+<!-- First-run modal -->
+<div class="modal-overlay" id="api-modal">
   <div class="modal">
     <h2>欢迎使用 Gemia</h2>
-    <p>首次使用需要配置 API Key。Gemia 通过 OpenRouter 连接 Gemini，处理您的视频创意需求。</p>
+    <p>首次使用需要配置 API Key。Gemia 通过 OpenRouter 连接 Gemini 规划视频处理流程。</p>
     <div class="form-group">
       <label>OpenRouter API Key <span style="color:#f87171">*</span></label>
       <input type="password" id="or-key" placeholder="sk-or-..." autocomplete="off">
-      <div class="form-hint">必填。用于 AI 规划（Gemini via OpenRouter）</div>
+      <div class="form-hint">必填 · 用于 AI 规划（Gemini via OpenRouter）</div>
     </div>
     <div class="form-group">
-      <label>Gemini API Key <span style="color:#888">（可选）</span></label>
+      <label>Gemini API Key <span style="color:#555">（可选）</span></label>
       <input type="password" id="gemini-key" placeholder="AIza..." autocomplete="off">
-      <div class="form-hint">用于 Nano Banana 图像生成，留空则跳过</div>
+      <div class="form-hint">可选 · 用于 Nano Banana 图像生成</div>
     </div>
     <div class="modal-actions">
-      <button class="save-btn" id="save-config-btn">保存并开始</button>
+      <button class="save-btn" id="save-config-btn">保存并继续</button>
     </div>
   </div>
 </div>
 
-<!-- Main layout -->
+<!-- Header -->
+<div class="header">
+  <div class="logo">Gemia</div>
+  <div class="status-badge" id="status-badge">启动中...</div>
+</div>
+
+<!-- Main -->
 <div class="main">
+
   <!-- Left panel -->
   <div class="left-panel">
+
     <!-- Upload zone -->
     <div class="upload-zone" id="upload-zone">
       <div class="upload-icon">🎬</div>
-      <div class="upload-label">
-        <strong>拖拽视频到这里</strong>
-        或点击选择文件
+      <div class="upload-hint" id="upload-hint">
+        <strong>选择视频文件</strong>点击浏览
       </div>
-      <input type="file" id="file-input" accept="video/mp4,video/*">
     </div>
-    <div class="upload-file-name" id="file-name-display"></div>
+    <div class="file-name-display" id="file-name-display"></div>
 
-    <!-- Ask area (shown when AI needs clarification) -->
+    <!-- Ask area -->
     <div class="ask-area" id="ask-area">
       <div class="ask-title">AI 需要更多信息</div>
       <div class="ask-questions" id="ask-questions"></div>
-      <textarea id="ask-answer" placeholder="输入您的回答..."></textarea>
+      <textarea id="ask-answer" placeholder="输入回答..."></textarea>
       <button class="ask-submit" id="ask-submit-btn">发送</button>
       <div style="clear:both"></div>
     </div>
 
-    <!-- Prompt area -->
+    <!-- Prompt + run -->
     <div class="prompt-area">
-      <div class="prompt-label">告诉 AI 你想做什么</div>
-      <textarea id="prompt" placeholder="例如：&#10;赛博朋克风格&#10;裁前3秒，加速2倍，调色 vintage&#10;把每一帧做成水墨画风格"></textarea>
+      <div class="prompt-label">描述你想做什么</div>
+      <textarea id="prompt" placeholder="例如：&#10;赛博朋克风格&#10;裁前3秒，加速2倍，调色 vintage&#10;把每帧做成水墨画风格"></textarea>
       <button class="run-btn" id="run-btn" disabled>▶ 开始处理</button>
     </div>
+
   </div>
 
-  <!-- Right panel — video preview -->
+  <!-- Right panel -->
   <div class="right-panel">
     <div class="preview-placeholder" id="preview-placeholder">
       <div class="icon">◻</div>
-      <p>视频预览</p>
-      <p style="font-size:12px">上传视频并输入指令后，处理结果将在这里显示</p>
+      <p>上传视频后在这里预览<br>处理结果将自动显示</p>
     </div>
     <video id="video-preview" controls playsinline></video>
     <div class="progress-overlay" id="progress-overlay">
       <div class="spinner"></div>
       <div class="progress-text" id="progress-text">处理中...</div>
     </div>
-    <div class="output-path" id="output-path"></div>
+    <div class="output-bar" id="output-bar">
+      <div class="output-path-text" id="output-path-text"></div>
+      <button class="reveal-btn" id="reveal-btn">在 Finder 中显示</button>
+    </div>
   </div>
+
 </div>
 
 <script>
-const API = 'http://127.0.0.1:7788';
+// ── Tauri invoke helper ────────────────────────────────────────────────
+const invoke = (...args) => window.__TAURI__.core.invoke(...args);
+
+// ── State ─────────────────────────────────────────────────────────────
 let uploadedVideoPath = null;
-let currentTaskId = null;
 let pollInterval = null;
 let pendingAskId = null;
+let lastOutputPath = null;
 
-// ── Helpers ────────────────────────────────────────────────────────────
-
-function setStatus(text, cls) {
-  const badge = document.getElementById('status-badge');
-  badge.textContent = text;
-  badge.className = 'status-badge' + (cls ? ' ' + cls : '');
+// ── Status helpers ─────────────────────────────────────────────────────
+function setStatus(text, cls = '') {
+  const b = document.getElementById('status-badge');
+  b.textContent = text;
+  b.className = 'status-badge' + (cls ? ' ' + cls : '');
 }
 
-function setProgress(visible, text) {
-  const overlay = document.getElementById('progress-overlay');
-  overlay.style.display = visible ? 'flex' : 'none';
+function setProgress(on, text = '') {
+  const el = document.getElementById('progress-overlay');
+  el.style.display = on ? 'flex' : 'none';
   if (text) document.getElementById('progress-text').textContent = text;
 }
 
-function showVideo(url) {
-  const video = document.getElementById('video-preview');
-  const placeholder = document.getElementById('preview-placeholder');
-  video.src = url;
-  video.style.display = 'block';
-  placeholder.style.display = 'none';
-  video.load();
-  video.play().catch(function() {});
-}
-
 function updateRunBtn() {
-  const btn = document.getElementById('run-btn');
-  const hasVideo = !!uploadedVideoPath;
-  const hasPrompt = document.getElementById('prompt').value.trim().length > 0;
-  btn.disabled = !hasVideo || !hasPrompt;
+  document.getElementById('run-btn').disabled =
+    !uploadedVideoPath || !document.getElementById('prompt').value.trim();
 }
 
-// ── API Key check ──────────────────────────────────────────────────────
+// ── API call via Rust (bypasses system proxy) ──────────────────────────
+async function api(method, path, body = null) {
+  const raw = await invoke('api_call', {
+    method,
+    path,
+    body: body ? JSON.stringify(body) : null,
+  });
+  return { ok: raw.status < 400, status: raw.status, data: JSON.parse(raw.body) };
+}
 
-async function checkConfig() {
-  if (window.__TAURI__) {
-    try {
-      const { invoke } = window.__TAURI__.core;
-      const exists = await invoke('config_exists');
-      if (!exists) {
-        document.getElementById('api-modal').style.display = 'flex';
-      } else {
-        waitForServer();
-      }
-      return;
-    } catch(e) {
-      console.warn('Tauri invoke failed:', e);
-    }
+// ── Init: config check → wait for server ──────────────────────────────
+async function init() {
+  const exists = await invoke('config_exists');
+  if (!exists) {
+    document.getElementById('api-modal').classList.add('visible');
+    return;
   }
-  waitForServer();
+  await waitForServer();
 }
 
-async function saveConfig() {
-  const orKey = document.getElementById('or-key').value.trim();
-  if (!orKey) { alert('请输入 OpenRouter API Key'); return; }
-  const geminiKey = document.getElementById('gemini-key').value.trim();
-
-  if (window.__TAURI__) {
-    try {
-      const { invoke } = window.__TAURI__.core;
-      await invoke('save_config', { openrouterKey: orKey, geminiKey: geminiKey });
-    } catch(e) {
-      alert('保存失败: ' + e);
-      return;
-    }
-  } else {
-    console.log('Dev mode: config not saved to file');
-  }
-  document.getElementById('api-modal').style.display = 'none';
-  waitForServer();
-}
-
-async function waitForServer(attempts) {
-  if (attempts === undefined) attempts = 30;
+async function waitForServer(attempts = 40) {
   for (let i = 0; i < attempts; i++) {
     try {
-      await fetch(API + '/skills', { signal: AbortSignal.timeout(1000) });
-      setStatus('就绪');
-      return;
-    } catch(e) {
-      await new Promise(function(r) { setTimeout(r, 500); });
-      if (i === 0) setStatus('正在启动服务...');
-    }
+      const r = await invoke('api_call', { method: 'GET', path: '/skills', body: null });
+      if (r.status < 500) { setStatus('就绪'); return; }
+    } catch (e) { /* keep waiting */ }
+    await sleep(500);
+    if (i === 1) setStatus('等待服务启动...');
   }
   setStatus('服务启动失败', 'error');
 }
 
-// ── File upload ────────────────────────────────────────────────────────
+// ── Config save ────────────────────────────────────────────────────────
+async function saveConfig() {
+  const orKey = document.getElementById('or-key').value.trim();
+  if (!orKey) { alert('请输入 OpenRouter API Key'); return; }
+  const geminiKey = document.getElementById('gemini-key').value.trim();
+  await invoke('save_config', { openrouterKey: orKey, geminiKey });
+  document.getElementById('api-modal').classList.remove('visible');
+  await waitForServer();
+}
 
-async function handleFileSelect(file) {
-  if (!file) return;
-  setStatus('上传中...');
+// ── File selection via Tauri dialog ───────────────────────────────────
+async function pickFile() {
+  const { open } = window.__TAURI__.dialog;
+  const path = await open({
+    multiple: false,
+    filters: [{ name: 'Video', extensions: ['mp4', 'mov', 'avi', 'mkv'] }],
+  });
+  if (!path) return;
+  await handleFilePath(path);
+}
+
+async function handleFilePath(filePath) {
+  setStatus('上传中...', '');
   const zone = document.getElementById('upload-zone');
   zone.classList.remove('has-file');
 
+  const result = await invoke('upload_video', { srcPath: filePath });
+  const data = JSON.parse(result.body);
+
+  if (result.status >= 400) {
+    setStatus('上传失败: ' + (data.error || ''), 'error');
+    return;
+  }
+
+  uploadedVideoPath = data.path;
+  const fname = filePath.split('/').pop();
+  document.getElementById('file-name-display').textContent = '📎 ' + fname;
+  document.getElementById('upload-hint').innerHTML = `<strong>${fname}</strong>`;
+  zone.classList.add('has-file');
+  setStatus('就绪');
+  updateRunBtn();
+
+  // Preview original video
+  showVideoFromServerPath('inputs/' + data.name);
+}
+
+// ── Video preview via Rust (no proxy) ─────────────────────────────────
+async function showVideoFromServerPath(relPath) {
   try {
-    const resp = await fetch(API + '/upload-video', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/octet-stream',
-        'X-Filename': file.name,
-        'Content-Length': String(file.size),
-      },
-      body: file,
-    });
-    const data = await resp.json();
-    if (!resp.ok) { setStatus('上传失败: ' + (data.error || ''), 'error'); return; }
-
-    uploadedVideoPath = data.path;
-    document.getElementById('file-name-display').textContent = '📎 ' + data.name;
-    zone.classList.add('has-file');
-    zone.querySelector('.upload-label strong').textContent = data.name;
-    setStatus('就绪');
-    updateRunBtn();
-
-    showVideo(API + '/file/inputs/' + data.name);
-  } catch(e) {
-    setStatus('上传失败: ' + e.message, 'error');
+    const b64 = await invoke('fetch_video_b64', { serverRelPath: relPath });
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const blob = new Blob([bytes], { type: 'video/mp4' });
+    const url = URL.createObjectURL(blob);
+    const video = document.getElementById('video-preview');
+    video.src = url;
+    video.style.display = 'block';
+    document.getElementById('preview-placeholder').style.display = 'none';
+    video.load();
+  } catch (e) {
+    console.warn('Video preview failed:', e);
   }
 }
 
 // ── Run prompt ─────────────────────────────────────────────────────────
-
 async function runPrompt() {
   const prompt = document.getElementById('prompt').value.trim();
   if (!prompt || !uploadedVideoPath) return;
-
   stopPolling();
   hideAskArea();
   setProgress(true, '正在规划...');
   setStatus('规划中', 'planning');
   document.getElementById('run-btn').disabled = true;
-  document.getElementById('output-path').textContent = '';
+  document.getElementById('output-bar').classList.remove('visible');
 
   try {
-    const resp = await fetch(API + '/run-prompt', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: prompt, video: uploadedVideoPath }),
-    });
-    const data = await resp.json();
+    const r = await api('POST', '/run-prompt', { prompt, video: uploadedVideoPath });
 
-    if (data.ask) {
+    if (r.data.ask) {
       setProgress(false);
-      setStatus('需要确认');
-      showAskArea(data.questions, data.ask_id);
+      setStatus('需要确认', '');
+      showAskArea(r.data.questions, r.data.ask_id);
       document.getElementById('run-btn').disabled = false;
       return;
     }
+    if (!r.ok || !r.data.task_id) throw new Error(r.data.error || '服务器错误');
 
-    if (!resp.ok || !data.task_id) {
-      throw new Error(data.error || '服务器错误');
-    }
-
-    currentTaskId = data.task_id;
     setProgress(true, '正在执行...');
     setStatus('执行中', 'executing');
-    startPolling(data.task_id);
-  } catch(e) {
+    startPolling(r.data.task_id);
+  } catch (e) {
     setProgress(false);
     setStatus('错误: ' + e.message, 'error');
     document.getElementById('run-btn').disabled = false;
@@ -504,14 +417,12 @@ async function runPrompt() {
 }
 
 // ── Ask / answer ───────────────────────────────────────────────────────
-
 function showAskArea(questions, askId) {
   pendingAskId = askId;
-  const area = document.getElementById('ask-area');
-  const qDiv = document.getElementById('ask-questions');
-  qDiv.innerHTML = questions.map(function(q, i) { return '<div>' + (i+1) + '. ' + q + '</div>'; }).join('');
+  document.getElementById('ask-questions').innerHTML =
+    questions.map((q, i) => `<div>${i + 1}. ${q}</div>`).join('');
   document.getElementById('ask-answer').value = '';
-  area.classList.add('visible');
+  document.getElementById('ask-area').classList.add('visible');
 }
 
 function hideAskArea() {
@@ -523,43 +434,32 @@ async function submitAskAnswer() {
   if (!pendingAskId) return;
   const answer = document.getElementById('ask-answer').value.trim();
   if (!answer) return;
-
   hideAskArea();
   setProgress(true, '正在规划...');
   setStatus('规划中', 'planning');
 
   try {
-    const resp = await fetch(API + '/answer-ask/' + pendingAskId, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ answers: { answer: answer } }),
-    });
-    const data = await resp.json();
-
-    if (data.ask) {
+    const r = await api('POST', '/answer-ask/' + pendingAskId, { answers: { answer } });
+    if (r.data.ask) {
       setProgress(false);
-      setStatus('需要确认');
-      showAskArea(data.questions, data.ask_id);
+      setStatus('需要确认', '');
+      showAskArea(r.data.questions, r.data.ask_id);
       return;
     }
-
-    if (!resp.ok || !data.task_id) throw new Error(data.error || '服务器错误');
-
-    currentTaskId = data.task_id;
+    if (!r.ok || !r.data.task_id) throw new Error(r.data.error || '服务器错误');
     setProgress(true, '正在执行...');
     setStatus('执行中', 'executing');
-    startPolling(data.task_id);
-  } catch(e) {
+    startPolling(r.data.task_id);
+  } catch (e) {
     setProgress(false);
     setStatus('错误: ' + e.message, 'error');
     document.getElementById('run-btn').disabled = false;
   }
 }
 
-// ── Task polling ───────────────────────────────────────────────────────
-
+// ── Polling ────────────────────────────────────────────────────────────
 function startPolling(taskId) {
-  pollInterval = setInterval(function() { pollTask(taskId); }, 2000);
+  pollInterval = setInterval(() => pollTask(taskId), 2000);
 }
 
 function stopPolling() {
@@ -568,9 +468,8 @@ function stopPolling() {
 
 async function pollTask(taskId) {
   try {
-    const resp = await fetch(API + '/task/' + taskId);
-    const task = await resp.json();
-    const status = task.status;
+    const r = await api('GET', '/task/' + taskId);
+    const { status, outputs } = r.data;
 
     if (status === 'succeeded') {
       stopPolling();
@@ -578,12 +477,12 @@ async function pollTask(taskId) {
       setStatus('完成 ✓', 'done');
       document.getElementById('run-btn').disabled = false;
 
-      const outputs = task.outputs || [];
-      if (outputs.length > 0) {
-        const outPath = outputs[0];
-        document.getElementById('output-path').textContent = '输出: ' + outPath;
-        const filename = outPath.split('/').pop();
-        showVideo(API + '/file/outputs/' + filename);
+      if (outputs && outputs.length > 0) {
+        lastOutputPath = outputs[0];
+        const filename = lastOutputPath.split('/').pop();
+        document.getElementById('output-path-text').textContent = lastOutputPath;
+        document.getElementById('output-bar').classList.add('visible');
+        showVideoFromServerPath('outputs/' + filename);
       }
     } else if (status === 'failed') {
       stopPolling();
@@ -591,50 +490,33 @@ async function pollTask(taskId) {
       setStatus('失败', 'error');
       document.getElementById('run-btn').disabled = false;
     }
-  } catch(e) {
-    console.error('Poll error:', e);
-  }
+  } catch (e) { console.error('Poll error:', e); }
 }
 
-// ── Event listeners ────────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-document.getElementById('upload-zone').addEventListener('click', function() {
-  document.getElementById('file-input').click();
-});
-
-document.getElementById('file-input').addEventListener('change', function(e) {
-  handleFileSelect(e.target.files[0]);
-});
-
-document.getElementById('upload-zone').addEventListener('dragover', function(e) {
-  e.preventDefault();
-  e.currentTarget.classList.add('drag-over');
-});
-document.getElementById('upload-zone').addEventListener('dragleave', function(e) {
-  e.currentTarget.classList.remove('drag-over');
-});
-document.getElementById('upload-zone').addEventListener('drop', function(e) {
-  e.preventDefault();
-  e.currentTarget.classList.remove('drag-over');
-  const file = e.dataTransfer.files[0];
-  if (file) handleFileSelect(file);
-});
-
-document.getElementById('prompt').addEventListener('input', updateRunBtn);
-document.getElementById('run-btn').addEventListener('click', runPrompt);
+// ── Events ────────────────────────────────────────────────────────────
+document.getElementById('upload-zone').addEventListener('click', pickFile);
 document.getElementById('save-config-btn').addEventListener('click', saveConfig);
+document.getElementById('run-btn').addEventListener('click', runPrompt);
 document.getElementById('ask-submit-btn').addEventListener('click', submitAskAnswer);
 
-document.getElementById('ask-answer').addEventListener('keydown', function(e) {
+document.getElementById('ask-answer').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitAskAnswer(); }
 });
 
-document.getElementById('prompt').addEventListener('keydown', function(e) {
-  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) runPrompt();
+document.getElementById('prompt').addEventListener('input', updateRunBtn);
+document.getElementById('prompt').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && e.metaKey) runPrompt();
 });
 
-// ── Init ───────────────────────────────────────────────────────────────
-checkConfig();
+document.getElementById('reveal-btn').addEventListener('click', () => {
+  if (lastOutputPath) invoke('reveal_in_finder', { path: lastOutputPath });
+});
+
+// ── Boot ──────────────────────────────────────────────────────────────
+init();
 </script>
 </body>
 </html>
