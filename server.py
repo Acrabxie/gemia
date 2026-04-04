@@ -272,6 +272,9 @@ class _Handler(BaseHTTPRequestHandler):
         if route == "/config":
             # Save API keys to ~/.gemia/config.json and reload into env
             try:
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length else b"{}"
+                body = json.loads(raw)
                 cfg_dir = _CONFIG_PATH.parent
                 cfg_dir.mkdir(parents=True, exist_ok=True)
                 existing = {}
@@ -280,10 +283,10 @@ class _Handler(BaseHTTPRequestHandler):
                         existing = json.loads(_CONFIG_PATH.read_text())
                     except Exception:
                         pass
-                if key := payload.get("openrouter_api_key", "").strip():
+                if key := body.get("openrouter_api_key", "").strip():
                     existing["openrouter_api_key"] = key
                     os.environ["OPENROUTER_API_KEY"] = key
-                if key := payload.get("gemini_api_key", "").strip():
+                if key := body.get("gemini_api_key", "").strip():
                     existing["gemini_api_key"] = key
                     os.environ["GEMINI_API_KEY"] = key
                 _CONFIG_PATH.write_text(json.dumps(existing, indent=2, ensure_ascii=False))
