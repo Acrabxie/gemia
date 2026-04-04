@@ -10,7 +10,7 @@ Codex brought AI into the programmer's workflow. Gemia does the same for creativ
 
 ### 1. Primitive API
 
-45+ pure Python functions across three domains — color grading, blur, trim, speed, EQ, and more. Each function has a clear signature and docstring. The AI reads these docstrings to understand what's available.
+55+ pure Python functions across three domains — color grading, blur, trim, speed, EQ, and more. Each function has a clear signature and docstring. The AI reads these docstrings to understand what's available.
 
 ```
 gemia.picture.color.color_grade(image, preset="cyberpunk")
@@ -19,6 +19,49 @@ gemia.audio.frequency.eq(audio, bands={...})
 ```
 
 Picture functions automatically work on video — the engine extracts frames, applies the operation per-frame, and re-encodes with original audio. The AI doesn't need to know this; it just picks the right function.
+
+## Nano Banana — AI Image Generation
+
+Gemia integrates Gemini image generation as native primitives. The AI planner can call these the same way it calls any other primitive.
+
+| Function | Description |
+|----------|-------------|
+| `generate_image(prompt, aspect_ratio, style)` | Text → image |
+| `edit_image(image, instruction)` | Edit a frame with natural language |
+| `style_transfer(image, style_prompt)` | Apply a visual style to each frame |
+| `blend_images(image_a, img_b_path, prompt)` | Blend two images with AI guidance |
+
+When applied to a video, `style_transfer` and `edit_image` are automatically applied per-frame (same auto-bridge as other picture primitives).
+
+Requires `GEMINI_API_KEY` (preferred) or `OPENROUTER_API_KEY`.
+
+### Example
+
+```bash
+python3 -m gemia run --video input.mp4 --prompt "把每一帧做成赛博朋克风格"
+```
+
+---
+
+## Veo 3.1 — AI Video Generation
+
+Generate and extend video clips with Veo 3.1 via laozhang.ai.
+
+| Function | Description |
+|----------|-------------|
+| `generate_video(prompt, duration, aspect_ratio)` | Text → video |
+| `generate_video_from_image(image_path, prompt, duration)` | Image → video |
+| `extend_video(video_path, prompt, duration)` | Extend video end |
+
+Requires `LAOZHANG_API_KEY`.
+
+### Example
+
+```bash
+python3 -m gemia run --video input.mp4 --prompt "给结尾生成3秒延伸镜头"
+```
+
+---
 
 ### 2. Skills
 
@@ -29,6 +72,20 @@ run → save-skill → run-skill → done
 ```
 
 Skills are JSON templates with `$input` / `$output` variable binding. Concrete paths are stripped; the pipeline is portable.
+
+### Parameterized Skills
+
+Skills now record which models were used and expose adjustable parameters:
+
+```json
+{
+  "name": "赛博朋克调色",
+  "models_used": ["opencv", "nano_banana_flash"],
+  "parameters": [
+    {"step_id": "step_1", "arg": "preset", "type": "str", "current_value": "cyberpunk"}
+  ]
+}
+```
 
 ### 3. Orchestrator
 
@@ -155,6 +212,8 @@ python3 server.py    # http://127.0.0.1:8000
 | `gemia.video.timeline` | 4 | `cut`, `concat`, `speed`, `reverse` |
 | `gemia.video.compositing` | 2 | `overlay`, `add_audio_track` |
 | `gemia.video.analysis` | 2 | `get_metadata`, `detect_scenes` |
+| `gemia.picture.generative` | 4 | `generate_image`, `style_transfer`, `edit_image`, `blend_images` |
+| `gemia.video.generative` | 3 | `generate_video`, `generate_video_from_image`, `extend_video` |
 
 ---
 
@@ -174,10 +233,12 @@ User prompt
 └──────────┬───────────┘
            │
            ▼
-┌──────────────────────────────────────────────┐
-│  gemia.picture    gemia.audio    gemia.video  │
-│  (OpenCV/numpy)   (librosa)      (ffmpeg)     │
-└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  gemia.picture    gemia.audio    gemia.video              │
+│  (OpenCV/numpy)   (librosa)      (ffmpeg)                 │
+│  + Nano Banana    —              + Veo 3.1                │
+│  (Gemini img gen)                (laozhang.ai)            │
+└──────────────────────────────────────────────────────────┘
            │
            ▼
        Output file
@@ -187,10 +248,11 @@ User prompt
 
 ## Roadmap
 
-- **Skills UI** — visual skill browser in the web interface, drag-and-drop parameter editing
-- **Nano Banana** — lightweight local model for simple operations, reduce API dependency
-- **Veo integration** — AI-generated video clips as a primitive function
-- **Desktop app** — standalone macOS / Windows app via pywebview + PyInstaller
+- ✅ **Nano Banana** — Gemini image generation integrated as primitives (NB2 + Pro)
+- ✅ **Veo integration** — AI-generated video clips via laozhang.ai (Veo 3.1)
+- ✅ **Skills v2** — model tracking, parameterization, `parameters` field
+- **Skills UI** — visual skill browser in the web interface
+- **Desktop app** — standalone macOS / Windows app via Tauri
 
 ---
 
@@ -198,7 +260,9 @@ User prompt
 
 - Python 3.12+
 - ffmpeg / ffprobe in PATH
-- `OPENROUTER_API_KEY` (required for AI planning)
+- `OPENROUTER_API_KEY` (required for AI planning; also used as fallback for image gen)
+- `GEMINI_API_KEY` (required for Nano Banana image generation)
+- `LAOZHANG_API_KEY` (required for Veo video generation)
 - `OPENROUTER_MODEL` (optional, default `google/gemini-2.5-flash`)
 
 ## License

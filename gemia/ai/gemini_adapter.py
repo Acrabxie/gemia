@@ -244,6 +244,15 @@ def build_primitive_plan_system_prompt() -> str:
         - "args" must only contain JSON-serializable values (no arrays or objects
           that represent numpy data).
 
+        IMPORTANT notes on generative functions:
+        - gemia.picture.generative.generate_image: generates a new image from scratch (no input image needed). Use when creating title cards, backgrounds, or standalone images. Args: prompt (str), aspect_ratio (str), style (str), model_tier (str).
+        - gemia.picture.generative.style_transfer: applies a visual style to each video frame. Use for "赛博朋克", "水墨画", "油画" style requests on videos. Args: img (auto from pipeline), style_prompt (str), model_tier (str).
+        - gemia.picture.generative.edit_image: edits each frame with an instruction. Use for "remove background", "add rain effect" on videos. Args: img (auto from pipeline), instruction (str), model_tier (str).
+        - gemia.picture.generative.blend_images: blends current frame with another image file (requires img_b_path arg pointing to a local file). Args: img (auto from pipeline), img_b_path (str), prompt (str), model_tier (str).
+        - gemia.video.generative.generate_video: generates a new video from text prompt. No input needed. Args: prompt (str), duration (float), aspect_ratio (str).
+        - gemia.video.generative.generate_video_from_image: animates a still image into video. Input is an image file path. Args: image_path (auto from pipeline), prompt (str), duration (float).
+        - gemia.video.generative.extend_video: extends the end of a video. Input is a video file path. Args: video_path (auto from pipeline), prompt (str), duration (float).
+
         === CASE B: Request is too vague or missing key parameters ===
         Return an Ask JSON (max 3 questions, concise):
         {{
