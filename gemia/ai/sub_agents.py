@@ -38,14 +38,14 @@ BUILTIN_AGENTS: dict[str, SubAgentDef] = {
         role="planner",
         description="Fast planner, low latency. Default for most tasks.",
     ),
-    "gemini-pro": SubAgentDef(
-        name="gemini-pro",
+    "Gemini3.1pro": SubAgentDef(
+        name="Gemini3.1pro",
         model="google/gemini-2.5-pro",
         role="planner",
         description="Gemini 3.1 Pro via OpenRouter. Better for complex multi-step plans.",
     ),
-    "gpt-5": SubAgentDef(
-        name="gpt-5",
+    "GPT5.4": SubAgentDef(
+        name="GPT5.4",
         model="openai/gpt-4.5",
         role="reviewer",
         description="GPT 5.4 via OpenRouter. Used for plan review and critique.",
@@ -55,7 +55,7 @@ BUILTIN_AGENTS: dict[str, SubAgentDef] = {
 
 # Default primary planner name
 DEFAULT_PLANNER = "gemini-flash"
-DEFAULT_REVIEWER = "gpt-5"
+DEFAULT_REVIEWER = "GPT5.4"
 
 
 # ---------------------------------------------------------------------------
