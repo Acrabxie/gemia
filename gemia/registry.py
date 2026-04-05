@@ -30,6 +30,28 @@ _EXCLUDED_FROM_CATALOG = {
     "gemia.picture.composite.composite",   # needs fg + bg + mask
     "gemia.picture.composite.blend",       # needs a + b
     "gemia.picture.geometry.perspective_transform",  # src_points/dst_points: ndarray
+    # blend modes: require two image inputs
+    "gemia.picture.composite.blend_multiply",
+    "gemia.picture.composite.blend_screen",
+    "gemia.picture.composite.blend_overlay",
+    "gemia.picture.composite.blend_soft_light",
+    "gemia.picture.composite.blend_hard_light",
+    "gemia.picture.composite.blend_color_dodge",
+    "gemia.picture.composite.blend_color_burn",
+    "gemia.picture.composite.blend_difference",
+    "gemia.picture.composite.blend_exclusion",
+    "gemia.picture.composite.blend_hue",
+    "gemia.picture.composite.blend_saturation",
+    "gemia.picture.composite.blend_color",
+    "gemia.picture.composite.blend_luminosity",
+    # optical flow: requires two image inputs
+    "gemia.video.frames.optical_flow_interpolate",
+    # keyframe: requires callable + KeyframeTrack objects
+    "gemia.video.keyframe.apply_animated_op",
+    # mixer: require numpy arrays as named args
+    "gemia.audio.mixer.create_bus",
+    "gemia.audio.mixer.sidechain_compress",
+    "gemia.audio.mixer.auto_duck",
 }
 
 

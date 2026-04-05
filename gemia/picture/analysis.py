@@ -4,7 +4,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from gemia.primitives_common import Image, batchable, ensure_float32, to_uint8
+from gemia.primitives_common import Image, batchable, ensure_float32, to_uint8  # noqa: F401
 
 
 @batchable
@@ -87,3 +87,106 @@ def edge_detect(img: Image, *, method: str = "canny",
         raise ValueError(f"Unknown edge method: {method!r}. Use 'canny' or 'sobel'.")
 
     return edges.astype(np.float32) / 255.0
+
+
+def waveform_monitor(img: Image, *, width: int = 256) -> np.ndarray:
+    """Generate waveform monitor data (luma values per column).
+
+    Args:
+        img: Input BGR float32 image.
+        width: Number of horizontal bins.
+
+    Returns:
+        2D float32 array shape (height_bins, width) with luma density [0,1].
+    """
+    img = ensure_float32(img)
+    if img.ndim == 3:
+        luma = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        luma = img
+
+    h, w = luma.shape
+    height_bins = 256
+    waveform = np.zeros((height_bins, width), dtype=np.float32)
+
+    x_indices = np.linspace(0, w - 1, width, dtype=int)
+    for col_out, col_in in enumerate(x_indices):
+        col_vals = luma[:, col_in]
+        bin_indices = np.clip((col_vals * (height_bins - 1)).astype(int), 0, height_bins - 1)
+        np.add.at(waveform[:, col_out], bin_indices, 1)
+
+    col_max = waveform.max(axis=0, keepdims=True)
+    col_max = np.where(col_max == 0, 1, col_max)
+    waveform = waveform / col_max
+    return waveform.astype(np.float32)
+
+
+def vectorscope(img: Image, *, size: int = 256) -> np.ndarray:
+    """Generate vectorscope data (Cb/Cr chrominance distribution).
+
+    Args:
+        img: Input BGR float32 image.
+        size: Output grid size.
+
+    Returns:
+        2D float32 array (size, size) representing chroma distribution.
+    """
+    img = ensure_float32(img)
+    u8 = np.clip(img * 255, 0, 255).astype(np.uint8)
+    if u8.ndim == 3:
+        ycrcb = cv2.cvtColor(u8, cv2.COLOR_BGR2YCrCb)
+        cr = ycrcb[:, :, 1].ravel().astype(np.float32) / 255.0
+        cb = ycrcb[:, :, 2].ravel().astype(np.float32) / 255.0
+    else:
+        cr = np.full(u8.size, 0.5, dtype=np.float32)
+        cb = np.full(u8.size, 0.5, dtype=np.float32)
+
+    scope = np.zeros((size, size), dtype=np.float32)
+    xi = np.clip((cr * (size - 1)).astype(int), 0, size - 1)
+    yi = np.clip((cb * (size - 1)).astype(int), 0, size - 1)
+    np.add.at(scope, (yi, xi), 1)
+
+    mx = scope.max()
+    if mx > 0:
+        scope /= mx
+    return scope.astype(np.float32)
+
+
+def histogram_rgb(img: Image, *, bins: int = 256) -> dict[str, np.ndarray]:
+    """Compute separate R, G, B channel histograms.
+
+    Args:
+        img: Input BGR float32 image.
+        bins: Number of histogram bins.
+
+    Returns:
+        Dict with keys 'r', 'g', 'b' mapping to 1D arrays of shape (bins,).
+    """
+    img = ensure_float32(img)
+    u8 = to_uint8(img)
+    result: dict[str, np.ndarray] = {}
+    for i, ch in enumerate(["b", "g", "r"]):
+        result[ch] = cv2.calcHist([u8], [i], None, [bins], [0, 256]).ravel().astype(np.float32)
+    return result
+
+
+def check_clipping(img: Image, *, ceiling: float = 0.95) -> dict:
+    """Detect highlight and shadow clipping.
+
+    Args:
+        img: Input float32 image.
+        ceiling: Threshold above which pixels are clipped highlights.
+
+    Returns:
+        Dict with 'highlight_pct' (% pixels above ceiling),
+        'shadow_pct' (% pixels below 0.05), 'is_clipped' (bool).
+    """
+    img = ensure_float32(img)
+    total = img.size
+    highlight_pct = float(np.sum(img > ceiling) / total * 100.0)
+    shadow_pct = float(np.sum(img < 0.05) / total * 100.0)
+    return {
+        "highlight_pct": highlight_pct,
+        "shadow_pct": shadow_pct,
+        "is_clipped": highlight_pct > 0 or shadow_pct > 0,
+    }

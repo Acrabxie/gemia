@@ -10,7 +10,7 @@ Codex brought AI into the programmer's workflow. Gemia does the same for creativ
 
 ### 1. Primitive API
 
-55+ pure Python functions across three domains — color grading, blur, trim, speed, EQ, and more. Each function has a clear signature and docstring. The AI reads these docstrings to understand what's available.
+88+ pure Python functions across three domains — color grading, blur, keying, optical flow, audio repair, and more. Each function has a clear signature and docstring. The AI reads these docstrings to understand what's available.
 
 ```
 gemia.picture.color.color_grade(image, preset="cyberpunk")
@@ -110,7 +110,7 @@ export OPENROUTER_API_KEY="sk-or-..."
 Verify:
 
 ```bash
-python3 -m pytest tests/ -v    # 93 tests, no GPU needed
+python3 -m pytest tests/ -v    # 258 tests, no GPU needed
 ```
 
 ---
@@ -199,19 +199,22 @@ python3 server.py    # http://127.0.0.1:8000
 
 | Module | Count | Examples |
 |--------|-------|---------|
-| `gemia.picture.color` | 4 | `color_grade`, `adjust_exposure`, `adjust_temperature` |
+| `gemia.picture.color` | 8 | `color_grade`, `lift_gamma_gain`, `apply_3d_lut`, `log_to_linear` |
 | `gemia.picture.pixel` | 5 | `blur`, `sharpen`, `denoise`, `add_grain` |
 | `gemia.picture.geometry` | 4 | `resize`, `crop`, `rotate` |
-| `gemia.picture.composite` | 3 | `create_mask`, `blend`, `composite` |
-| `gemia.picture.analysis` | 3 | `histogram`, `dominant_colors`, `edge_detect` |
+| `gemia.picture.composite` | 19 | `blend_multiply/screen/overlay…`, `chroma_key`, `luma_key`, `create_edge_mask` |
+| `gemia.picture.analysis` | 7 | `histogram`, `waveform_monitor`, `vectorscope`, `check_clipping` |
 | `gemia.audio.basics` | 5 | `load`, `save`, `trim`, `concat`, `mix` |
 | `gemia.audio.dynamics` | 3 | `normalize`, `compress`, `adjust_gain` |
 | `gemia.audio.frequency` | 3 | `eq`, `highpass`, `lowpass` |
 | `gemia.audio.time_pitch` | 3 | `time_stretch`, `pitch_shift`, `detect_bpm` |
-| `gemia.video.frames` | 3 | `extract_frames`, `frames_to_video`, `apply_picture_op_to_video` |
+| `gemia.audio.repair` | 4 | `reduce_noise`, `remove_hum`, `de_ess`, `remove_reverb` |
+| `gemia.audio.mixer` | 3 | `create_bus`, `sidechain_compress`, `auto_duck` |
+| `gemia.video.frames` | 6 | `extract_frames`, `optical_flow_interpolate`, `retime`, `stabilize` |
 | `gemia.video.timeline` | 4 | `cut`, `concat`, `speed`, `reverse` |
 | `gemia.video.compositing` | 2 | `overlay`, `add_audio_track` |
-| `gemia.video.analysis` | 2 | `get_metadata`, `detect_scenes` |
+| `gemia.video.analysis` | 4 | `get_metadata`, `detect_scenes`, `track_point`, `track_plane` |
+| `gemia.video.keyframe` | 2 | `KeyframeTrack`, `apply_animated_op` |
 | `gemia.picture.generative` | 4 | `generate_image`, `style_transfer`, `edit_image`, `blend_images` |
 | `gemia.video.generative` | 3 | `generate_video`, `generate_video_from_image`, `extend_video` |
 
@@ -224,7 +227,7 @@ User prompt
     │
     ▼
 ┌──────────────────────┐
-│  Gemini (OpenRouter)  │  sees all 45 function docstrings
+│  Gemini (OpenRouter)  │  sees all 88+ function docstrings
 └──────────┬───────────┘
            │ Plan v2 JSON
            ▼
