@@ -32,12 +32,6 @@ class SubAgentDef:
 
 # Built-in agents. Add new models here.
 BUILTIN_AGENTS: dict[str, SubAgentDef] = {
-    "gemini-flash": SubAgentDef(
-        name="gemini-flash",
-        model="google/gemini-2.5-flash",
-        role="planner",
-        description="Fast planner, low latency. Default for most tasks.",
-    ),
     "Gemini3.1pro": SubAgentDef(
         name="Gemini3.1pro",
         model="google/gemini-2.5-pro",
@@ -54,7 +48,7 @@ BUILTIN_AGENTS: dict[str, SubAgentDef] = {
 }
 
 # Default primary planner name
-DEFAULT_PLANNER = "gemini-flash"
+DEFAULT_PLANNER = "Gemini3.1pro"
 DEFAULT_REVIEWER = "GPT5.4"
 
 
