@@ -519,12 +519,13 @@ async function submitAskAnswer() {
   if (!pendingAskId) return;
   const answer = document.getElementById('ask-answer').value.trim();
   if (!answer) return;
+  const askId = pendingAskId;
   hideAskArea();
   setProgress(true, '正在规划...');
   setStatus('规划中', 'planning');
 
   try {
-    const r = await api('POST', '/answer-ask/' + pendingAskId, { answers: { answer } });
+    const r = await api('POST', '/answer-ask/' + askId, { answers: { answer } });
     if (r.data.ask) {
       setProgress(false);
       setStatus('需要确认', '');
