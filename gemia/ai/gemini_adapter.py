@@ -13,6 +13,18 @@ from typing import Any
 import certifi
 
 
+def _read_config_key(field: str) -> str:
+    """Read a single key from ~/.gemia/config.json, returning '' on any error."""
+    try:
+        path = Path.home() / ".gemia" / "config.json"
+        if path.exists():
+            data = json.loads(path.read_text())
+            return data.get(field, "") or ""
+    except Exception:
+        pass
+    return ""
+
+
 class GeminiAdapter:
     """Minimal OpenRouter-backed Gemini adapter for structured plan generation."""
 
@@ -23,7 +35,11 @@ class GeminiAdapter:
         api_url: str = "https://openrouter.ai/api/v1/chat/completions",
         log_dir: str | Path = "logs/gemini",
     ) -> None:
-        self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
+        self.api_key = (
+            api_key
+            or os.environ.get("OPENROUTER_API_KEY")
+            or _read_config_key("openrouter_api_key")
+        )
         self.model = model or os.environ.get("OPENROUTER_MODEL", "google/gemini-2.5-flash")
         self.api_url = api_url
         self.log_dir = Path(log_dir)
