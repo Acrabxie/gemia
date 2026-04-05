@@ -83,7 +83,7 @@ class GemiaOrchestrator:
         self._save_task(task)
         return task_id
 
-    def plan_or_ask(self, request: str, *, input_path: str, output_path: str, answers: dict | None = None) -> dict:
+    def plan_or_ask(self, request: str, *, input_path: str, output_path: str, answers: dict | None = None, agent: str | None = None) -> dict:
         """Return {"ask": true, "questions": [...]} or a Plan dict."""
         client = AIClient()
         return asyncio.run(client.plan_or_ask(
@@ -91,15 +91,16 @@ class GemiaOrchestrator:
             input_path=input_path,
             output_path=output_path,
             answers=answers,
+            agent=agent,
         ))
 
-    def plan_from_prompt(self, request: str, *, input_path: str) -> dict:
+    def plan_from_prompt(self, request: str, *, input_path: str, agent: str | None = None) -> dict:
         output_path = str((self.outputs_dir / f"plan_preview_{uuid.uuid4().hex[:8]}.mp4").resolve())
         client = AIClient()
-        plan = asyncio.run(client.plan_from_prompt(request, input_path=input_path, output_path=output_path))
+        plan = asyncio.run(client.plan_from_prompt(request, input_path=input_path, output_path=output_path, agent=agent))
         return plan
 
-    def plan_from_primitives(self, request: str, *, input_path: str, output_path: str, answers: dict | None = None) -> dict:
+    def plan_from_primitives(self, request: str, *, input_path: str, output_path: str, answers: dict | None = None, agent: str | None = None) -> dict:
         """Return {"ask": true, "questions": [...]} or a Plan v2 dict using the primitive catalog."""
         client = AIClient()
         return asyncio.run(client.plan_from_primitives(
@@ -107,6 +108,7 @@ class GemiaOrchestrator:
             input_path=input_path,
             output_path=output_path,
             answers=answers,
+            agent=agent,
         ))
 
     def get_task(self, task_id: str) -> dict:

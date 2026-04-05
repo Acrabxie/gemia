@@ -43,6 +43,7 @@ def _has_valid_key() -> bool:
     return bool(key) and key not in ("test", "sk-or-...") and len(key) > 10
 
 from gemia.orchestrator import GemiaOrchestrator, get_assets, get_task, run_skill, plan_from_primitives
+from gemia.ai.sub_agents import SubAgentRegistry
 
 # In-memory store for pending ask sessions
 _pending_asks: dict[str, dict] = {}
@@ -158,6 +159,10 @@ class _Handler(BaseHTTPRequestHandler):
                 _json_response(self, 403, {"error": "forbidden"})
                 return
             _file_response(self, (_BASE_DIR / rel).resolve(), body=body)
+            return
+
+        if path == "/agents":
+            _json_response(self, 200, {"agents": SubAgentRegistry.list_agents()})
             return
 
         if path == "/skills":
@@ -328,6 +333,7 @@ class _Handler(BaseHTTPRequestHandler):
         if route == "/run-prompt":
             prompt = str(payload.get("prompt", "")).strip()
             video = str(payload.get("video", "")).strip()
+            agent = str(payload.get("agent", "")).strip() or None
             if not prompt:
                 _json_response(self, 400, {"error": "prompt is required"})
                 return
@@ -337,7 +343,7 @@ class _Handler(BaseHTTPRequestHandler):
             orch = GemiaOrchestrator()
             output_path = str((orch.outputs_dir / f"ai_{uuid.uuid4().hex[:8]}.mp4").resolve())
             try:
-                result = orch.plan_from_primitives(prompt, input_path=video, output_path=output_path)
+                result = orch.plan_from_primitives(prompt, input_path=video, output_path=output_path, agent=agent)
             except Exception as exc:
                 _json_response(self, 500, {"error": str(exc)})
                 return
