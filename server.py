@@ -42,7 +42,7 @@ def _has_valid_key() -> bool:
     key = os.environ.get("OPENROUTER_API_KEY", "")
     return bool(key) and key not in ("test", "sk-or-...") and len(key) > 10
 
-from gemia.orchestrator import GemiaOrchestrator, get_assets, get_task, run_skill
+from gemia.orchestrator import GemiaOrchestrator, get_assets, get_task, run_skill, plan_from_primitives
 
 # In-memory store for pending ask sessions
 _pending_asks: dict[str, dict] = {}
@@ -337,7 +337,7 @@ class _Handler(BaseHTTPRequestHandler):
             orch = GemiaOrchestrator()
             output_path = str((orch.outputs_dir / f"ai_{uuid.uuid4().hex[:8]}.mp4").resolve())
             try:
-                result = orch.plan_or_ask(prompt, input_path=video, output_path=output_path)
+                result = orch.plan_from_primitives(prompt, input_path=video, output_path=output_path)
             except Exception as exc:
                 _json_response(self, 500, {"error": str(exc)})
                 return

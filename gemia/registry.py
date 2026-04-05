@@ -52,6 +52,14 @@ _EXCLUDED_FROM_CATALOG = {
     "gemia.audio.mixer.create_bus",
     "gemia.audio.mixer.sidechain_compress",
     "gemia.audio.mixer.auto_duck",
+    # audio repair: waveform: np.ndarray arg
+    "gemia.audio.repair.reduce_noise",
+    "gemia.audio.repair.remove_hum",
+    "gemia.audio.repair.de_ess",
+    "gemia.audio.repair.remove_reverb",
+    # video analysis: returns coordinate/tracking data, not a media file
+    "gemia.video.analysis.track_point",
+    "gemia.video.analysis.track_plane",
 }
 
 

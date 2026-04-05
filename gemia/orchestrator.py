@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .ai.ai_client import AIClient
+from .registry import resolve as registry_resolve, get_info as registry_get_info
 
 
 class GemiaOrchestrator:
@@ -98,6 +99,16 @@ class GemiaOrchestrator:
         plan = asyncio.run(client.plan_from_prompt(request, input_path=input_path, output_path=output_path))
         return plan
 
+    def plan_from_primitives(self, request: str, *, input_path: str, output_path: str, answers: dict | None = None) -> dict:
+        """Return {"ask": true, "questions": [...]} or a Plan v2 dict using the primitive catalog."""
+        client = AIClient()
+        return asyncio.run(client.plan_from_primitives(
+            request,
+            input_path=input_path,
+            output_path=output_path,
+            answers=answers,
+        ))
+
     def get_task(self, task_id: str) -> dict:
         path = self.tasks_dir / f"{task_id}.json"
         return json.loads(path.read_text())
@@ -177,6 +188,12 @@ class GemiaOrchestrator:
             "step_outputs": {},
         }
         for step in plan.get("steps", []):
+            if "function" in step:
+                assets = self._step_primitive_v2(step, context)
+                context["step_outputs"][step["id"]] = assets
+                if assets:
+                    context["input_path"] = assets[0]
+                continue
             step_type = step["type"]
             if step_type == "extract_keyframes":
                 assets = self._step_extract_keyframes(step, context)
@@ -374,6 +391,65 @@ class GemiaOrchestrator:
         ])
         return [str(output_path.resolve())]
 
+    def _resolve_step_var(self, value: str, context: dict[str, Any]) -> str:
+        """Resolve a variable reference like $input, $output, or $step_N."""
+        if value == "$input":
+            return context["input_path"]
+        if value == "$output":
+            return context["output_path"]
+        if value.startswith("$"):
+            step_ref = value[1:]  # e.g. "step_1"
+            step_assets = context["step_outputs"].get(step_ref)
+            if step_assets:
+                return step_assets[0]
+            raise ValueError(f"Step reference {value!r} not found in context")
+        return value
+
+    def _step_primitive_v2(self, step: dict[str, Any], context: dict[str, Any]) -> list[str]:
+        """Execute a v2 plan step with a 'function' key (FQN dispatch)."""
+        fqn = step["function"]
+        args = dict(step.get("args") or {})
+
+        # Resolve input
+        raw_input = step.get("input")
+        if raw_input is not None:
+            resolved_input = self._resolve_step_var(raw_input, context)
+        else:
+            resolved_input = context["input_path"]
+
+        # Resolve output
+        raw_output = step.get("output")
+        if raw_output is not None:
+            resolved_output = self._resolve_step_var(raw_output, context)
+        else:
+            resolved_output = str(self.temp_dir / f"step_{step['id']}_{uuid.uuid4().hex[:6]}.mp4")
+
+        # Ensure parent dir exists
+        Path(resolved_output).parent.mkdir(parents=True, exist_ok=True)
+
+        fn = registry_resolve(fqn)
+        info = registry_get_info(fqn)
+
+        # Determine call style from the first parameter
+        import inspect
+        params = list(info.params.items())
+        is_picture_fn = False
+        if params:
+            first_param_name, first_param_info = params[0]
+            annotation = first_param_info.get("annotation", "")
+            if first_param_name in ("img",) or annotation in ("Image", "ndarray", "np.ndarray"):
+                is_picture_fn = True
+            elif first_param_name in ("video_path", "input_path", "path") or annotation == "str":
+                is_picture_fn = False
+
+        if is_picture_fn:
+            from gemia.video.frames import apply_picture_op_to_video
+            apply_picture_op_to_video(resolved_input, resolved_output, op=lambda img: fn(img, **args))
+        else:
+            fn(resolved_input, resolved_output, **args)
+
+        return [resolved_output]
+
     def _run(self, cmd: list[str]) -> None:
         proc = subprocess.run(cmd, text=True, capture_output=True)
         if proc.returncode != 0:
@@ -425,3 +501,7 @@ def get_task(task_id: str) -> dict:
 
 def get_assets(task_id: str) -> dict:
     return GemiaOrchestrator().get_assets(task_id)
+
+
+def plan_from_primitives(request: str, *, input_path: str, output_path: str, answers: dict | None = None) -> dict:
+    return GemiaOrchestrator().plan_from_primitives(request, input_path=input_path, output_path=output_path, answers=answers)

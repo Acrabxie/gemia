@@ -269,6 +269,18 @@ def build_primitive_plan_system_prompt() -> str:
         - gemia.video.generative.generate_video_from_image: animates a still image into video. Input is an image file path. Args: image_path (auto from pipeline), prompt (str), duration (float).
         - gemia.video.generative.extend_video: extends the end of a video. Input is a video file path. Args: video_path (auto from pipeline), prompt (str), duration (float).
 
+        IMPORTANT notes on non-generative functions:
+        - gemia.video.frames.stabilize: stabilizes shaky video. Args: video_path (auto), output_path (auto), smoothness (int, default 30).
+        - gemia.video.frames.retime: variable speed retiming. Args: video_path (auto), output_path (auto), speed_map (list of [timestamp_sec, speed_factor] pairs, e.g. [[0,1.0],[3,2.0]]).
+        - gemia.picture.color.lift_gamma_gain: adjusts lift/gamma/gain per channel. Args: img (auto), lift/gamma/gain as floats.
+        - gemia.picture.color.log_to_linear: converts log-encoded footage to linear. Args: img (auto), log_format ('slog2'|'slog3'|'logc'|'log3g10').
+        - gemia.picture.color.color_space_convert: converts between color spaces. Args: img (auto), src/dst as strings.
+        - gemia.picture.analysis.waveform_monitor: returns waveform analysis image (use for QC, not in pipeline).
+        - gemia.video.analysis.detect_scenes: returns list of scene change timestamps. Args: path (video), threshold (float).
+        - gemia.video.analysis.get_metadata: returns dict with duration/width/height/fps. Args: path (video).
+
+        For analysis functions (detect_scenes, get_metadata, waveform_monitor) that return data rather than media files, do NOT include them in a pipeline — only use them when the user explicitly asks for analysis results.
+
         === CASE B: Request is too vague or missing key parameters ===
         Return an Ask JSON (max 3 questions, concise):
         {{
