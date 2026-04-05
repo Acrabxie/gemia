@@ -98,6 +98,61 @@ def speed(input_path: str, output_path: str, *, factor: float) -> str:
     return output_path
 
 
+def rotate_video(input_path: str, output_path: str, *, degrees: int = 90) -> str:
+    """Rotate a video by a multiple of 90 degrees.
+
+    Args:
+        input_path: Source video.
+        output_path: Destination.
+        degrees: Rotation angle. Must be 90, 180, or 270.
+            90 = clockwise 90°, 270 = counter-clockwise 90°.
+
+    Returns:
+        The *output_path*.
+    """
+    if degrees not in (90, 180, 270):
+        raise ValueError("degrees must be 90, 180, or 270.")
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    # FFmpeg transpose: 1=CW90, 2=CCW90; for 180 chain two transpose=1
+    if degrees == 90:
+        vf = "transpose=1"
+    elif degrees == 270:
+        vf = "transpose=2"
+    else:  # 180
+        vf = "transpose=1,transpose=1"
+    _run([
+        "ffmpeg", "-y", "-i", input_path,
+        "-vf", vf,
+        "-c:v", "libx264", "-c:a", "aac",
+        output_path,
+    ])
+    return output_path
+
+
+def flip_video(input_path: str, output_path: str, *, direction: str = "horizontal") -> str:
+    """Flip (mirror) a video horizontally or vertically.
+
+    Args:
+        input_path: Source video.
+        output_path: Destination.
+        direction: ``'horizontal'`` (hflip) or ``'vertical'`` (vflip).
+
+    Returns:
+        The *output_path*.
+    """
+    if direction not in ("horizontal", "vertical"):
+        raise ValueError("direction must be 'horizontal' or 'vertical'.")
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    vf = "hflip" if direction == "horizontal" else "vflip"
+    _run([
+        "ffmpeg", "-y", "-i", input_path,
+        "-vf", vf,
+        "-c:v", "libx264", "-c:a", "aac",
+        output_path,
+    ])
+    return output_path
+
+
 def reverse(input_path: str, output_path: str) -> str:
     """Reverse a video (and its audio).
 

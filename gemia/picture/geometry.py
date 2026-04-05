@@ -133,6 +133,26 @@ def perspective_transform(img: Image, *, src_points: np.ndarray,
     return cv2.warpPerspective(img, M, (out_w, out_h), borderMode=cv2.BORDER_REFLECT_101)
 
 
+@batchable
+def flip(img: Image, *, direction: str = "horizontal") -> Image:
+    """Flip (mirror) an image horizontally, vertically, or both.
+
+    Args:
+        img: Input image, float32 [0, 1].
+        direction: ``'horizontal'`` (left-right mirror), ``'vertical'``
+            (top-bottom mirror), or ``'both'`` (180° point reflection).
+
+    Returns:
+        Flipped image, float32 [0, 1].
+    """
+    img = ensure_float32(img)
+    _FLIP_CODES = {"horizontal": 1, "vertical": 0, "both": -1}
+    code = _FLIP_CODES.get(direction)
+    if code is None:
+        raise ValueError(f"direction must be 'horizontal', 'vertical', or 'both'; got {direction!r}")
+    return cv2.flip(img, code)
+
+
 _INTERP_MAP = {
     "nearest": cv2.INTER_NEAREST,
     "linear": cv2.INTER_LINEAR,

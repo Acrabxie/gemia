@@ -300,6 +300,95 @@ class _Handler(BaseHTTPRequestHandler):
                 _json_response(self, 500, {"error": str(exc)})
             return
 
+        if route == "/dev-feedback":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length else b"{}"
+                body = json.loads(raw)
+                feedback = str(body.get("feedback", "")).strip()
+                if not feedback:
+                    _json_response(self, 400, {"error": "feedback is empty"})
+                    return
+                import datetime
+                ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                dev_file = Path(__file__).parent / "dev_feedback.txt"
+                with dev_file.open("a", encoding="utf-8") as f:
+                    f.write(f"[PENDING] {ts}\n{feedback}\n---\n")
+                _json_response(self, 200, {"ok": True})
+            except Exception as exc:
+                _json_response(self, 500, {"error": str(exc)})
+            return
+
+        # ── DEV: run Claude Code CLI (delete this block to remove dev feature) ──
+        if route == "/dev/claude":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length else b"{}"
+                body = json.loads(raw)
+                prompt = str(body.get("prompt", "")).strip()
+                if not prompt:
+                    _json_response(self, 400, {"error": "prompt is empty"})
+                    return
+                import shutil
+                import subprocess
+                claude_bin = shutil.which("claude")
+                if not claude_bin:
+                    _json_response(self, 500, {"error": "claude CLI not found in PATH"})
+                    return
+                result = subprocess.run(
+                    [claude_bin, "-p", prompt, "--dangerously-skip-permissions"],
+                    cwd=str(_BASE_DIR),
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                _json_response(self, 200, {
+                    "ok": result.returncode == 0,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "returncode": result.returncode,
+                })
+            except subprocess.TimeoutExpired:
+                _json_response(self, 504, {"error": "claude CLI timed out (300s)"})
+            except Exception as exc:
+                _json_response(self, 500, {"error": str(exc)})
+            return
+        # ── END DEV ─────────────────────────────────────────────────────────
+
+        if route == "/quick-action":
+            action = str(payload.get("action", "")).strip()
+            video = str(payload.get("video", "")).strip()
+            if not action or not video:
+                _json_response(self, 400, {"error": "action and video are required"})
+                return
+            _QUICK_PLANS: dict[str, dict] = {
+                "rotate_cw":  {"function": "gemia.video.timeline.rotate_video", "args": {"degrees": 90}},
+                "rotate_ccw": {"function": "gemia.video.timeline.rotate_video", "args": {"degrees": 270}},
+                "rotate_180": {"function": "gemia.video.timeline.rotate_video", "args": {"degrees": 180}},
+                "flip_h":     {"function": "gemia.video.timeline.flip_video",   "args": {"direction": "horizontal"}},
+                "flip_v":     {"function": "gemia.video.timeline.flip_video",   "args": {"direction": "vertical"}},
+            }
+            spec = _QUICK_PLANS.get(action)
+            if not spec:
+                _json_response(self, 400, {"error": f"unknown action: {action}"})
+                return
+            orch = GemiaOrchestrator()
+            output_path = str((orch.outputs_dir / f"qa_{uuid.uuid4().hex[:8]}.mp4").resolve())
+            plan = {
+                "version": "2.0",
+                "goal": action,
+                "steps": [{"id": "step_1", "function": spec["function"], "args": spec["args"],
+                           "input": "$input", "output": "$output"}],
+                "input_path": video,
+                "output_path": output_path,
+            }
+            try:
+                task_id = orch.run_plan_dict(plan)
+                _json_response(self, 200, {"task_id": task_id})
+            except Exception as exc:
+                _json_response(self, 500, {"error": str(exc)})
+            return
+
         if route not in ("/run-skill", "/run-prompt") \
                 and not route.startswith("/revise-task/") \
                 and not route.startswith("/answer-ask/"):
@@ -361,6 +450,8 @@ class _Handler(BaseHTTPRequestHandler):
                 })
             else:
                 try:
+                    result.setdefault("input_path", video)
+                    result.setdefault("output_path", output_path)
                     task_id = orch.run_plan_dict(result)
                     _json_response(self, 200, {"task_id": task_id})
                 except Exception as exc:
@@ -398,6 +489,8 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             _pending_asks.pop(ask_id, None)
             try:
+                result.setdefault("input_path", session["video"])
+                result.setdefault("output_path", session["output_path"])
                 task_id = orch.run_plan_dict(result)
                 _json_response(self, 200, {"task_id": task_id})
             except Exception as exc:
@@ -437,7 +530,7 @@ class _Handler(BaseHTTPRequestHandler):
             _json_response(self, 500, {"error": str(exc)})
 
 
-def main(host: str = "127.0.0.1", port: int = 8000) -> None:
+def main(host: str = "127.0.0.1", port: int = 7788) -> None:
     _load_config_keys()  # Load API keys from ~/.gemia/config.json on startup
     server = HTTPServer((host, port), _Handler)
     print(f"Gemia server listening on http://{host}:{port}")

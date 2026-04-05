@@ -2,9 +2,11 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import VideoPreview from "./components/VideoPreview";
 import Timeline from "./components/Timeline";
+import QuickActions from "./components/QuickActions";
 import ChatPanel from "./components/ChatPanel";
 import SkillsPanel from "./components/SkillsPanel";
 import type { AppStatus, ChatMessage, Skill } from "./types";
+import DevPanel from "./dev/DevPanel"; // [DEV] remove this line to disable dev panel
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let _mid = 0;
@@ -21,6 +23,7 @@ export default function App() {
   const [pendingAskId, setPendingAskId] = useState<string | null>(null);
   const [pendingAskQuestions, setPendingAskQuestions] = useState<string[]>([]);
   const [isRunning, setIsRunning] = useState(false);
+  const [devPanelOpen, setDevPanelOpen] = useState(false); // [DEV]
   const videoRef = useRef<HTMLVideoElement>(null!);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -79,6 +82,19 @@ export default function App() {
       // preview failed, non-fatal
     }
   }
+
+  // ── Dev panel toggle (Ctrl+Shift+D) ──────────────────────────────── [DEV]
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.shiftKey && e.key === "D") {
+        e.preventDefault();
+        setDevPanelOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+  // ── End dev panel toggle ─────────────────────────────────────────────
 
   // ── Boot ──────────────────────────────────────────────────────────────
 
@@ -260,12 +276,35 @@ export default function App() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden" }}>
+      {/* [DEV] remove next line to disable dev panel */}
+      <DevPanel visible={devPanelOpen} onClose={() => setDevPanelOpen(false)} />
       <AppHeader status={status} />
-      <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+      {/* Body: height: 0 + flex: 1 makes % children work */}
+      <div style={{ display: "flex", flex: 1, height: 0, overflow: "hidden" }}>
         {/* Main column */}
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-          <VideoPreview videoRef={videoRef} videoSrc={videoSrc} onFileSelect={handleVideoSelect} />
-          {videoSrc && <Timeline videoRef={videoRef} />}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
+          {/* Video: 45% */}
+          <div style={{ height: "45%", flexShrink: 0, overflow: "hidden" }}>
+            <VideoPreview videoRef={videoRef} videoSrc={videoSrc} onFileSelect={handleVideoSelect} />
+          </div>
+          {/* Quick action toolbar */}
+          <QuickActions
+            serverVideoPath={serverVideoPath}
+            isRunning={isRunning}
+            onTaskStart={(taskId) => {
+              setIsRunning(true);
+              setStatus("executing");
+              addMsg({ role: "status", content: "正在执行...", statusType: "executing" });
+              startPolling(taskId);
+            }}
+            onError={(msg) => {
+              setStatus("error");
+              addMsg({ role: "status", content: `错误: ${msg}`, statusType: "error" });
+            }}
+          />
+          {/* Timeline */}
+          <Timeline videoRef={videoRef} hasVideo={!!videoSrc} />
+          {/* Chat: fills rest */}
           <ChatPanel
             messages={messages}
             isRunning={isRunning}
@@ -289,19 +328,19 @@ export default function App() {
 
 // ── Header ────────────────────────────────────────────────────────────────
 
-const STATUS_INFO: Record<AppStatus, { label: string; color: string }> = {
-  starting: { label: "启动中", color: "var(--text3)" },
-  ready:    { label: "就绪",   color: "var(--accent)" },
-  planning: { label: "规划中", color: "var(--blue)" },
-  executing:{ label: "执行中", color: "var(--warn)" },
-  done:     { label: "完成",   color: "var(--accent)" },
-  error:    { label: "错误",   color: "var(--error)" },
-  asking:   { label: "等待",   color: "var(--warn)" },
+const STATUS_INFO: Record<AppStatus, { label: string; color: string; pulse: boolean }> = {
+  starting: { label: "启动中", color: "var(--text3)",  pulse: false },
+  ready:    { label: "就绪",   color: "var(--text3)",  pulse: false },
+  planning: { label: "规划中", color: "var(--accent)", pulse: true  },
+  executing:{ label: "执行中", color: "var(--accent)", pulse: true  },
+  done:     { label: "完成",   color: "#22dd77",       pulse: false },
+  error:    { label: "错误",   color: "var(--error)",  pulse: false },
+  asking:   { label: "等待",   color: "var(--warn)",   pulse: true  },
 };
 
 function AppHeader({ status }: { status: AppStatus }) {
   const info = STATUS_INFO[status];
-  const isPulsing = status === "planning" || status === "executing";
+  const isPulsing = info.pulse;
 
   return (
     <header

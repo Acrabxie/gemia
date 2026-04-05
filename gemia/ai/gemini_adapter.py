@@ -40,7 +40,7 @@ class GeminiAdapter:
             or os.environ.get("OPENROUTER_API_KEY")
             or _read_config_key("openrouter_api_key")
         )
-        self.model = model or os.environ.get("OPENROUTER_MODEL", "google/gemini-2.5-flash")
+        self.model = model or os.environ.get("OPENROUTER_MODEL", "google/gemini-3-flash")
         self.api_url = api_url
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
