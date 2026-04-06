@@ -1,0 +1,29 @@
+{
+  "name": "黑白照片",
+  "description": "将图片或视频转为去饱和冷色调，模拟黑白胶片质感（完整灰度转换需新增 grayscale primitive）",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "将图片转换为去饱和黑白效果",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.picture.color.color_grade",
+        "args": {
+          "preset": "cool"
+        },
+        "input": "$input",
+        "output": "$step_1"
+      },
+      {
+        "id": "step_2",
+        "function": "gemia.picture.color.adjust_temperature",
+        "args": {
+          "kelvin_shift": -30.0
+        },
+        "input": "$step_1",
+        "output": "$output"
+      }
+    ]
+  }
+}

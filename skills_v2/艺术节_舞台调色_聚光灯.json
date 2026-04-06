@@ -1,0 +1,30 @@
+{
+  "name": "艺术节聚光灯效果",
+  "description": "模拟聚光灯打光效果，高对比度强化主体，适合独唱独奏等舞台特写",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "对艺术节演出视频应用聚光灯高对比效果",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.picture.color.adjust_exposure",
+        "args": {
+          "stops": -0.3
+        },
+        "input": "$input",
+        "output": "$step_1"
+      },
+      {
+        "id": "step_2",
+        "function": "gemia.picture.pixel.sharpen",
+        "args": {
+          "amount": 1.5,
+          "radius": 1.0
+        },
+        "input": "$step_1",
+        "output": "$output"
+      }
+    ]
+  }
+}

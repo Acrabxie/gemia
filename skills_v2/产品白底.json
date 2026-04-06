@@ -1,0 +1,30 @@
+{
+  "name": "产品图优化",
+  "description": "提亮产品图片曝光并增强细节锐度，让产品展示更加清晰专业",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "对产品图片进行提亮和锐化优化",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.picture.color.adjust_exposure",
+        "args": {
+          "stops": 0.3
+        },
+        "input": "$input",
+        "output": "$step_1"
+      },
+      {
+        "id": "step_2",
+        "function": "gemia.picture.pixel.sharpen",
+        "args": {
+          "amount": 1.2,
+          "radius": 1.0
+        },
+        "input": "$step_1",
+        "output": "$output"
+      }
+    ]
+  }
+}

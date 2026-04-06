@@ -1,0 +1,22 @@
+{
+  "name": "电影调色",
+  "description": "模拟电影蓝橙色调，暗部偏蓝、高光偏暖，打造专业影视质感",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "模拟电影蓝橙色调，暗部偏蓝、高光偏暖，打造专业影视质感",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.picture.color.color_grade",
+        "args": {
+          "shadows": [0.02, 0.0, -0.02],
+          "midtones": [0.0, 0.0, 0.0],
+          "highlights": [-0.02, 0.0, 0.02]
+        },
+        "input": "$input",
+        "output": "$output"
+      }
+    ]
+  }
+}

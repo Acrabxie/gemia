@@ -1,0 +1,41 @@
+{
+  "name": "裁切加速vintage",
+  "description": "Trim the first 3 seconds of the video, speed it up by 2x, and apply a vintage color grade.",
+  "version": "2.0",
+  "origin_task_id": "task_20260404_203054_625df0a0",
+  "created_at": "2026-04-04T05:53:37.980249",
+  "plan": {
+    "version": "2.0",
+    "goal": "Trim the first 3 seconds of the video, speed it up by 2x, and apply a vintage color grade.",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.video.timeline.cut",
+        "args": {
+          "start_sec": 0.0,
+          "end_sec": 3.0
+        },
+        "input": "$input",
+        "output": "$step_1"
+      },
+      {
+        "id": "step_2",
+        "function": "gemia.video.timeline.speed",
+        "args": {
+          "factor": 2.0
+        },
+        "input": "$step_1",
+        "output": "$step_2"
+      },
+      {
+        "id": "step_3",
+        "function": "gemia.picture.color.color_grade",
+        "args": {
+          "preset": "vintage"
+        },
+        "input": "$step_2",
+        "output": "$output"
+      }
+    ]
+  }
+}

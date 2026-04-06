@@ -1,0 +1,20 @@
+{
+  "name": "赛博朋克风格",
+  "description": "为图片应用赛博朋克调色，青紫霓虹色调，充满未来科幻感",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "为图片应用赛博朋克风格调色",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.picture.color.color_grade",
+        "args": {
+          "preset": "cyberpunk"
+        },
+        "input": "$input",
+        "output": "$output"
+      }
+    ]
+  }
+}

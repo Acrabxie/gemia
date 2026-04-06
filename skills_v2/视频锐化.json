@@ -1,0 +1,21 @@
+{
+  "name": "视频锐化增强",
+  "description": "提升视频清晰度和细节，让模糊画面变得更加清晰锐利",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "对视频进行锐化增强处理",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.picture.pixel.sharpen",
+        "args": {
+          "amount": 1.5,
+          "radius": 1.0
+        },
+        "input": "$input",
+        "output": "$output"
+      }
+    ]
+  }
+}

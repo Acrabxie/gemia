@@ -1,0 +1,32 @@
+{
+  "name": "人声清晰增强",
+  "description": "突出人声频段，压缩动态范围，让说话和演唱更加清晰有力",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "对音频进行人声增强处理",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.audio.frequency.highpass",
+        "args": {
+          "cutoff_hz": 100.0
+        },
+        "input": "$input",
+        "output": "$step_1"
+      },
+      {
+        "id": "step_2",
+        "function": "gemia.audio.dynamics.compress",
+        "args": {
+          "threshold": -20.0,
+          "ratio": 3.0,
+          "attack_ms": 5.0,
+          "release_ms": 50.0
+        },
+        "input": "$step_1",
+        "output": "$output"
+      }
+    ]
+  }
+}

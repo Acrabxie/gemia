@@ -1,0 +1,29 @@
+{
+  "name": "复古胶片",
+  "description": "模拟老式胶片相机的色调和颗粒感，营造怀旧复古氛围",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "为图片应用复古胶片风格",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.picture.color.color_grade",
+        "args": {
+          "preset": "vintage"
+        },
+        "input": "$input",
+        "output": "$step_1"
+      },
+      {
+        "id": "step_2",
+        "function": "gemia.picture.pixel.add_grain",
+        "args": {
+          "intensity": 0.04
+        },
+        "input": "$step_1",
+        "output": "$output"
+      }
+    ]
+  }
+}

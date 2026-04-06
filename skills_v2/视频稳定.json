@@ -1,0 +1,20 @@
+{
+  "name": "视频防抖稳定",
+  "description": "自动消除视频抖动，让手持拍摄的视频变得平稳流畅",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "对视频进行防抖稳定处理",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.video.frames.stabilize",
+        "args": {
+          "smoothness": 30
+        },
+        "input": "$input",
+        "output": "$output"
+      }
+    ]
+  }
+}

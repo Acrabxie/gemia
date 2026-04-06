@@ -1,0 +1,31 @@
+{
+  "name": "艺术节片尾暗场",
+  "description": "为演出片尾营造渐暗收场效果，降低亮度并压暗整体色调，优雅结尾",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "对艺术节片尾视频进行暗场处理",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.picture.color.adjust_exposure",
+        "args": {
+          "stops": -0.8
+        },
+        "input": "$input",
+        "output": "$step_1"
+      },
+      {
+        "id": "step_2",
+        "function": "gemia.picture.color.color_grade",
+        "args": {
+          "shadows": [-0.1, -0.1, -0.1],
+          "midtones": [0.0, 0.0, 0.0],
+          "highlights": [0.0, 0.0, 0.0]
+        },
+        "input": "$step_1",
+        "output": "$output"
+      }
+    ]
+  }
+}

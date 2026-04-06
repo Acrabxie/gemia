@@ -1,0 +1,41 @@
+{
+  "name": "HDR风格增强",
+  "description": "模拟HDR高动态范围效果，增强画面层次感，高光细节丰富、暗部通透",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "对图片或视频进行HDR风格增强",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.picture.color.lift_gamma_gain",
+        "args": {
+          "lift": [0.02, 0.02, 0.03],
+          "gamma": [1.0, 1.0, 1.0],
+          "gain": [1.05, 1.02, 0.98]
+        },
+        "input": "$input",
+        "output": "$step_1"
+      },
+      {
+        "id": "step_2",
+        "function": "gemia.picture.pixel.sharpen",
+        "args": {
+          "amount": 2.0,
+          "radius": 1.0
+        },
+        "input": "$step_1",
+        "output": "$step_2"
+      },
+      {
+        "id": "step_3",
+        "function": "gemia.picture.color.adjust_exposure",
+        "args": {
+          "stops": 0.2
+        },
+        "input": "$step_2",
+        "output": "$output"
+      }
+    ]
+  }
+}

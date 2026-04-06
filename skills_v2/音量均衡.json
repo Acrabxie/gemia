@@ -1,0 +1,20 @@
+{
+  "name": "音量自动均衡",
+  "description": "自动将音频音量调整到统一水平，避免忽大忽小的音量问题",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "对音频进行自动音量均衡处理",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.audio.dynamics.normalize",
+        "args": {
+          "target_peak": 0.9
+        },
+        "input": "$input",
+        "output": "$output"
+      }
+    ]
+  }
+}

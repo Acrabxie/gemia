@@ -1,0 +1,29 @@
+{
+  "name": "艺术节暖光调色",
+  "description": "专为艺术节演出设计的暖光调色方案，金黄暖调烘托舞台氛围",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "对艺术节演出视频进行暖光风格调色",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.picture.color.color_grade",
+        "args": {
+          "preset": "warm"
+        },
+        "input": "$input",
+        "output": "$step_1"
+      },
+      {
+        "id": "step_2",
+        "function": "gemia.picture.color.adjust_temperature",
+        "args": {
+          "kelvin_shift": 15.0
+        },
+        "input": "$step_1",
+        "output": "$output"
+      }
+    ]
+  }
+}

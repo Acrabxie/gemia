@@ -1,0 +1,20 @@
+{
+  "name": "视频降噪",
+  "description": "去除视频画面中的颗粒噪点，让低光环境拍摄的视频更加干净",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "对视频进行降噪处理",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.picture.pixel.denoise",
+        "args": {
+          "strength": 15.0
+        },
+        "input": "$input",
+        "output": "$output"
+      }
+    ]
+  }
+}

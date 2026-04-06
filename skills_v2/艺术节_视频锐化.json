@@ -1,0 +1,21 @@
+{
+  "name": "艺术节视频锐化",
+  "description": "针对舞台演出视频强力锐化，弥补运动模糊，让表演细节更清晰",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "对艺术节演出视频进行强力锐化处理",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.picture.pixel.sharpen",
+        "args": {
+          "amount": 2.0,
+          "radius": 1.0
+        },
+        "input": "$input",
+        "output": "$output"
+      }
+    ]
+  }
+}

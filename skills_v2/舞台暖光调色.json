@@ -1,0 +1,38 @@
+{
+  "name": "舞台暖光调色",
+  "description": "模拟舞台暖光灯效果，色调温暖明亮，适合演出和表演视频",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "对视频进行舞台暖光风格调色",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.picture.color.color_grade",
+        "args": {
+          "preset": "warm"
+        },
+        "input": "$input",
+        "output": "$step_1"
+      },
+      {
+        "id": "step_2",
+        "function": "gemia.picture.color.adjust_exposure",
+        "args": {
+          "stops": 0.2
+        },
+        "input": "$step_1",
+        "output": "$step_2"
+      },
+      {
+        "id": "step_3",
+        "function": "gemia.picture.color.adjust_temperature",
+        "args": {
+          "kelvin_shift": 20.0
+        },
+        "input": "$step_2",
+        "output": "$output"
+      }
+    ]
+  }
+}

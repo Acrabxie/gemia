@@ -1,0 +1,20 @@
+{
+  "name": "赛博朋克视频调色",
+  "description": "为视频应用赛博朋克风格调色，高饱和青紫色调，科幻感十足",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "为视频应用赛博朋克风格调色",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.picture.color.color_grade",
+        "args": {
+          "preset": "cyberpunk"
+        },
+        "input": "$input",
+        "output": "$output"
+      }
+    ]
+  }
+}

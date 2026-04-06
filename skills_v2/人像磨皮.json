@@ -1,0 +1,31 @@
+{
+  "name": "人像磨皮",
+  "description": "柔化人像皮肤细节，减少瑕疵，同时保留五官轮廓的清晰度",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "对人像进行磨皮柔化处理",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.picture.pixel.blur",
+        "args": {
+          "radius": 2.0,
+          "method": "gaussian"
+        },
+        "input": "$input",
+        "output": "$step_1"
+      },
+      {
+        "id": "step_2",
+        "function": "gemia.picture.pixel.sharpen",
+        "args": {
+          "amount": 0.5,
+          "radius": 1.0
+        },
+        "input": "$step_1",
+        "output": "$output"
+      }
+    ]
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "快进2倍速",
+  "description": "将视频速度提升到2倍，快速浏览长视频内容",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "将视频速度提升到2倍",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.video.timeline.speed",
+        "args": {
+          "factor": 2.0
+        },
+        "input": "$input",
+        "output": "$output"
+      }
+    ]
+  }
+}

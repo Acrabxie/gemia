@@ -1,0 +1,29 @@
+{
+  "name": "低频氛围增强",
+  "description": "保留音频中的低频氛围感，增加音量增益，适合背景音乐和环境音处理",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "对音频进行低频增强和音量增益处理",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.audio.frequency.lowpass",
+        "args": {
+          "cutoff_hz": 200.0
+        },
+        "input": "$input",
+        "output": "$step_1"
+      },
+      {
+        "id": "step_2",
+        "function": "gemia.audio.dynamics.adjust_gain",
+        "args": {
+          "db": 3.0
+        },
+        "input": "$step_1",
+        "output": "$output"
+      }
+    ]
+  }
+}

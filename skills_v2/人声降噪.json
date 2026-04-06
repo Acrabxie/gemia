@@ -1,0 +1,32 @@
+{
+  "name": "人声降噪",
+  "description": "去除录音中的低频底噪和环境噪音，让人声更清晰干净",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "对音频进行降噪处理，去除低频噪音并压缩动态",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.audio.frequency.highpass",
+        "args": {
+          "cutoff_hz": 80.0
+        },
+        "input": "$input",
+        "output": "$step_1"
+      },
+      {
+        "id": "step_2",
+        "function": "gemia.audio.dynamics.compress",
+        "args": {
+          "threshold": -30.0,
+          "ratio": 3.0,
+          "attack_ms": 10.0,
+          "release_ms": 100.0
+        },
+        "input": "$step_1",
+        "output": "$output"
+      }
+    ]
+  }
+}

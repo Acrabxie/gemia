@@ -1,0 +1,18 @@
+{
+  "name": "艺术节多机位合并",
+  "description": "将多台摄像机拍摄的艺术节素材按顺序拼接，快速生成完整演出记录",
+  "version": "2.0",
+  "plan": {
+    "version": "2.0",
+    "goal": "将多机位艺术节演出素材拼接成完整视频",
+    "steps": [
+      {
+        "id": "step_1",
+        "function": "gemia.video.timeline.concat",
+        "args": {},
+        "input": "$input",
+        "output": "$output"
+      }
+    ]
+  }
+}
