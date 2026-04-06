@@ -244,14 +244,46 @@ class PlanEngine:
         return func(input_path, output_path, **args)
 
     def _call_audio_func(self, func: Any, info: Any, input_val: Any, args: dict) -> Any:
-        """Route audio functions."""
+        """Route audio functions.
+
+        Auto-bridging: if input_val is a file path string, auto-load it via
+        gemia.audio.basics.load, apply the function, and return the result array.
+        The caller is responsible for saving if needed (via a subsequent save step).
+        """
+        import numpy as np
+
         # load: func(path, **kwargs) → (audio, sr)
         if info.name == "load":
             return func(input_val, **args)
         # save: func(path, audio, **kwargs)
         if info.name == "save":
             return func(input_val, **args)
-        # Others: func(audio, **kwargs)
+
+        # Auto-bridge: if input is a file path, load it first
+        if isinstance(input_val, str):
+            from gemia.audio.basics import load as _audio_load
+            audio_tuple = _audio_load(input_val)
+            # load returns (audio_array, sr) tuple
+            if isinstance(audio_tuple, tuple):
+                audio_arr, sr = audio_tuple
+            else:
+                audio_arr, sr = audio_tuple, 22050
+            # Inject sr into args if the function accepts it and it's not already set
+            import inspect as _inspect
+            sig = _inspect.signature(func)
+            if "sr" in sig.parameters and "sr" not in args:
+                args = {**args, "sr": sr}
+            return func(audio_arr, **args)
+
+        # input_val is already an ndarray or (ndarray, sr) tuple
+        if isinstance(input_val, tuple):
+            audio_arr, sr = input_val
+            import inspect as _inspect
+            sig = _inspect.signature(func)
+            if "sr" in sig.parameters and "sr" not in args:
+                args = {**args, "sr": sr}
+            return func(audio_arr, **args)
+
         return func(input_val, **args)
 
 

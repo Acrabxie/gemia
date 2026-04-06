@@ -10,7 +10,7 @@
         "id": "step_1",
         "function": "gemia.audio.frequency.highpass",
         "args": {
-          "cutoff_hz": 80.0
+          "freq": 80.0
         },
         "input": "$input",
         "output": "$step_1"

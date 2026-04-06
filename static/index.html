@@ -660,7 +660,7 @@ async function runSkill() {
     const res = await fetch('/run-skill', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ skill_id: skill, inputs: { video, style } })
+      body: JSON.stringify({ skill_id: selectedSkill || skill, inputs: { video, style } })
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Server error');
