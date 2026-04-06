@@ -47,13 +47,16 @@ from gemia.ai.sub_agents import SubAgentRegistry
 
 # In-memory store for pending ask sessions
 _pending_asks: dict[str, dict] = {}
+# In-memory store for task execution progress {task_id: {current_step, total_steps, current_function}}
+_task_progress: dict[str, dict] = {}
 
 _BASE_DIR = Path(__file__).resolve().parent
 _SKILLS_DIR = _BASE_DIR / "skills"
+_SKILLS_V2_DIR = _BASE_DIR / "skills_v2"
 _STATIC_DIR = _BASE_DIR / "static"
 _INPUTS_DIR = _BASE_DIR / "inputs"
 # Directories that may be served via /file/
-_ALLOWED_ROOTS = {"outputs", "frames", "styled", "demo", "inputs"}
+_ALLOWED_ROOTS = {"outputs", "frames", "styled", "demo", "inputs", "uploads"}
 _TASKS_DIR = _BASE_DIR / "tasks"
 _PLANS_DIR = _BASE_DIR / "plans"
 
@@ -166,7 +169,25 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/skills":
-            skills = sorted(p.stem for p in _SKILLS_DIR.glob("*.json"))
+            # Load from skills_v2/ (preferred) with name+description from JSON
+            skills_v2 = []
+            for p in sorted(_SKILLS_V2_DIR.glob("*.json")):
+                try:
+                    data = json.loads(p.read_text())
+                    skills_v2.append({
+                        "id": p.stem,
+                        "name": data.get("name", p.stem),
+                        "description": data.get("description", ""),
+                        "file": str(p),
+                    })
+                except Exception:
+                    pass
+            # Fallback: legacy skills/ dir
+            legacy_skills = [
+                {"id": p.stem, "name": p.stem, "description": "", "file": str(p)}
+                for p in sorted(_SKILLS_DIR.glob("*.json"))
+            ] if _SKILLS_DIR.exists() else []
+            all_skills = skills_v2 + legacy_skills
             inputs = sorted(
                 {
                     p.name: str(p.resolve())
@@ -175,7 +196,7 @@ class _Handler(BaseHTTPRequestHandler):
                 }.items()
             )
             _json_response(self, 200, {
-                "skills": skills,
+                "skills": all_skills,
                 "inputs": [
                     {"name": name, "path": abs_path}
                     for name, abs_path in inputs
@@ -210,11 +231,26 @@ class _Handler(BaseHTTPRequestHandler):
             _json_response(self, 200, {"tasks": items[:30]})
             return
 
-        # /task/<task_id>  or  /task/<task_id>/assets
+        # /task/<task_id>  or  /task/<task_id>/assets  or  /task/<task_id>/progress
         parts = path.split("/")
         if len(parts) >= 3 and parts[1] == "task":
             task_id = parts[2]
             try:
+                if len(parts) == 4 and parts[3] == "progress":
+                    prog = _task_progress.get(task_id, {})
+                    try:
+                        task_data = _load_task_payload(task_id)
+                        status = task_data.get("status", "running")
+                    except FileNotFoundError:
+                        status = "running" if task_id in _task_progress else "unknown"
+                    _json_response(self, 200, {
+                        "task_id": task_id,
+                        "status": status,
+                        "current_step": prog.get("current_step", 0),
+                        "total_steps": prog.get("total_steps", 0),
+                        "current_function": prog.get("current_function", ""),
+                    })
+                    return
                 if len(parts) == 4 and parts[3] == "assets":
                     _json_response(self, 200, get_assets(task_id))
                 else:
@@ -493,17 +529,56 @@ class _Handler(BaseHTTPRequestHandler):
         if route == "/run-skill":
             skill_id = payload.get("skill_id")
             inputs = payload.get("inputs", {})
+            # Support multi-select: input_paths overrides inputs["video"] when provided
+            input_paths = payload.get("input_paths")
+            if input_paths and isinstance(input_paths, list):
+                inputs["video"] = input_paths  # engine handles list for concat
             if not skill_id:
                 _json_response(self, 400, {"error": "skill_id is required"})
                 return
 
-            try:
-                task_id = run_skill(skill_id, inputs)
-                _json_response(self, 200, {"task_id": task_id})
-            except FileNotFoundError as exc:
-                _json_response(self, 404, {"error": str(exc)})
-            except Exception as exc:
-                _json_response(self, 500, {"error": str(exc)})
+            # Try skills_v2/ first (by slug matching), then fall back to legacy skills/
+            skill_v2_path = _SKILLS_V2_DIR / f"{skill_id}.json"
+            if skill_v2_path.exists():
+                try:
+                    from gemia.skill_store import SkillStore
+                    from gemia.engine import PlanEngine
+                    store = SkillStore()
+                    skill_data = json.loads(skill_v2_path.read_text())
+                    video_input = inputs.get("video") or inputs.get("input_path", "")
+                    if not video_input:
+                        _json_response(self, 400, {"error": "video input is required"})
+                        return
+                    orch = GemiaOrchestrator()
+                    out_path = str((orch.outputs_dir / f"skill_{uuid.uuid4().hex[:8]}.mp4").resolve())
+                    engine = PlanEngine()
+                    engine.execute(skill_data["plan"], video_input, out_path)
+                    task_id = f"task_{uuid.uuid4().hex[:12]}"
+                    import datetime as _dt
+                    task = {
+                        "task_id": task_id,
+                        "status": "succeeded",
+                        "skill": skill_data.get("name", skill_id),
+                        "outputs": [out_path],
+                        "created_at": _dt.datetime.now().isoformat(),
+                        "version": "2.0",
+                    }
+                    (_BASE_DIR / "tasks" / f"{task_id}.json").write_text(
+                        json.dumps(task, ensure_ascii=False, indent=2) + "\n"
+                    )
+                    _json_response(self, 200, {"task_id": task_id})
+                except FileNotFoundError as exc:
+                    _json_response(self, 404, {"error": str(exc)})
+                except Exception as exc:
+                    _json_response(self, 500, {"error": str(exc)})
+            else:
+                try:
+                    task_id = run_skill(skill_id, inputs)
+                    _json_response(self, 200, {"task_id": task_id})
+                except FileNotFoundError as exc:
+                    _json_response(self, 404, {"error": str(exc)})
+                except Exception as exc:
+                    _json_response(self, 500, {"error": str(exc)})
             return
 
         if route == "/run-prompt":
@@ -539,7 +614,16 @@ class _Handler(BaseHTTPRequestHandler):
                 try:
                     result.setdefault("input_path", video)
                     result.setdefault("output_path", output_path)
-                    task_id = orch.run_plan_dict(result)
+                    # Reserve task_id slot for progress tracking
+                    _tmp_task_id = f"task_pending_{uuid.uuid4().hex[:8]}"
+
+                    def _on_step(current: int, total: int, fn: str, _tid: list = [_tmp_task_id]) -> None:
+                        _task_progress[_tid[0]] = {"current_step": current, "total_steps": total, "current_function": fn}
+
+                    task_id = orch.run_plan_dict(result, progress_callback=_on_step)
+                    # Update progress key to real task_id
+                    if _tmp_task_id in _task_progress:
+                        _task_progress[task_id] = _task_progress.pop(_tmp_task_id)
                     _json_response(self, 200, {"task_id": task_id})
                 except Exception as exc:
                     _json_response(self, 500, {"error": str(exc)})
