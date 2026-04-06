@@ -38,13 +38,16 @@ class PlanEngine:
         for d in (self.temp_dir, self.outputs_dir, self.tasks_dir, self.plans_dir):
             d.mkdir(parents=True, exist_ok=True)
 
-    def execute(self, plan: dict, input_path: str, output_path: str) -> str:
+    def execute(self, plan: dict, input_path: str, output_path: str,
+                on_step: "Callable[[int, int, str], None] | None" = None) -> str:
         """Execute a v2 plan and return the final output path.
 
         Args:
             plan: Plan dict with ``version: "2.0"`` and ``steps``.
             input_path: User's input video/audio file.
             output_path: Desired output file path.
+            on_step: Optional callback called before each step with
+                (current_step_index, total_steps, function_name).
 
         Returns:
             Path to the output file.
@@ -55,11 +58,28 @@ class PlanEngine:
         }
         steps = plan.get("steps", [])
         if not steps:
-            raise ValueError("Plan has no steps.")
+            raise ValueError("执行计划中没有任何步骤，请重试")
+
+        # Validate input file exists if it's a path
+        if isinstance(input_path, str) and not isinstance(input_path, list):
+            from pathlib import Path as _Path
+            p = _Path(input_path)
+            if not p.exists():
+                raise FileNotFoundError(f"找不到输入文件：{input_path}")
+            # Check video format for video-extension files
+            _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+            if p.suffix.lower() not in _VIDEO_EXTS and p.suffix.lower() not in {
+                ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".wav", ".mp3", ".aac", ".flac", ".ogg", ""
+            }:
+                raise ValueError(
+                    f"不支持的文件格式：{p.suffix}，视频请使用 mp4/mov/avi/mkv/webm"
+                )
 
         for i, step in enumerate(steps):
             step_id = step["id"]
             fqn = step["function"]
+            if on_step is not None:
+                on_step(i + 1, len(steps), fqn)
             args = dict(step.get("args", {}))
             is_last = (i == len(steps) - 1)
 
@@ -84,7 +104,18 @@ class PlanEngine:
                 out_path = str(self.temp_dir / f"{step_id}_{uuid.uuid4().hex[:8]}.mp4")
 
             # Execute with auto-bridging
-            result = self._execute_step(fqn, args, input_val, out_path)
+            try:
+                result = self._execute_step(fqn, args, input_val, out_path)
+            except FileNotFoundError as exc:
+                raise FileNotFoundError(f"找不到输入文件：{exc}") from exc
+            except ValueError as exc:
+                msg = str(exc)
+                if "Unresolved reference" in msg:
+                    ref = msg.split("Unresolved reference:")[-1].strip()
+                    raise ValueError(f"执行计划出错：步骤引用了不存在的变量 {ref}") from exc
+                raise
+            except Exception as exc:
+                raise RuntimeError(f"第 {step_id} 步执行失败：{exc}") from exc
             bindings[f"${step_id}"] = result
 
         last_id = steps[-1]["id"]

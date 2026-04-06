@@ -4,6 +4,7 @@ import json
 import os
 import ssl
 import textwrap
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -63,7 +64,14 @@ class GeminiAdapter:
         content = ((body.get("choices") or [{}])[0].get("message") or {}).get("content", "")
         if not content:
             raise RuntimeError(f"Gemini returned empty content: {body}")
-        return self._extract_json(content)
+        plan = self._extract_json(content)
+        # Validate Plan v2 format (allow Ask responses to pass through)
+        if not plan.get("ask"):
+            if "steps" not in plan:
+                raise RuntimeError("AI 生成的计划格式有误，请重试（缺少 steps 字段）")
+            if "version" not in plan:
+                raise RuntimeError("AI 生成的计划格式有误，请重试（缺少 version 字段）")
+        return plan
 
     def _post_json(self, payload: dict[str, Any]) -> dict[str, Any]:
         req = urllib.request.Request(
@@ -77,20 +85,29 @@ class GeminiAdapter:
             },
             method="POST",
         )
-        try:
-            if self.ssl_verify:
-                context = ssl.create_default_context(cafile=certifi.where())
-            else:
-                context = ssl.create_default_context()
-                context.check_hostname = False
-                context.verify_mode = ssl.CERT_NONE
-            with urllib.request.urlopen(req, timeout=90, context=context) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="ignore")
-            raise RuntimeError(f"OpenRouter HTTP {exc.code}: {error_body}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"OpenRouter request failed: {exc}") from exc
+        if self.ssl_verify:
+            context = ssl.create_default_context(cafile=certifi.where())
+        else:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=90, context=context) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                error_body = exc.read().decode("utf-8", errors="ignore")
+                # 4xx errors are not retryable
+                if 400 <= exc.code < 500:
+                    raise RuntimeError(f"OpenRouter HTTP {exc.code}: {error_body}") from exc
+                last_error = RuntimeError(f"OpenRouter HTTP {exc.code}: {error_body}")
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                last_error = RuntimeError(f"AI 接口请求失败（第{attempt + 1}次）：{exc}")
+            if attempt < 2:
+                time.sleep(2 ** attempt)  # 1s, 2s, then fail
+        raise last_error  # type: ignore[misc]
 
     def _write_log(self, tag: str, request_payload: dict[str, Any], response_body: dict[str, Any]) -> None:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

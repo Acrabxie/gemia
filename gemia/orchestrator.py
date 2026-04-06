@@ -66,13 +66,13 @@ class GemiaOrchestrator:
         self._save_task(task)
         return task_id
 
-    def run_plan_dict(self, plan: dict) -> str:
+    def run_plan_dict(self, plan: dict, progress_callback=None) -> str:
         """Execute a plan dict directly (no file needed)."""
         task_id = self._new_task_id()
         plan.setdefault("plan_id", f"plan_{task_id}")
         plan_path = self.plans_dir / f"{task_id}_plan.json"
         plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
-        output_path = self._execute_plan(plan, task_id)
+        output_path = self._execute_plan(plan, task_id, progress_callback=progress_callback)
         task = {
             "task_id": task_id,
             "status": "succeeded",
@@ -190,13 +190,18 @@ class GemiaOrchestrator:
             "steps": steps,
         }
 
-    def _execute_plan(self, plan: dict[str, Any], task_id: str) -> str:
+    def _execute_plan(self, plan: dict[str, Any], task_id: str,
+                      progress_callback: "Callable[[int, int, str], None] | None" = None) -> str:
         context = {
             "input_path": plan["input_path"],
             "output_path": plan["output_path"],
             "step_outputs": {},
         }
-        for step in plan.get("steps", []):
+        steps = plan.get("steps", [])
+        for i, step in enumerate(steps):
+            if progress_callback is not None:
+                fqn = step.get("function", step.get("type", ""))
+                progress_callback(i + 1, len(steps), fqn)
             if "function" in step:
                 assets = self._step_primitive_v2(step, context)
                 context["step_outputs"][step["id"]] = assets
