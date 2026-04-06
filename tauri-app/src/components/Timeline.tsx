@@ -82,7 +82,7 @@ export default function Timeline({ videoRef, hasVideo }: Props) {
       style={{
         display: "flex",
         flexDirection: "column",
-        background: "#111",
+        background: "var(--surface)",
         borderTop: "1px solid var(--border)",
         borderBottom: "1px solid var(--border)",
         flexShrink: 0,
@@ -114,8 +114,8 @@ export default function Timeline({ videoRef, hasVideo }: Props) {
         <div style={{ position: "relative", height: 14, marginBottom: 2 }}>
           {ticks.map(({ pct: tp, label }) => (
             <div key={tp} style={{ position: "absolute", left: `${tp}%`, top: 0, transform: "translateX(-50%)" }}>
-              <div style={{ width: 1, height: 4, background: "#444", margin: "0 auto" }} />
-              <div style={{ fontSize: 9, fontFamily: "var(--font-mono)", color: "#555", marginTop: 1, whiteSpace: "nowrap" }}>
+              <div style={{ width: 1, height: 4, background: "var(--border2)", margin: "0 auto" }} />
+              <div style={{ fontSize: 9, fontFamily: "var(--font-mono)", color: "var(--text3)", marginTop: 1, whiteSpace: "nowrap" }}>
                 {label}
               </div>
             </div>

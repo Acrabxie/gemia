@@ -320,6 +320,87 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         # ── DEV: run Claude Code CLI (delete this block to remove dev feature) ──
+        if route == "/dev/gemini-code":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length else b"{}"
+                body = json.loads(raw)
+                user_request = str(body.get("prompt", "")).strip()
+                if not user_request:
+                    _json_response(self, 400, {"error": "prompt is empty"})
+                    return
+
+                # Read key source files as context
+                ctx_files = {
+                    "static/index.html": (_BASE_DIR / "static" / "index.html"),
+                    "server.py": (_BASE_DIR / "server.py"),
+                }
+                file_context = ""
+                for label, fpath in ctx_files.items():
+                    if fpath.exists():
+                        content = fpath.read_text(encoding="utf-8")
+                        file_context += f"\n\n=== {label} ===\n{content[:8000]}"
+
+                system_prompt = (
+                    "你是 Gemia 项目的代码修改助手。"
+                    "根据用户的需求，修改源文件并以 JSON 格式返回变更。\n"
+                    "返回格式（严格 JSON）：\n"
+                    '{"changes": [{"file": "相对路径", "old": "原始文本片段", "new": "替换文本"}], "summary": "一句话描述"}\n'
+                    "规则：\n"
+                    "1. old 必须是文件中实际存在的唯一文本片段\n"
+                    "2. 只修改必要的最小范围\n"
+                    "3. 如果无需修改代码，changes 返回空数组"
+                )
+                user_payload = {
+                    "request": user_request,
+                    "project_root": str(_BASE_DIR),
+                    "source_files": file_context,
+                }
+
+                from gemia.ai.gemini_adapter import GeminiAdapter
+                adapter = GeminiAdapter()
+                result = adapter._extract_json(
+                    adapter._post_json({
+                        "model": adapter.model,
+                        "temperature": 0,
+                        "response_format": {"type": "json_object"},
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                        ],
+                    }).get("choices", [{}])[0].get("message", {}).get("content", "{}")
+                )
+
+                applied = []
+                errors = []
+                for change in result.get("changes", []):
+                    rel = change.get("file", "")
+                    old_text = change.get("old", "")
+                    new_text = change.get("new", "")
+                    target = (_BASE_DIR / rel).resolve()
+                    if not str(target).startswith(str(_BASE_DIR)):
+                        errors.append(f"rejected: {rel} (path traversal)")
+                        continue
+                    if not target.exists():
+                        errors.append(f"not found: {rel}")
+                        continue
+                    content = target.read_text(encoding="utf-8")
+                    if old_text not in content:
+                        errors.append(f"old text not found in {rel}")
+                        continue
+                    target.write_text(content.replace(old_text, new_text, 1), encoding="utf-8")
+                    applied.append(rel)
+
+                _json_response(self, 200, {
+                    "ok": True,
+                    "summary": result.get("summary", "完成"),
+                    "applied": applied,
+                    "errors": errors,
+                })
+            except Exception as exc:
+                _json_response(self, 500, {"error": str(exc)})
+            return
+
         if route == "/dev/claude":
             try:
                 length = int(self.headers.get("Content-Length", 0))
@@ -335,8 +416,14 @@ class _Handler(BaseHTTPRequestHandler):
                 if not claude_bin:
                     _json_response(self, 500, {"error": "claude CLI not found in PATH"})
                     return
+                full_prompt = (
+                    f"你正在修改 Gemia 项目，项目根目录: {_BASE_DIR}\n"
+                    f"主要文件: static/index.html (Web UI), server.py (后端), gemia/ (核心模块)\n"
+                    f"任务: {prompt}\n"
+                    f"直接修改相关文件，完成后用一句话描述改了什么。"
+                )
                 result = subprocess.run(
-                    [claude_bin, "-p", prompt, "--dangerously-skip-permissions"],
+                    [claude_bin, "-p", full_prompt, "--dangerously-skip-permissions"],
                     cwd=str(_BASE_DIR),
                     capture_output=True,
                     text=True,

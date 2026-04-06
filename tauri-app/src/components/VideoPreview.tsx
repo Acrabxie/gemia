@@ -27,17 +27,12 @@ export default function VideoPreview({ videoRef, videoSrc, onFileSelect }: Props
     e.preventDefault();
     setDragOver(true);
   }
-
-  function handleDragLeave() {
-    setDragOver(false);
-  }
-
+  function handleDragLeave() { setDragOver(false); }
   function handleDrop(e: React.DragEvent) {
     e.preventDefault();
     setDragOver(false);
     const file = e.dataTransfer.files[0];
     if (file) {
-      // Tauri injects .path on File objects
       const filePath = (file as unknown as { path?: string }).path;
       if (filePath) onFileSelect(filePath);
     }
@@ -51,20 +46,21 @@ export default function VideoPreview({ videoRef, videoSrc, onFileSelect }: Props
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         style={{
-          height: 190,
-          margin: "10px 10px 0",
-          border: `1px dashed ${dragOver ? "var(--accent)" : "var(--border2)"}`,
-          borderRadius: "var(--r)",
-          background: dragOver ? "var(--accent-dim)" : "var(--surface)",
+          width: "100%",
+          height: "100%",
+          border: `1px solid ${dragOver ? "var(--accent)" : "var(--border)"}`,
+          borderRadius: 0,
+          background: dragOver ? "var(--accent-dim)" : "var(--surface2)",
           display: "flex",
           flexDirection: "column",
           alignItems: "center",
           justifyContent: "center",
           gap: 10,
           cursor: "pointer",
-          color: dragOver ? "var(--accent)" : "var(--text3)",
+          color: dragOver ? "var(--accent)" : "var(--text2)",
           transition: "all 0.15s",
           flexShrink: 0,
+          boxSizing: "border-box",
         }}
       >
         {uploading ? (
@@ -88,13 +84,11 @@ export default function VideoPreview({ videoRef, videoSrc, onFileSelect }: Props
     <div
       style={{
         position: "relative",
-        height: 290,
-        margin: "10px 10px 0",
-        borderRadius: "var(--r)",
-        overflow: "hidden",
+        width: "100%",
+        height: "100%",
         background: "#000",
         flexShrink: 0,
-        border: "1px solid var(--border)",
+        overflow: "hidden",
       }}
     >
       <video
@@ -109,7 +103,7 @@ export default function VideoPreview({ videoRef, videoSrc, onFileSelect }: Props
           position: "absolute",
           top: 8,
           right: 8,
-          background: "rgba(12,12,12,0.75)",
+          background: "rgba(255,255,255,0.85)",
           border: "1px solid var(--border2)",
           borderRadius: "var(--r-sm)",
           color: "var(--text2)",
@@ -128,7 +122,7 @@ export default function VideoPreview({ videoRef, videoSrc, onFileSelect }: Props
 
 function VideoIcon({ color }: { color: string }) {
   return (
-    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.5">
+    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="1.2">
       <rect x="2" y="4" width="15" height="16" rx="2" />
       <path d="M17 9l5-3v12l-5-3V9z" />
     </svg>

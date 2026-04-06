@@ -47,6 +47,9 @@ notes/
 # Logs
 *.log
 
+# Dev debug (local only)
+dev_feedback.txt
+
 # PyInstaller artifacts
 *.spec
 gemia-server.spec

@@ -120,8 +120,15 @@ class GemiaOrchestrator:
         assets = []
         for output in task.get("outputs", []):
             p = Path(output)
+            # Try to make path relative to _BASE_DIR so /file/ route can serve it
+            try:
+                rel = p.relative_to(self.root_dir)
+                serve_path = str(rel)
+            except ValueError:
+                serve_path = str(p)
             assets.append({
-                "path": str(p),
+                "path": serve_path,
+                "abs_path": str(p),
                 "exists": p.exists(),
                 "size_bytes": p.stat().st_size if p.exists() else None,
                 "kind": p.suffix.lower().lstrip("."),

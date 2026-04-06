@@ -40,7 +40,7 @@ class GeminiAdapter:
             or os.environ.get("OPENROUTER_API_KEY")
             or _read_config_key("openrouter_api_key")
         )
-        self.model = model or os.environ.get("OPENROUTER_MODEL", "google/gemini-3-flash")
+        self.model = model or os.environ.get("OPENROUTER_MODEL", "google/gemini-3-flash-preview")
         self.api_url = api_url
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -191,10 +191,20 @@ def build_plan_or_ask_system_prompt() -> str:
         - compose_preview_video: {"output_format": "before_after_hstack"}
 
         === CASE B: Request is too vague or missing key parameters ===
-        Return an Ask JSON (max 3 questions, concise):
+        Return an Ask JSON (max 3 questions). Each question must include "id", "text", and "input_type".
+        Choose the most appropriate input_type for each question:
+        - "choices": when there are a small set of discrete options (include "choices" array)
+        - "slider": when the answer is a numeric range (include "min", "max", "default", "step", "unit")
+        - "text": when a free-form answer is needed (optionally include "placeholder")
+
+        Example:
         {
           "ask": true,
-          "questions": ["What style or look are you going for?", "How long should the output be?"]
+          "questions": [
+            {"id": "q0", "text": "What visual style?", "input_type": "choices", "choices": ["warm", "cool", "vintage", "cyberpunk"]},
+            {"id": "q1", "text": "How long should the output be?", "input_type": "slider", "min": 1, "max": 60, "default": 10, "step": 1, "unit": "s"},
+            {"id": "q2", "text": "Any other notes?", "input_type": "text", "placeholder": "Optional details..."}
+          ]
         }
 
         When to ask:
@@ -282,10 +292,20 @@ def build_primitive_plan_system_prompt() -> str:
         For analysis functions (detect_scenes, get_metadata, waveform_monitor) that return data rather than media files, do NOT include them in a pipeline — only use them when the user explicitly asks for analysis results.
 
         === CASE B: Request is too vague or missing key parameters ===
-        Return an Ask JSON (max 3 questions, concise):
+        Return an Ask JSON (max 3 questions). Each question must include "id", "text", and "input_type".
+        Choose the most appropriate input_type:
+        - "choices": discrete options (include "choices" array)
+        - "slider": numeric range (include "min", "max", "default", "step", "unit")
+        - "text": free-form answer (optionally include "placeholder")
+
+        Example:
         {{
           "ask": true,
-          "questions": ["What style or look?", "How long should the output be?"]
+          "questions": [
+            {{"id": "q0", "text": "What visual style?", "input_type": "choices", "choices": ["warm", "cool", "vintage", "cyberpunk"]}},
+            {{"id": "q1", "text": "Output duration (seconds)?", "input_type": "slider", "min": 1, "max": 60, "default": 10, "step": 1, "unit": "s"}},
+            {{"id": "q2", "text": "Any other notes?", "input_type": "text", "placeholder": "Optional..."}}
+          ]
         }}
 
         When to ask: style/effect is totally unspecified, duration is ambiguous.

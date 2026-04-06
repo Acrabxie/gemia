@@ -52,6 +52,10 @@ def main() -> None:
     p_plan.add_argument("request")
     p_plan.add_argument("--video", required=True)
 
+    p_server = sub.add_parser("server", help="Start the web server")
+    p_server.add_argument("--host", default="127.0.0.1")
+    p_server.add_argument("--port", type=int, default=7788)
+
     args = parser.parse_args()
 
     if args.command == "run":
@@ -73,6 +77,15 @@ def main() -> None:
         print(json.dumps(get_assets(args.task_id), ensure_ascii=False, indent=2))
     elif args.command == "plan":
         print(json.dumps(GemiaOrchestrator().plan_from_prompt(args.request, input_path=args.video), ensure_ascii=False, indent=2))
+    elif args.command == "server":
+        import importlib.util, pathlib
+        _spec = importlib.util.spec_from_file_location(
+            "gemia_server",
+            pathlib.Path(__file__).parent.parent / "server.py",
+        )
+        _srv = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_srv)
+        _srv.main(host=args.host, port=args.port)
 
 
 def _cmd_run(args: argparse.Namespace) -> None:

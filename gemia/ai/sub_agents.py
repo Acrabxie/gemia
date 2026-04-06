@@ -34,9 +34,9 @@ class SubAgentDef:
 BUILTIN_AGENTS: dict[str, SubAgentDef] = {
     "Gemini3.1pro": SubAgentDef(
         name="Gemini3.1pro",
-        model="google/gemini-2.5-pro",
+        model="google/gemini-3-flash-preview",
         role="planner",
-        description="Gemini 3.1 Pro via OpenRouter. Better for complex multi-step plans.",
+        description="Gemini 3 Flash via OpenRouter. Fast and cost-efficient planner.",
     ),
     "GPT5.4": SubAgentDef(
         name="GPT5.4",

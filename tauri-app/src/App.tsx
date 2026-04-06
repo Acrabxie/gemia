@@ -5,7 +5,7 @@ import Timeline from "./components/Timeline";
 import QuickActions from "./components/QuickActions";
 import ChatPanel from "./components/ChatPanel";
 import SkillsPanel from "./components/SkillsPanel";
-import type { AppStatus, ChatMessage, Skill } from "./types";
+import type { AppStatus, AskQuestion, ChatMessage, Skill } from "./types";
 import DevPanel from "./dev/DevPanel"; // [DEV] remove this line to disable dev panel
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -21,7 +21,7 @@ export default function App() {
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [serverVideoPath, setServerVideoPath] = useState<string | null>(null);
   const [pendingAskId, setPendingAskId] = useState<string | null>(null);
-  const [pendingAskQuestions, setPendingAskQuestions] = useState<string[]>([]);
+  const [pendingAskQuestions, setPendingAskQuestions] = useState<AskQuestion[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [devPanelOpen, setDevPanelOpen] = useState(false); // [DEV]
   const videoRef = useRef<HTMLVideoElement>(null!);
@@ -180,55 +180,24 @@ export default function App() {
 
   // ── Run prompt ────────────────────────────────────────────────────────
 
-  const handleSend = useCallback(
-    async (text: string) => {
-      if (!serverVideoPath) return;
-
-      if (pendingAskId) {
-        // answering a question
-        const askId = pendingAskId;
-        setPendingAskId(null);
-        setPendingAskQuestions([]);
-        setIsRunning(true);
-        setStatus("planning");
-        addMsg({ role: "user", content: text });
-        addMsg({ role: "status", content: "正在规划...", statusType: "planning" });
-        try {
-          const r = await api("POST", `/answer-ask/${askId}`, { answers: { answer: text } });
-          if (r.data.ask) {
-            setStatus("asking");
-            setIsRunning(false);
-            setPendingAskId(r.data.ask_id as string);
-            setPendingAskQuestions((r.data.questions as string[]) ?? []);
-            updateLastStatus("需要更多信息", "asking");
-            return;
-          }
-          if (!r.ok || !r.data.task_id) throw new Error((r.data.error as string) ?? "Server error");
-          setStatus("executing");
-          updateLastStatus("正在执行...", "executing");
-          startPolling(r.data.task_id as string);
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          setStatus("error");
-          setIsRunning(false);
-          updateLastStatus(`错误: ${msg}`, "error");
-        }
-        return;
-      }
-
-      // new prompt
-      stopPolling();
+  const handleAnswerAsk = useCallback(
+    async (answers: Record<string, string>) => {
+      if (!pendingAskId) return;
+      const askId = pendingAskId;
+      setPendingAskId(null);
+      setPendingAskQuestions([]);
       setIsRunning(true);
       setStatus("planning");
-      addMsg({ role: "user", content: text });
+      const summary = Object.values(answers).join(" / ");
+      addMsg({ role: "user", content: summary });
       addMsg({ role: "status", content: "正在规划...", statusType: "planning" });
       try {
-        const r = await api("POST", "/run-prompt", { prompt: text, video: serverVideoPath });
+        const r = await api("POST", `/answer-ask/${askId}`, { answers });
         if (r.data.ask) {
           setStatus("asking");
           setIsRunning(false);
           setPendingAskId(r.data.ask_id as string);
-          setPendingAskQuestions((r.data.questions as string[]) ?? []);
+          setPendingAskQuestions((r.data.questions as AskQuestion[]) ?? []);
           updateLastStatus("需要更多信息", "asking");
           return;
         }
@@ -243,7 +212,40 @@ export default function App() {
         updateLastStatus(`错误: ${msg}`, "error");
       }
     },
-    [serverVideoPath, pendingAskId, addMsg, api, stopPolling, updateLastStatus, startPolling]
+    [pendingAskId, addMsg, api, updateLastStatus, startPolling]
+  );
+
+  const handleSend = useCallback(
+    async (text: string) => {
+      if (!serverVideoPath) return;
+      // new prompt
+      stopPolling();
+      setIsRunning(true);
+      setStatus("planning");
+      addMsg({ role: "user", content: text });
+      addMsg({ role: "status", content: "正在规划...", statusType: "planning" });
+      try {
+        const r = await api("POST", "/run-prompt", { prompt: text, video: serverVideoPath });
+        if (r.data.ask) {
+          setStatus("asking");
+          setIsRunning(false);
+          setPendingAskId(r.data.ask_id as string);
+          setPendingAskQuestions((r.data.questions as AskQuestion[]) ?? []);
+          updateLastStatus("需要更多信息", "asking");
+          return;
+        }
+        if (!r.ok || !r.data.task_id) throw new Error((r.data.error as string) ?? "Server error");
+        setStatus("executing");
+        updateLastStatus("正在执行...", "executing");
+        startPolling(r.data.task_id as string);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setStatus("error");
+        setIsRunning(false);
+        updateLastStatus(`错误: ${msg}`, "error");
+      }
+    },
+    [serverVideoPath, addMsg, api, stopPolling, updateLastStatus, startPolling]
   );
 
   // ── Run skill ─────────────────────────────────────────────────────────
@@ -312,6 +314,7 @@ export default function App() {
             pendingAskId={pendingAskId}
             pendingAskQuestions={pendingAskQuestions}
             onSend={handleSend}
+            onAnswerAsk={handleAnswerAsk}
           />
         </div>
         {/* Skills sidebar */}

@@ -13,7 +13,7 @@ export default function SkillsPanel({ skills, hasVideo, isRunning, onRunSkill }:
   return (
     <div
       style={{
-        width: 195,
+        width: 200,
         borderLeft: "1px solid var(--border)",
         background: "var(--surface)",
         display: "flex",
