@@ -274,10 +274,9 @@ User prompt
 
 See [CONTRIBUTORS.md](CONTRIBUTORS.md).
 
-- Acrabxie
 - Claude
-- chatgpt（codex）
-- Gemini
+- ChatGPT
+- Acrabxie
 
 ## License
 
