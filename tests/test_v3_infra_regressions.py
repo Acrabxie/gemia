@@ -92,7 +92,6 @@ def test_session_manager_caps_sessions_and_sweeps_idle(monkeypatch, tmp_path: Pa
         max_sessions=1,
         idle_timeout_sec=1,
         sweep_interval_sec=0,
-        cleanup_workdirs=True,
     )
     first = manager.create_session()
     first.output_dir.mkdir(parents=True, exist_ok=True)
@@ -105,7 +104,8 @@ def test_session_manager_caps_sessions_and_sweeps_idle(monkeypatch, tmp_path: Pa
         first.last_used_at = time.time() - 10
     assert manager.cleanup_idle() == [first.session_id]
     assert manager.get(first.session_id) is None
-    assert not marker.exists()
+    # Idle sweep must never delete workdir files — they are user data.
+    assert marker.exists()
     manager.close_all(remove_workdirs=True)
 
 
@@ -403,7 +403,7 @@ def test_gemini_client_proxy_econnrefused_error_provides_diagnostic() -> None:
     # We don't actually make the request; we just verify the error path works.
     client = GeminiClientV3(
         api_key="test-key-unused",
-        model="google/gemini-3.1-pro",
+        model="google/gemini-3.1-pro-preview",
         proxy="socks5h://127.0.0.1:59999",  # High port, almost certainly not listening
     )
 
@@ -430,3 +430,13 @@ def test_gemini_client_proxy_econnrefused_error_provides_diagnostic() -> None:
         assert "Connection refused" in error_msg or "refused connection" in error_msg
     except asyncio.TimeoutError:
         pytest.skip("Proxy connection attempt timed out (expected in test environment)")
+
+
+def test_v3_frontend_renders_clip_transition_badge() -> None:
+    """Clips with a stored transition must render the ⇄ badge (regression:
+    transitions were stored backend-side but invisible in every frontend)."""
+    source = Path("static/v3/v3.js").read_text(encoding="utf-8")
+    assert "clip.transition" in source
+    assert "ptl-clip-trans" in source
+    css = Path("static/v3/v3.css").read_text(encoding="utf-8")
+    assert ".ptl-clip-trans" in css

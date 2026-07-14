@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Lumeri · 图标目录（开发页）</title>
+<link rel="icon" type="image/svg+xml" href="/v3/lumeri-favicon.svg" />
+<style>
+  /* 目录页自身也守 05 手册:无边框、表面梯、M3 双层阴影、香肠圆角 */
+  :root {
+    --bg:#14171c; --s1:#1b1f26; --s2:#232833; --s3:#2c323f;
+    --text:#eaeef3; --dim:#8b96a4; --mute:#7d8590;
+    --brand:#5FC6DE; --bright:#8BD8EA;
+    --L1: 0 1px 2px rgba(0,0,0,.3), 0 1px 3px 1px rgba(0,0,0,.15);
+    --L2: 0 1px 2px rgba(0,0,0,.3), 0 2px 6px 2px rgba(0,0,0,.15);
+    --L3: 0 1px 3px rgba(0,0,0,.3), 0 4px 8px 3px rgba(0,0,0,.15);
+    --L4: 0 2px 3px rgba(0,0,0,.3), 0 6px 10px 4px rgba(0,0,0,.15);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "PingFang SC", sans-serif;
+    padding: 32px 36px 64px;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1 { font-size: 17px; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 4px; display: flex; align-items: center; gap: 10px; }
+  .sub { color: var(--dim); font-size: 12px; margin: 0 0 28px; }
+  h2 { font-size: 11px; font-weight: 600; letter-spacing: 1.4px; text-transform: uppercase; color: var(--mute); margin: 30px 0 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 10px; }
+  .tile {
+    background: var(--s2); border-radius: 12px; box-shadow: var(--L1);
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 16px 6px 11px; transition: background .14s, box-shadow .14s;
+  }
+  .tile:hover { background: var(--s3); box-shadow: var(--L2); }
+  .tile svg { width: 24px; height: 24px; color: var(--text); }
+  .tile .n { font-size: 10px; font-weight: 500; color: var(--mute); font-family: ui-monospace, SF Mono, Menlo, monospace; }
+  .row { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+  .card {
+    background: var(--s2); border-radius: 18px; padding: 18px 22px;
+    display: flex; flex-direction: column; gap: 6px; min-width: 130px; align-items: center;
+  }
+  .card .n { font-size: 10px; font-weight: 500; color: var(--mute); font-family: ui-monospace, monospace; }
+  .sizes svg { color: var(--text); }
+  .tint svg { color: var(--brand); }
+  .demo-btns { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    background: var(--s3); color: var(--text); border: none; cursor: pointer;
+    padding: 9px 16px; border-radius: 999px; font: inherit; font-size: 13px;
+    box-shadow: var(--L1);
+  }
+  .pill svg { width: 17px; height: 17px; }
+  .pill.primary { background: var(--brand); color: #05171d; font-weight: 650; }
+  .pill.icon-only { padding: 10px; }
+</style>
+</head>
+<body>
+<h1><svg width="22" height="22"><use href="#b-mark"/></svg>Lumeri 图标目录</h1>
+<p class="sub">24 网格 · 1.8 描边 · 圆帽圆角 · currentColor · 唯一来源 <code>static/v3/icons.svg</code> · 规范 <code>05-界面UI.md {ui.icon}</code>（本页为开发目录,不入产品导航）</p>
+
+<h2 id="cat-anchor">阴影梯自检（M3 双层配方 L1→L4,层级应逐级可读）</h2>
+<div class="row">
+  <div class="card" style="box-shadow:var(--L1)"><span class="n">L1 · 卡片</span></div>
+  <div class="card" style="box-shadow:var(--L2)"><span class="n">L2 · 菜单</span></div>
+  <div class="card" style="box-shadow:var(--L3)"><span class="n">L3 · 高浮层</span></div>
+  <div class="card" style="box-shadow:var(--L4)"><span class="n">L4 · 拖拽中</span></div>
+</div>
+
+<h2>尺寸与用法示例（图案优先:文字退居 tooltip/aria-label）</h2>
+<div class="row">
+  <div class="card sizes"><div class="row" style="gap:12px">
+    <svg width="16" height="16"><use href="#i-wand"/></svg>
+    <svg width="20" height="20"><use href="#i-wand"/></svg>
+    <svg width="24" height="24"><use href="#i-wand"/></svg>
+    <svg width="32" height="32"><use href="#i-wand"/></svg>
+  </div><span class="n">16 / 20 / 24 / 32</span></div>
+  <div class="demo-btns">
+    <button class="pill icon-only" title="上传素材" aria-label="上传素材"><svg><use href="#i-attach"/></svg></button>
+    <button class="pill icon-only" title="撤销" aria-label="撤销"><svg><use href="#i-undo"/></svg></button>
+    <button class="pill icon-only" title="分割片段" aria-label="分割片段"><svg><use href="#i-split"/></svg></button>
+    <button class="pill"><svg><use href="#i-export"/></svg>导出</button>
+    <button class="pill primary"><svg><use href="#i-send"/></svg>发送</button>
+  </div>
+</div>
+
+<div id="sections"></div>
+
+<script>
+  // 目录数据:分区 → 图标 id 列表(与 icons.svg 同步维护)
+  const SECTIONS = {
+    "播放 playback": ["i-play","i-pause","i-stop","i-skip-back","i-skip-fwd","i-loop","i-volume","i-volume-x","i-camera"],
+    "输入 composer": ["i-plus","i-send","i-mic","i-attach","i-slash","i-close"],
+    "导航 nav": ["i-chevron-l","i-chevron-r","i-chevron-u","i-chevron-d","i-more","i-search","i-sliders","i-help","i-clock","i-user","i-logout","i-keyboard"],
+    "编辑 edit": ["i-split","i-trash","i-undo","i-redo","i-marker","i-magnet","i-zoom-in","i-zoom-out","i-crop","i-layers","i-speed","i-grip","i-text","i-droplet","i-transition"],
+    "媒体 media": ["i-film","i-image","i-music","i-captions","i-waveform","i-grid","i-folder","i-export","i-download","i-upload","i-link","i-copy"],
+    "AI 与状态 status": ["i-wand","i-spark","i-check","i-check-circle","i-x-circle","i-warning","i-info","i-refresh","i-eye","i-eye-off","i-lock","i-bookmark","i-expand","i-collapse"],
+    "品牌 brand": ["b-mark","b-loading","b-toggle-on","b-toggle-off","b-progress","b-dot"],
+  };
+  // 注入 sprite(同源 fetch 内联,兼容一切 <use> 情形)
+  fetch("icons.svg").then(r => r.text()).then(t => {
+    const holder = document.createElement("div");
+    holder.innerHTML = t;
+    document.body.prepend(holder.firstElementChild);
+    const root = document.getElementById("sections");
+    for (const [name, ids] of Object.entries(SECTIONS)) {
+      const h = document.createElement("h2"); h.textContent = `${name} · ${ids.length}`;
+      const g = document.createElement("div"); g.className = "grid";
+      g.innerHTML = ids.map(id => `
+        <div class="tile${id.startsWith("b-") ? " tint" : ""}" title="${id}">
+          <svg><use href="#${id}"/></svg><span class="n">${id.replace(/^[ib]-/, "")}</span>
+        </div>`).join("");
+      root.append(h, g);
+    }
+  });
+</script>
+</body>
+</html>

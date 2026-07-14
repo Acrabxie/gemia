@@ -1,14 +1,33 @@
 [project]
 name = "lumeri"
-version = "0.2.0"
-description = "Lumeri Video — agentic video project workspace"
+version = "0.1.0"
+description = "AI-native video/image/audio workbench"
 requires-python = ">=3.12"
 dependencies = [
+    "numpy>=2.0",
     "Pillow>=11.0",
-    "PyYAML>=6",
+    "opencv-python>=4.9",
+    "scikit-image>=0.22",
+    "onnxruntime>=1.20",
+    "moviepy>=1.0",
+    "librosa>=0.10",
+    "pydub>=0.25",
+    "soundfile>=0.12",
+    "scipy>=1.12",
     "certifi",
+    "PyYAML>=6",
     "opentimelineio>=0.17",
+    "regex>=2024.11.6",
 ]
+
+[project.scripts]
+lumeri-skill-stats = "gemia.ai.skill_telemetry:main"
+
+[tool.setuptools.packages.find]
+include = ["gemia*", "lumerai*", "lumenframe*"]
+
+[tool.setuptools.package-data]
+"gemia.ai" = ["skills/*/SKILL.md", "skills/_combos/*.yaml"]
 
 [project.optional-dependencies]
 dev = [
@@ -17,17 +36,17 @@ dev = [
 ]
 # Optional NLE interchange adapters (OTIO spun these out of core). Opt in with
 # `pip install lumeri[interop]` to enable EDL / FCP7 XML / FCPX export+import.
+# Core install stays light; otio_json/otioz/otiod ship with opentimelineio.
 interop = [
     "otio-cmx3600-adapter>=1.0",
     "otio-fcp-adapter>=1.0",
     "otio-fcpx-xml-adapter>=1.0",
 ]
-
-[tool.setuptools.packages.find]
-include = ["gemia*", "lumerai*"]
-
-[tool.setuptools.package-data]
-"gemia" = ["prompts/*.md"]
+# Lumeri AS an MCP server (docs/mcp-interface-plan.md, Direction A). Opt in with
+# `pip install lumeri[mcp]` to run `python -m gemia mcp-serve`. The core install
+# stays light; gemia/mcp/server.py imports the SDK lazily inside its serve
+# entrypoints, so importing gemia without this extra never fails.
+mcp = ["mcp>=1.12,<2"]
 
 [build-system]
 requires = ["setuptools>=68"]

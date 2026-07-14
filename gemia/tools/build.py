@@ -51,10 +51,11 @@ _PROCESSES: dict[str, tuple[subprocess.Popen[str], float]] = {}
 
 
 async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
-    """Async submit Python code to sandbox.
+    """Async submit code to sandbox (supports multiple languages).
 
     Args:
-        code: required, Python source code string
+        code: required, source code string (language determined by 'language' param)
+        language: optional, default "python3". Supported: "python3", "node", "bash", etc.
         filename: optional, default "script.py", must be simple name (no path separators)
         args: optional, list of string arguments to pass to script
         timeout_sec: optional, default 120, clamped to (0, 600]
@@ -79,6 +80,18 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     code = str(args.get("code") or "").strip()
     if not code:
         raise ValueError("build requires non-empty 'code' argument")
+
+    language = str(args.get("language") or "python3").strip().lower()
+    # Normalize language names
+    if language in ("node", "nodejs", "javascript", "js"):
+        language = "node"
+    elif language in ("bash", "shell", "sh"):
+        language = "bash"
+    elif language not in ("python3", "python", "go", "ruby", "rust"):
+        # Strict validation: only known languages pass through
+        raise ValueError(
+            f"Unsupported language '{language}'. Supported: python3, node, bash, go, ruby, rust"
+        )
 
     filename = str(args.get("filename") or "script.py").strip()
     if "/" in filename or "\\" in filename:
@@ -118,7 +131,7 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     # assets, so there is no pending asset to pre-allocate.
     record = ctx.jobs.submit(
         kind="build",
-        provider="local:python3-sandbox",
+        provider=f"local:{language}-sandbox",
         operation_name="pending",
         pending_asset_id="-",
         estimated_eta_sec=timeout_sec,
@@ -141,12 +154,24 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     # Build sandboxed command. When the user has explicitly disabled the
     # sandbox (POST /settings/sandbox), run the raw command with full system
     # access and report enforced=False honestly — do NOT raise.
+    # Map language to interpreter
+    interpreters = {
+        "python3": "/usr/bin/env python3",
+        "python": "/usr/bin/env python3",
+        "node": "/usr/bin/env node",
+        "bash": "/bin/bash",
+        "go": "/usr/bin/env go run",
+        "ruby": "/usr/bin/env ruby",
+        "rust": "/usr/bin/env rustc",
+    }
+    interpreter = interpreters.get(language, "/usr/bin/env python3")
+    
     if is_sandbox_disabled():
-        cmd = ["/usr/bin/env", "python3", str(script_path), *script_args]
+        cmd = interpreter.split() + [str(script_path), *script_args]
         enforced = False
     else:
         cmd, enforced = build_v4_sandbox_command(
-            ["/usr/bin/env", "python3", str(script_path), *script_args],
+            interpreter.split() + [str(script_path), *script_args],
             workspace_dir=ctx.output_dir,
         )
         if not enforced:

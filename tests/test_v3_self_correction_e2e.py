@@ -2,8 +2,9 @@
 
 This is the "advanced agent" moment, made deterministic: a scripted model
 asks color_grade for an unavailable look, the host fails honestly with a
-typed error + valid_options, and the model reads it and self-corrects to a
-real look — which actually runs through ffmpeg and produces a file. Only the
+typed error + valid_options, and the model reads it and self-corrects to the
+appropriate zero-saturation tool — which actually runs through ffmpeg and
+produces a file. Only the
 model's token output is scripted; the error typing, the feedback, the real
 grading, and the SSE event sequence the frontend groups into an arc are all
 real. No API keys, usd=0.
@@ -26,7 +27,8 @@ pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg n
 
 class _ScriptedColorFix:
     """Asks for an unavailable look, then — having seen the typed error fed
-    back as a tool_result — diagnoses and switches to a real look."""
+    back as a tool_result — diagnoses and switches to a real monochrome
+    operation."""
 
     model = "fake"
 
@@ -49,13 +51,13 @@ class _ScriptedColorFix:
             # The diagnosis line — streamed right before the corrective call, so
             # the frontend attaches it to the retry card.
             yield {"kind": "text_delta",
-                   "text": "There's no black-and-white look; going with the cool tone instead."}
-            yield {"kind": "tool_call_start", "index": 0, "id": "c2", "name": "color_grade"}
+                   "text": "That look is unsupported; applying true zero saturation instead."}
+            yield {"kind": "tool_call_start", "index": 0, "id": "c2", "name": "adjust_media"}
             yield {"kind": "tool_call_args_delta", "index": 0,
-                   "delta": json.dumps({"asset_id": self.asset_id, "look": "cool"})}
+                   "delta": json.dumps({"asset_id": self.asset_id, "saturation": 0.0})}
             yield {"kind": "finish", "reason": "tool_calls"}
             return
-        yield {"kind": "text_delta", "text": "Graded to a cool look."}
+        yield {"kind": "text_delta", "text": "Converted to black and white."}
         yield {"kind": "finish", "reason": "stop"}
 
 
@@ -87,19 +89,21 @@ def test_self_correction_arc_end_to_end_ffmpeg(tmp_path: Path) -> None:
     assert errs[0]["error_code"] == "E_UNSUPPORTED"
     assert "cool" in errs[0]["valid_options"]
 
-    # 2) The corrective call really ran ffmpeg and produced a graded asset.
+    # 2) The corrective call really ran ffmpeg and produced a monochrome asset.
     results = [e for e in events if e.get("kind") == "tool_exec_result"
-               and e.get("tool_name") == "color_grade"]
+               and e.get("tool_name") == "adjust_media"]
     assert len(results) == 1
     produced = results[0]["result"]["asset_id"]
     assert Path(loop.registry.get(produced).path).exists()
 
-    # 3) Order is failure → success on the same tool: exactly the shape the
-    #    frontend collapses into one "self-corrected" arc.
-    seq = [e["kind"] for e in events
-           if e.get("tool_name") == "color_grade"
-           and e["kind"] in ("tool_exec_error", "tool_exec_result")]
-    assert seq == ["tool_exec_error", "tool_exec_result"]
+    # 3) The correction is failure → semantically appropriate success.
+    seq = [(e["kind"], e.get("tool_name")) for e in events
+           if e["kind"] in ("tool_exec_error", "tool_exec_result")
+           and e.get("tool_name") in {"color_grade", "adjust_media"}]
+    assert seq == [
+        ("tool_exec_error", "color_grade"),
+        ("tool_exec_result", "adjust_media"),
+    ]
 
     # 4) The turn completed cleanly — no breaker trip, no fabricated success.
     assert [e for e in events if e.get("kind") == "turn_complete"]

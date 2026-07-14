@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Any
 
 from gemia.tools._context import ToolContext
+from gemia.tools._library_session import (
+    account_id_for as _account_id,
+    ensure_session_asset as _session_id_for_library_asset,
+)
 
 _VALID_KINDS = {"video", "image", "audio", "any"}
 _DEFAULT_LIMIT = 10
@@ -76,51 +80,6 @@ def _session_registry_matches(
         )
     matches.sort(key=lambda item: item[0], reverse=True)
     return [item[1] for item in matches[:limit]]
-
-
-def _account_id(ctx: ToolContext) -> str:
-    explicit = str(ctx.extra.get("account_id") or "").strip()
-    if explicit:
-        return explicit
-    try:
-        from gemia import accounts
-
-        return str(accounts.current_account_id() or "").strip()
-    except Exception:
-        return ""
-
-
-def _session_id_for_library_asset(ctx: ToolContext, asset: dict[str, Any]) -> str | None:
-    source_path = str(
-        asset.get("source_path")
-        or asset.get("storage_path")
-        or asset.get("original_path")
-        or ""
-    ).strip()
-    if not source_path:
-        return None
-    path = Path(source_path)
-    if not path.exists():
-        return None
-
-    mapping = ctx.extra.setdefault("library_asset_session_ids", {})
-    if not isinstance(mapping, dict):
-        mapping = {}
-        ctx.extra["library_asset_session_ids"] = mapping
-    key = str(path.resolve())
-    existing = mapping.get(key)
-    if isinstance(existing, str) and ctx.registry.contains(existing):
-        return existing
-
-    try:
-        record = ctx.registry.add_external(
-            path,
-            summary=f"library asset: {asset.get('name') or path.name}",
-        )
-    except Exception:
-        return None
-    mapping[key] = record.asset_id
-    return record.asset_id
 
 
 def _library_matches(

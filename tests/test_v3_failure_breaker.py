@@ -1,9 +1,9 @@
-"""Per-tool consecutive-failure circuit breaker for AgentLoopV3.
+"""Per-tool consecutive-failure guidance for AgentLoopV3.
 
 There is no longer a fixed cap on total tool steps per turn. The only
-runaway guard is: if the SAME tool fails to dispatch
-``_MAX_CONSECUTIVE_TOOL_FAILURES`` (=5) times in a row, the turn stops; a
-successful dispatch of that tool resets its streak.
+host behavior for repeated failures is: if the SAME tool fails to dispatch
+``_REPEATED_FAILURE_NUDGE_THRESHOLD`` (=5) times in a row, the loop prompts
+Gemini to change approach; a successful dispatch of that tool resets its streak.
 """
 from __future__ import annotations
 
@@ -13,28 +13,28 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 import gemia.agent_loop_v3 as loop_mod
-from gemia.agent_loop_v3 import AgentLoopV3, _MAX_CONSECUTIVE_TOOL_FAILURES
+from gemia.agent_loop_v3 import AgentLoopV3, _REPEATED_FAILURE_NUDGE_THRESHOLD
 from gemia.errors import ToolError
 
 
-class _AlwaysCallsBuild:
-    """Fake model that keeps calling ``build`` with empty code (which raises),
-    up to a hard safety ceiling so a broken breaker fails loudly instead of
-    hanging the test."""
+class _RepeatsBuildThenStops:
+    """Fake model that calls ``build`` with empty code until the nudge threshold,
+    then stops with text. This proves repeated failures do not hard-stop the
+    turn; the model remains in control."""
 
     model = "fake"
 
-    def __init__(self, ceiling: int = 30) -> None:
+    def __init__(self, repeat_count: int = _REPEATED_FAILURE_NUDGE_THRESHOLD) -> None:
         self.calls = 0
-        self._ceiling = ceiling
+        self._repeat_count = repeat_count
 
     async def stream_turn(
         self, messages: list[dict[str, Any]], *, tools=None, temperature: float = 0.7
     ) -> AsyncIterator[dict[str, Any]]:
         del messages, tools, temperature
         self.calls += 1
-        if self.calls > self._ceiling:  # safety net: breaker should fire first
-            yield {"kind": "text_delta", "text": "ceiling hit"}
+        if self.calls > self._repeat_count:
+            yield {"kind": "text_delta", "text": "switching approach"}
             yield {"kind": "finish", "reason": "stop"}
             return
         yield {"kind": "tool_call_start", "index": 0, "id": f"c{self.calls}", "name": "build"}
@@ -42,11 +42,11 @@ class _AlwaysCallsBuild:
         yield {"kind": "finish", "reason": "tool_calls"}
 
 
-def test_breaker_trips_after_five_consecutive_failures(tmp_path: Path) -> None:
-    client = _AlwaysCallsBuild()
+def test_repeated_failure_nudge_does_not_stop_turn(tmp_path: Path) -> None:
+    client = _RepeatsBuildThenStops()
     events: list[dict[str, Any]] = []
     loop = AgentLoopV3(
-        session_id="breaker",
+        session_id="failure_nudge",
         output_dir=tmp_path,
         gemini_client=client,  # type: ignore[arg-type]
         emit_event=events.append,
@@ -54,20 +54,27 @@ def test_breaker_trips_after_five_consecutive_failures(tmp_path: Path) -> None:
 
     asyncio.run(loop.run_turn("build something broken"))
 
-    # 5 consecutive build failures → breaker trips on the 5th; the model is
-    # called exactly 5 times (never reaches the safety ceiling).
-    assert client.calls == _MAX_CONSECUTIVE_TOOL_FAILURES == 5
-    turn_errors = [e for e in events if e.get("kind") == "turn_error"]
-    assert len(turn_errors) == 1
-    assert "build" in turn_errors[0]["error"]
-    assert "5 times" in turn_errors[0]["error"]
+    # 5 consecutive build failures → a model-facing nudge is appended, but the
+    # host does not stop AT the threshold. The fake model remains in control,
+    # emits text, then the completion ledger widens adjacent/full routes before
+    # honestly ending incomplete because the failures were never repaired.
+    assert client.calls == _REPEATED_FAILURE_NUDGE_THRESHOLD + 3
+    assert any(e.get("reason") == "incomplete_goal" for e in events)
+    assert not [e for e in events if e.get("kind") == "turn_complete"]
     # Every attempt surfaced an error to the model — none silently dropped.
     assert sum(1 for e in events if e.get("kind") == "tool_exec_error") == 5
+    nudges = [
+        m for m in loop._messages
+        if m.get("role") == "user"
+        and "Repeated tool failure guidance" in str(m.get("content"))
+    ]
+    assert len(nudges) == 1
+    assert "build" in nudges[0]["content"]
 
 
 class _Flaky:
     """Stateful dispatcher: raises on calls 1-4, succeeds on call 5, raises on
-    6-9. A working breaker (with success-reset) never reaches 5-in-a-row."""
+    6-9. A working streak tracker (with success-reset) never reaches 5-in-a-row."""
 
     def __init__(self) -> None:
         self.n = 0
@@ -101,14 +108,14 @@ class _CallsFlaky:
         yield {"kind": "finish", "reason": "stop"}
 
 
-def test_breaker_resets_streak_on_success(tmp_path: Path, monkeypatch) -> None:
+def test_failure_nudge_streak_resets_on_success(tmp_path: Path, monkeypatch) -> None:
     flaky = _Flaky()
     monkeypatch.setitem(loop_mod.DISPATCHER, "flaky", flaky)
 
     client = _CallsFlaky()
     events: list[dict[str, Any]] = []
     loop = AgentLoopV3(
-        session_id="breaker_reset",
+        session_id="failure_nudge_reset",
         output_dir=tmp_path,
         gemini_client=client,  # type: ignore[arg-type]
         emit_event=events.append,
@@ -118,10 +125,13 @@ def test_breaker_resets_streak_on_success(tmp_path: Path, monkeypatch) -> None:
 
     # 4 fails, 1 success (resets streak), 4 fails — never 5 in a row. The turn
     # runs to natural completion (call #10 with no tool calls). Without the
-    # reset, the streak would hit 5 on the 6th flaky call and trip early.
-    assert client.calls == 10
-    assert not [e for e in events if e.get("kind") == "turn_error"]
-    assert [e for e in events if e.get("kind") == "turn_complete"]
+    # reset, the streak would hit 5 on the 6th flaky call and produce a nudge.
+    # The final four failures remain unresolved, so after the one-shot gate and
+    # full-route retry the ledger ends incomplete (the success still reset the
+    # repeated-failure streak as asserted below).
+    assert client.calls == 12
+    assert any(e.get("reason") == "incomplete_goal" for e in events)
+    assert not [e for e in events if e.get("kind") == "turn_complete"]
 
 
 class _RaisesToolError:
@@ -211,9 +221,9 @@ class _RaisesAlternatingCodes:
         raise ToolError(f"failure #{self.n}", code=code, recovery="fix_args")
 
 
-def test_breaker_soft_resets_when_error_code_changes(tmp_path: Path, monkeypatch) -> None:
+def test_failure_nudge_soft_resets_when_error_code_changes(tmp_path: Path, monkeypatch) -> None:
     """Strictly alternating error codes never form a 5-long same-(tool,code)
-    streak, so the breaker does not trip even across 9 failures."""
+    streak, so no repeated-failure nudge is appended even across 9 failures."""
     monkeypatch.setitem(loop_mod.DISPATCHER, "adapt_tool", _RaisesAlternatingCodes())
     client = _CallsToolThenStops("adapt_tool", call_times=9)
     events: list[dict[str, Any]] = []
@@ -226,7 +236,84 @@ def test_breaker_soft_resets_when_error_code_changes(tmp_path: Path, monkeypatch
 
     asyncio.run(loop.run_turn("keep adapting"))
 
-    assert client.calls == 10  # 9 tool turns + 1 closing text turn
-    assert not [e for e in events if e.get("kind") == "turn_error"]
-    assert [e for e in events if e.get("kind") == "turn_complete"]
+    # 9 tool turns + closing text + gate + full-route retry = 12; unresolved
+    # failures end incomplete, but alternating codes still never trigger the
+    # repeated-same-error guidance.
+    assert client.calls == 12
+    assert any(e.get("reason") == "incomplete_goal" for e in events)
+    assert not [e for e in events if e.get("kind") == "turn_complete"]
     assert sum(1 for e in events if e.get("kind") == "tool_exec_error") == 9
+    assert not [
+        m for m in loop._messages
+        if m.get("role") == "user"
+        and "Repeated tool failure guidance" in str(m.get("content"))
+    ]
+
+
+class _ReturnsFailure:
+    async def __call__(self, args: dict[str, Any], ctx: Any) -> dict[str, Any]:
+        return {
+            "status": "failed",
+            "error": "renderer exited",
+            "exit_code": 7,
+        }
+
+
+def test_returned_failure_is_error_not_success(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setitem(loop_mod.DISPATCHER, "returned_failure", _ReturnsFailure())
+    client = _CallsToolThenStops("returned_failure", call_times=1)
+    events: list[dict[str, Any]] = []
+    loop = AgentLoopV3(
+        session_id="returned_failure",
+        output_dir=tmp_path,
+        gemini_client=client,  # type: ignore[arg-type]
+        emit_event=events.append,
+    )
+
+    asyncio.run(loop.run_turn("render this"))
+
+    errors = [e for e in events if e.get("kind") == "tool_exec_error"]
+    results = [e for e in events if e.get("kind") == "tool_exec_result"]
+    assert len(errors) == 1
+    assert errors[0]["error_code"] == "E_PROCESS_EXIT"
+    assert results == []
+    assert any(
+        "returned_failure" in str(message.get("content"))
+        for message in loop._messages
+        if message.get("role") == "user"
+    )
+
+
+class _ReturnedFailuresAroundNoop:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self, args: dict[str, Any], ctx: Any) -> dict[str, Any]:
+        self.calls += 1
+        if self.calls == 5:
+            return {"status": "ok", "applied": False}
+        return {"status": "failed", "error_code": "E_RENDER"}
+
+
+def test_noop_does_not_clear_an_unresolved_failure_streak(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dispatcher = _ReturnedFailuresAroundNoop()
+    monkeypatch.setitem(loop_mod.DISPATCHER, "failure_noop_failure", dispatcher)
+    client = _CallsToolThenStops("failure_noop_failure", call_times=6)
+    loop = AgentLoopV3(
+        session_id="failure_noop_failure",
+        output_dir=tmp_path,
+        gemini_client=client,  # type: ignore[arg-type]
+        emit_event=lambda event: None,
+    )
+
+    asyncio.run(loop.run_turn("render this"))
+
+    nudges = [
+        message
+        for message in loop._messages
+        if message.get("role") == "user"
+        and "Repeated tool failure guidance" in str(message.get("content"))
+    ]
+    assert len(nudges) == 1

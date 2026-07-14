@@ -29,13 +29,14 @@ import pytest
 
 from gemia.agent_loop_v3 import AgentLoopV3
 from gemia import v3_routes
+from gemia.tools import DISPATCHER
 
 
 # ── Scripted model clients ───────────────────────────────────────────────
 
 
 class _ScriptedInsertVideo:
-    """Calls timeline_insert_clip once then terminates cleanly."""
+    """Inserts once, then renders sampled timeline frames before stopping."""
 
     model = "fake"
 
@@ -55,12 +56,18 @@ class _ScriptedInsertVideo:
                    "delta": json.dumps({"asset_id": self.asset_id})}
             yield {"kind": "finish", "reason": "tool_calls"}
             return
-        yield {"kind": "text_delta", "text": "Inserted the clip into V1."}
+        if self.calls == 2:
+            yield {"kind": "tool_call_start", "index": 0, "id": "c2",
+                   "name": "inspect_timeline"}
+            yield {"kind": "tool_call_args_delta", "index": 0, "delta": "{}"}
+            yield {"kind": "finish", "reason": "tool_calls"}
+            return
+        yield {"kind": "text_delta", "text": "Inserted and visually reviewed the clip in V1."}
         yield {"kind": "finish", "reason": "stop"}
 
 
 class _ScriptedInsertText:
-    """Calls timeline_insert_clip with a text overlay payload."""
+    """Inserts a text overlay, then renders sampled frames before stopping."""
 
     model = "fake"
 
@@ -82,7 +89,13 @@ class _ScriptedInsertText:
                    })}
             yield {"kind": "finish", "reason": "tool_calls"}
             return
-        yield {"kind": "text_delta", "text": "Added text overlay."}
+        if self.calls == 2:
+            yield {"kind": "tool_call_start", "index": 0, "id": "c2",
+                   "name": "inspect_timeline"}
+            yield {"kind": "tool_call_args_delta", "index": 0, "delta": "{}"}
+            yield {"kind": "finish", "reason": "tool_calls"}
+            return
+        yield {"kind": "text_delta", "text": "Added and visually reviewed the text overlay."}
         yield {"kind": "finish", "reason": "stop"}
 
 
@@ -204,8 +217,9 @@ def test_timeline_route_reflects_inserted_clip(
 # ── Tests that do not require ffmpeg (text clips, empty state) ───────────
 
 
+@_needs_ffmpeg
 def test_insert_text_clip_emits_timeline_op_with_overlay_track(
-    tmp_path: Path,
+    sample_video_path: str, tmp_path: Path,
 ) -> None:
     """Scripted model inserts a text clip → OV1 auto-created, timeline_op fired."""
     events: list[dict[str, Any]] = []
@@ -216,6 +230,13 @@ def test_insert_text_clip_emits_timeline_op_with_overlay_track(
         gemini_client=client,
         emit_event=events.append,
     )
+    base_asset = loop.add_external_asset(Path(sample_video_path), summary="base clip")
+    asyncio.run(
+        DISPATCHER["timeline_insert_clip"](
+            {"asset_id": base_asset}, loop._tool_ctx
+        )
+    )
+    events.clear()
 
     asyncio.run(loop.run_turn("add a title overlay"))
 
@@ -225,11 +246,11 @@ def test_insert_text_clip_emits_timeline_op_with_overlay_track(
 
     proj = loop.project.load()
     clips = proj["timeline"]["clips"]
-    assert len(clips) == 1
-    assert clips[0]["media_kind"] == "text"
-    assert clips[0]["track_id"] == "OV1"
-    assert clips[0]["text_config"]["content"] == "Hello World"
-    assert clips[0]["duration"] == pytest.approx(2.5)
+    assert len(clips) == 2
+    text_clip = next(clip for clip in clips if clip["media_kind"] == "text")
+    assert text_clip["track_id"] == "OV1"
+    assert text_clip["text_config"]["content"] == "Hello World"
+    assert text_clip["duration"] == pytest.approx(2.5)
 
     tracks = {t["id"]: t for t in proj["timeline"]["tracks"]}
     assert "OV1" in tracks

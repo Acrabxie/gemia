@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 
 from gemia.budget_guard import BudgetGuard
+from gemia.errors import ToolError
 from gemia.tools import DISPATCHER
 from gemia.tools._context import AssetRegistry, ToolContext
 from gemia.tools import web_search as _web_search
@@ -143,7 +144,6 @@ class TestVertexGenerateVideo:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """dispatch() should return job_id immediately without polling."""
-        monkeypatch.setenv("VERTEX_VIDEO_MODEL", "veo-3.1-fast-generate-preview")
         seen: dict[str, Any] = {}
 
         def fake_init(self, **kwargs):
@@ -155,6 +155,9 @@ class TestVertexGenerateVideo:
 
         monkeypatch.setattr(_generate_video.GoogleGenAIClient, "__init__", fake_init)
         monkeypatch.setattr(_generate_video.GoogleGenAIClient, "predict_long_running", fake_submit)
+        # Hermetic: the model default must not depend on this machine's
+        # ~/.gemia/config.json (vertex_video_model etc. override _DEFAULT_MODEL).
+        monkeypatch.setattr(_generate_video, "_read_config", lambda field: None)
 
         result = asyncio.run(
             _generate_video.dispatch(
@@ -506,28 +509,29 @@ class TestWebOpen:
 
 
 class TestFetchBasic:
-    """Basic fetch functionality."""
+    """Basic fetch functionality (current contract: ToolError with E_BAD_ARG)."""
 
     def test_fetch_https_only_rejects_http(self, tool_context: ToolContext) -> None:
         """Fetch must reject http:// URLs."""
-        with pytest.raises(ValueError, match="https://"):
+        with pytest.raises(ToolError, match="Only https://") as ei:
             asyncio.run(
                 _fetch.dispatch({"url": "http://example.com/file.txt"}, tool_context)
             )
+        assert ei.value.code == "E_BAD_ARG"
 
     def test_fetch_https_only_rejects_file(self, tool_context: ToolContext) -> None:
         """Fetch must reject file:// URLs."""
-        with pytest.raises(ValueError, match="https://"):
+        with pytest.raises(ToolError, match="Only https://"):
             asyncio.run(
                 _fetch.dispatch({"url": "file:///etc/passwd"}, tool_context)
             )
 
     def test_fetch_requires_url(self, tool_context: ToolContext) -> None:
         """Fetch must reject empty or missing URL."""
-        with pytest.raises(ValueError, match="non-empty"):
+        with pytest.raises(ToolError, match="URL is required"):
             asyncio.run(_fetch.dispatch({}, tool_context))
 
-        with pytest.raises(ValueError, match="non-empty"):
+        with pytest.raises(ToolError, match="URL is required"):
             asyncio.run(_fetch.dispatch({"url": ""}, tool_context))
 
 
@@ -536,7 +540,7 @@ class TestFetchDestName:
 
     def test_fetch_dest_name_rejects_traversal(self, tool_context: ToolContext) -> None:
         """Fetch must reject '..' in dest_name."""
-        with pytest.raises(ValueError, match="unsafe filename"):
+        with pytest.raises(ToolError, match="Unsafe filename"):
             asyncio.run(
                 _fetch.dispatch(
                     {"url": "https://example.com/file.txt", "dest_name": "../evil.txt"},
@@ -546,7 +550,7 @@ class TestFetchDestName:
 
     def test_fetch_dest_name_rejects_absolute(self, tool_context: ToolContext) -> None:
         """Fetch must reject absolute paths in dest_name."""
-        with pytest.raises(ValueError, match="unsafe filename"):
+        with pytest.raises(ToolError, match="Unsafe filename"):
             asyncio.run(
                 _fetch.dispatch(
                     {"url": "https://example.com/file.txt", "dest_name": "/etc/passwd"},
@@ -555,16 +559,64 @@ class TestFetchDestName:
             )
 
     def test_fetch_dest_name_strips_slashes(self, tool_context: ToolContext) -> None:
-        """Fetch must strip leading paths from dest_name, taking only basename."""
-        with pytest.raises(ValueError):
-            # "dir/subdir/file.txt" should be taken as "file.txt" (OK)
-            # but if we pass "/../evil", it should still be caught by ".." check
+        """A dest_name with '..' anywhere is rejected even when nested in dirs."""
+        with pytest.raises(ToolError, match="Unsafe filename"):
             asyncio.run(
                 _fetch.dispatch(
                     {"url": "https://example.com/file.txt", "dest_name": "dir/subdir/../evil"},
                     tool_context,
                 )
             )
+
+
+class TestFetchLanding:
+    """Successful fetch of a recognized media type must land the file AND
+    register a session asset (regression: register_output was called with a
+    stale signature and raised TypeError after the bytes were downloaded)."""
+
+    def test_fetch_registers_media_asset(
+        self, tool_context: ToolContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        payload = b"\x89PNG\r\n" + b"x" * 512
+
+        class _Headers:
+            def get(self, k, default=None):
+                return "image/png" if k == "Content-Type" else default
+
+        class _Resp:
+            headers = _Headers()
+
+            def read(self):
+                return payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+        class _Opener:
+            def open(self, _req, timeout=None):
+                return _Resp()
+
+        monkeypatch.setattr(
+            _fetch.urllib.request, "build_opener", lambda *a, **k: _Opener()
+        )
+
+        result = asyncio.run(
+            _fetch.dispatch(
+                {"url": "https://example.com/pic.png", "dest_name": "pic.png"},
+                tool_context,
+            )
+        )
+
+        assert result["path"] == "pic.png"
+        assert result["size_bytes"] == len(payload)
+        asset_id = result["asset_id"]
+        record = tool_context.registry.get(asset_id)
+        assert record.kind == "image"
+        assert record.summary.startswith("fetched pic.png")
+        assert record.path.read_bytes() == payload
 
 
 # ============================================================================

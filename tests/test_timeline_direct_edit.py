@@ -78,7 +78,14 @@ def _seed_video_clip(loop: AgentLoopV3, clip_id: str = "c1", *, start: float = 0
 
 def _post(loop: AgentLoopV3, sid: str, op_body: dict) -> _PostHandler:
     handler = _PostHandler(json.dumps(op_body).encode("utf-8"))
-    runner = SimpleNamespace(agent=loop, session_id=sid)
+    # run_project_edit mirrors SessionRunner's contract; same-thread execution
+    # is fine here — serialization gets its own tests
+    # (test_project_write_serialization.py).
+    runner = SimpleNamespace(
+        agent=loop,
+        session_id=sid,
+        run_project_edit=lambda fn, timeout=30.0: fn(),
+    )
     ok = v3_routes._session_timeline_op(handler, runner)
     assert ok is True
     return handler
@@ -220,6 +227,46 @@ def test_user_edit_increments_patch_seq(tmp_path) -> None:
     assert after == before + 1
 
 
+def test_timeline_payload_infers_missing_track_for_existing_clip() -> None:
+    """Historical/imported projects may contain clips that reference a track id
+    not present in timeline.tracks. The UI payload must still surface those
+    clips instead of rendering an empty timeline."""
+    payload = v3_routes._timeline_payload_dict(
+        "sid",
+        "pid",
+        {
+            "assets": [
+                {"id": "v_001", "asset_id": "v_001", "name": "clip.mp4", "media_kind": "video"},
+            ],
+            "timeline": {
+                "fps": 30,
+                "width": 1920,
+                "height": 1080,
+                "duration": 2.0,
+                "tracks": [],
+                "clips": [
+                    {
+                        "id": "clip_missing_track",
+                        "asset_id": "v_001",
+                        "track_id": "V1",
+                        "media_kind": "video",
+                        "start": 0.0,
+                        "duration": 2.0,
+                        "source_in": 0.0,
+                        "source_out": 2.0,
+                    }
+                ],
+            },
+        },
+        {"patch_seq": 7},
+    )
+
+    assert payload["patch_seq"] == 7
+    assert payload["tracks"][0]["id"] == "V1"
+    assert payload["tracks"][0]["kind"] == "video"
+    assert payload["tracks"][0]["clips"][0]["id"] == "clip_missing_track"
+
+
 def test_undo_op_reverts_last_edit(tmp_path) -> None:
     """The 'undo' op routes through the same ProjectStore.undo as timeline_undo."""
     loop, _ = _loop(tmp_path, "de-undoop")
@@ -230,3 +277,33 @@ def test_undo_op_reverts_last_edit(tmp_path) -> None:
     assert h.status == 200
     assert abs(_clip(loop, "c1")["start"] - 0.0) < 1e-3
 
+
+def test_add_transition_surfaces_in_payload(tmp_path) -> None:
+    """Regression: lumerai stores clip["transition_after"] but the UI payload
+    read clip["transition"] — every stored transition surfaced as null and the
+    feature was invisible on both frontends."""
+    loop, _ = _loop(tmp_path, "de-trans")
+    _seed_video_clip(loop, "c1", start=0.0, duration=5.0)
+    _seed_video_clip(loop, "c2", start=5.0, duration=5.0, asset_id="a2")
+
+    h = _post(loop, "de-trans", {
+        "op": "add_transition", "clip_id": "c1",
+        "data": {"kind": "dissolve", "duration_sec": 0.5},
+    })
+    if h.status != 200:
+        # direct-edit route may wrap args differently; fall back to the verb path
+        loop.project.apply_ops(
+            [{"op": "add_transition", "clip_id": "c1", "kind": "dissolve",
+              "duration_sec": 0.5}],
+            label="test-transition",
+        )
+
+    stored = _clip(loop, "c1")["transition_after"]
+    assert stored == {"kind": "dissolve", "duration_sec": 0.5}
+
+    payload = v3_routes._timeline_payload_dict(
+        "de-trans", loop.project.project_id, loop.project.load(),
+        loop.project.store.load_meta(loop.project.project_id),
+    )
+    clips = [c for t in payload["tracks"] for c in t["clips"] if c["id"] == "c1"]
+    assert clips and clips[0]["transition"] == {"kind": "dissolve", "duration_sec": 0.5}

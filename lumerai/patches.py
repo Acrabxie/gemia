@@ -5,7 +5,15 @@ import re
 import uuid
 from typing import Any, Callable
 
-from gemia.project_model import IMAGE_DURATION, _normalize_timeline_clip, normalize_project
+from gemia.project_model import (
+    IMAGE_DURATION,
+    _normalize_shot,
+    _normalize_timeline_clip,
+    empty_shotlist,
+    normalize_project,
+    normalize_shotlist,
+)
+from gemia.video.layers import BLEND_MODES
 
 # Timeline v1 (M1) contract: seconds as floats, rounded to 6 places on write,
 # compared with EPSILON tolerance. See docs/timeline-v1/01-op-vocabulary.md.
@@ -16,9 +24,13 @@ _TRANSITION_KINDS = {"cut", "dissolve", "wipe", "fade"}
 # Audio attributes ride on the same effects map (M6): gain_db/fade_in/fade_out
 # join the existing `muted` so timeline_set_clip_effects covers the whole audio
 # surface with no extra verb, and they round-trip through OTIO metadata for free.
+# Compositing (direct-UI BLEND op): blend_mode rides the same effects map so the
+# existing set_clip_effects op stores it on the clip and the renderer reads it
+# off effects (compositing_graph -> Layer.blend_mode). Validated against the
+# renderer's canonical BLEND_MODES set (gemia.video.layers).
 _EFFECT_KEYS = {
     "rotation", "mirrored", "muted", "speed", "blur_radius", "opacity", "x", "y", "scale",
-    "gain_db", "fade_in", "fade_out",
+    "gain_db", "fade_in", "fade_out", "blend_mode",
 }
 _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
@@ -144,7 +156,7 @@ def validate_project(project: dict[str, Any]) -> None:
         duration = _as_float(clip.get("duration"))
         source_in = _as_float(clip.get("source_in"))
         source_out = _as_float(clip.get("source_out"))
-        if media_kind in {"video", "image", "audio"}:
+        if media_kind in {"video", "image", "audio", "lottie"}:
             legacy_forced_image = (
                 media_kind == "image"
                 and abs(source_in) <= EPSILON
@@ -236,7 +248,14 @@ def _ensure_media_matches_track(media_kind: str, track: dict[str, Any]) -> None:
             raise TimelinePatchError(
                 "E_TRACK_KIND", f"video clip requires a video track, got {kind} ({track.get('id')})"
             )
-    elif media_kind in {"image", "text"}:
+    elif media_kind == "image":
+        # Images can be on video or overlay tracks (enabling image-based shotlist main chain)
+        if kind not in {"video", "overlay"}:
+            raise TimelinePatchError(
+                "E_TRACK_KIND",
+                f"image clip requires a video or overlay track, got {kind} ({track.get('id')})",
+            )
+    elif media_kind in {"text", "lottie"}:
         if kind != "overlay":
             raise TimelinePatchError(
                 "E_TRACK_KIND",
@@ -346,7 +365,7 @@ def _op_insert_clip(project: dict[str, Any], op: dict[str, Any]) -> None:
             duration = _as_float(asset_obj.get("duration"))
     if duration <= 0:
         duration = _as_float(raw_clip.get("source_out")) - _as_float(raw_clip.get("source_in"))
-    if duration <= 0 and media_kind in {"image", "text"}:
+    if duration <= 0 and media_kind in {"image", "text", "lottie"}:
         duration = IMAGE_DURATION
     if duration <= 0:
         raise TimelinePatchError("E_BAD_ARG", "insert_clip cannot determine clip duration")
@@ -441,9 +460,9 @@ def _op_trim_clip(project: dict[str, Any], op: dict[str, Any]) -> None:
     """Spec §3.4 — duration = source_out - source_in (speed stays reserved)."""
     clip = _require_clip(project, op)
     media_kind = str(clip.get("media_kind") or "video")
-    if media_kind not in {"video", "image", "audio"}:
+    if media_kind not in {"video", "image", "audio", "lottie"}:
         raise TimelinePatchError(
-            "E_BAD_ARG", f"trim_clip only supports video/image/audio clips, got {media_kind}"
+            "E_BAD_ARG", f"trim_clip only supports video/image/audio/lottie clips, got {media_kind}"
         )
     if op.get("source_in") is None and op.get("source_out") is None:
         raise TimelinePatchError("E_BAD_ARG", "trim_clip requires source_in and/or source_out")
@@ -531,9 +550,9 @@ def _op_set_clip_time(project: dict[str, Any], op: dict[str, Any]) -> None:
     track_id = str(clip.get("track_id") or "")
     ripple = bool(op.get("ripple", False))
     if has_duration:
-        if media_kind not in {"image", "text"}:
+        if media_kind not in {"image", "text", "lottie"}:
             raise TimelinePatchError(
-                "E_BAD_ARG", f"set_clip_time duration only supports image/text clips, got {media_kind}"
+                "E_BAD_ARG", f"set_clip_time duration only supports image/text/lottie clips, got {media_kind}"
             )
         new_duration = _number(op.get("duration"), "set_clip_time.duration")
         if new_duration <= 0:
@@ -631,6 +650,16 @@ def _validated_effect_value(key: str, value: Any) -> Any:
     if key in {"mirrored", "muted"}:
         if not isinstance(value, bool):
             raise TimelinePatchError("E_BAD_ARG", f"effects.{key} must be a boolean")
+        return value
+    if key == "blend_mode":
+        # Direct-UI BLEND op. Validate against the renderer's canonical set so a
+        # stored mode is always one compositing_graph -> Layer.blend_mode can
+        # actually composite (gemia.video.layers._blend_rgb).
+        if not isinstance(value, str) or value not in BLEND_MODES:
+            raise TimelinePatchError(
+                "E_BAD_ARG",
+                f"effects.blend_mode must be one of {sorted(BLEND_MODES)}, got {value!r}",
+            )
         return value
     number = _number(value, f"effects.{key}")
     if key == "rotation":
@@ -809,7 +838,49 @@ def _op_upsert_asset(project: dict[str, Any], op: dict[str, Any]) -> None:
     _upsert_asset(project, copy.deepcopy(asset))
 
 
+def _op_set_shotlist(project: dict[str, Any], op: dict[str, Any]) -> None:
+    """Replace the whole storyboard IR (outline/storyboard-driven editing)."""
+    raw = op.get("shotlist")
+    if not isinstance(raw, dict):
+        raise TimelinePatchError("E_BAD_ARG", "set_shotlist requires a 'shotlist' object")
+    project["shotlist"] = normalize_shotlist(raw)
+
+
+def _op_update_shot(project: dict[str, Any], op: dict[str, Any]) -> None:
+    """Merge ``fields`` into a single shot located by ``shot_id``.
+
+    Targeted revision so the model can mark a shot ``filled`` (asset_id) or
+    ``placed`` (clip_id), retime it, or reword its text without resending the
+    whole shotlist. Immutable identity keys (``id``) cannot be changed here.
+    """
+    shot_id = str(op.get("shot_id") or "")
+    if not shot_id:
+        raise TimelinePatchError("E_BAD_ARG", "update_shot requires a 'shot_id'")
+    fields = op.get("fields") if isinstance(op.get("fields"), dict) else None
+    if fields is None:
+        raise TimelinePatchError("E_BAD_ARG", "update_shot requires a 'fields' object")
+    shotlist = project.get("shotlist")
+    if not isinstance(shotlist, dict):
+        shotlist = empty_shotlist()
+        project["shotlist"] = shotlist
+    for scene_idx, scene in enumerate(shotlist.get("scenes") or []):
+        if not isinstance(scene, dict):
+            continue
+        shots = scene.get("shots") or []
+        for shot_idx, shot in enumerate(shots):
+            if isinstance(shot, dict) and str(shot.get("id") or "") == shot_id:
+                merged = {**shot, **{k: v for k, v in fields.items() if k != "id"}}
+                merged["id"] = shot_id
+                shots[shot_idx] = _normalize_shot(
+                    merged, scene_idx=scene_idx, shot_idx=shot_idx
+                )
+                return
+    raise TimelinePatchError("E_NOT_FOUND", f"update_shot: no shot with id {shot_id}")
+
+
 _OP_HANDLERS: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {
+    "set_shotlist": _op_set_shotlist,
+    "update_shot": _op_update_shot,
     "insert_clip": _op_insert_clip,
     "delete_clip": _op_delete_clip,
     "move_clip": _op_move_clip,

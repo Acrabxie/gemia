@@ -33,11 +33,28 @@ def test_color_grade_unknown_look_raises_typed_error_not_silent_warm() -> None:
     assert "grayscale" in payload["hint"].lower() or "black" in payload["hint"].lower()
 
 
-def test_remove_background_raises_switch_tool() -> None:
+def test_remove_background_bad_feather_raises_typed_error(tmp_path) -> None:
+    # remove_background is now real ML matting; it must still reject bad params
+    # with a typed error rather than guessing (the "no silent fallback" contract).
+    import asyncio
+
+    from gemia.tools._context import AssetRegistry, ToolContext
+
+    reg = AssetRegistry()
+    src = tmp_path / "src.png"
+    src.write_bytes(b"image")  # feather is validated before the pixels are read
+    asset = reg.add_external(src).asset_id
+    ctx = ToolContext(
+        session_id="t", output_dir=tmp_path, registry=reg, emit_progress=lambda _u: None
+    )
     with pytest.raises(ToolError) as exc_info:
-        edit_image._op_remove_background({})
+        asyncio.run(
+            edit_image.dispatch(
+                {"asset_id": asset, "operation": "remove_background",
+                 "params": {"feather": "soft"}},
+                ctx,
+            )
+        )
     payload = exc_info.value.to_payload()
-    assert payload["error_code"] == "E_NOT_IMPLEMENTED"
-    # recovery=switch_tool tells the model to stop hammering this op.
-    assert payload["recovery"] == "switch_tool"
-    assert payload["hint"]
+    assert payload["error_code"] == "E_BAD_ARG"
+    assert payload["recovery"] == "fix_args"

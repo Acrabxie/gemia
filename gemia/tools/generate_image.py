@@ -29,7 +29,7 @@ from gemia.budget_guard import tool_cost_usd
 from gemia.tools._context import ToolContext
 
 
-_DEFAULT_MODEL = "gemini-3.1-flash-image"  # Nano Banana 2 (Vertex)
+_DEFAULT_MODEL = "gemini-2.5-flash-image"  # Nano Banana (Vertex, us-central1) — verified available on project
 _DEFAULT_IMAGE_SIZE = "2K"
 
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import ssl
 import threading
@@ -33,15 +34,18 @@ from typing import Any, AsyncIterator, Iterator
 import certifi
 
 
+logger = logging.getLogger(__name__)
+
+
 _DEFAULT_URL = "https://openrouter.ai/api/v1/chat/completions"
-_DEFAULT_MODEL = "google/gemini-3.1-pro"
+_DEFAULT_MODEL = "google/gemini-3.1-pro-preview"
 
 # Per-provider default models (used when LUMERI_V3_MODEL is not set)
-_DEFAULT_VERTEX_MODEL    = "google/gemini-3.1-pro"
-_DEFAULT_GEMINI_MODEL    = "gemini-3.1-pro"
-_DEFAULT_CLAUDE_MODEL    = "claude-fable-5"
+_DEFAULT_VERTEX_MODEL    = "google/gemini-3.5-flash"  # available on the Vertex 'global' endpoint (brain default location is global)
+_DEFAULT_GEMINI_MODEL    = "gemini-2.0-flash"
+_DEFAULT_CLAUDE_MODEL    = "claude-sonnet-4-6"
 _DEFAULT_OPENROUTER_MODEL = _DEFAULT_MODEL
-_DEFAULT_OPENAI_MODEL    = "gpt-5.6-sol"
+_DEFAULT_OPENAI_MODEL    = "gpt-5.5"
 
 # Auto-probe priority: first provider with credentials wins
 _PROVIDER_PRIORITY = ("vertex", "gemini", "claude", "openrouter", "openai")
@@ -56,6 +60,72 @@ def _read_config_key(field: str) -> str:
     except Exception:
         return ""
     return ""
+
+
+def _read_config_value(field: str) -> Any:
+    """Read one non-secret config value without erasing ``False``/``0``."""
+    try:
+        path = Path.home() / ".gemia" / "config.json"
+        if path.exists():
+            data = json.loads(path.read_text())
+            return data.get(field)
+    except Exception:
+        return None
+    return None
+
+
+def _parse_optional_bool(raw: Any, *, source: str) -> bool | None:
+    """Parse a tri-state boolean; invalid values degrade to provider default."""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, bool):
+        return raw
+    value = str(raw).strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    logger.warning("Ignoring invalid %s=%r; leaving parallel tool calls unset", source, raw)
+    return None
+
+
+def _resolve_parallel_tool_calls() -> bool | None:
+    if "LUMERI_V3_PARALLEL_TOOL_CALLS" in os.environ:
+        return _parse_optional_bool(
+            os.environ.get("LUMERI_V3_PARALLEL_TOOL_CALLS"),
+            source="LUMERI_V3_PARALLEL_TOOL_CALLS",
+        )
+    return _parse_optional_bool(
+        _read_config_value("lumeri_v3_parallel_tool_calls"),
+        source="config:lumeri_v3_parallel_tool_calls",
+    )
+
+
+def _resolve_orchestration_temperature() -> float:
+    """Temperature for the agent/orchestration (tool-calling) path.
+
+    Verb selection and JSON-arg generation want determinism, not variety, so
+    this defaults LOW. Resolved: env ``LUMERI_V3_TEMPERATURE`` -> config
+    ``lumeri_v3_temperature`` -> 0.2. Parsed to float and clamped to
+    [0.0, 1.0]; any parse failure falls back to 0.2 (never raises). Only this
+    single non-secret field is read from config — nothing else.
+    """
+    raw = (
+        os.environ.get("LUMERI_V3_TEMPERATURE")
+        or _read_config_key("lumeri_v3_temperature")
+        or ""
+    ).strip()
+    if not raw:
+        return 0.2
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 0.2
+    if value < 0.0:
+        return 0.0
+    if value > 1.0:
+        return 1.0
+    return value
 
 
 _OPEN_ATTEMPTS = 3
@@ -349,8 +419,16 @@ class GeminiClientV3:
             ).strip()
             if not project:
                 raise RuntimeError("VERTEX_PROJECT required for vertex provider (env or config.json:vertex_project).")
+            # Brain location is independent of media (Veo/Lyria/Nano Banana live in
+            # us-central1; gemini-3.x text models live on 'global'). A brain-specific
+            # override lets the orchestrator use 'global' while vertex_location stays
+            # us-central1 for media.
             location = (
-                os.environ.get("VERTEX_LOCATION") or _read_config_key("vertex_location") or "global"
+                os.environ.get("LUMERI_V3_LOCATION")
+                or _read_config_key("lumeri_v3_location")
+                or os.environ.get("VERTEX_LOCATION")
+                or _read_config_key("vertex_location")
+                or "global"
             ).strip()
             host = (
                 "aiplatform.googleapis.com"
@@ -388,7 +466,17 @@ class GeminiClientV3:
             ).strip()
             if not self.api_key:
                 raise RuntimeError("OPENAI_API_KEY required for openai provider (env or config.json:openai_api_key).")
-            self.api_url = "https://api.openai.com/v1/chat/completions"
+            # Base URL is config-readable (not env-only) so the openai path can
+            # be pinned to a local bridge — e.g. the codex-shim that fronts a
+            # ChatGPT subscription — from ~/.gemia/config.json alone, without
+            # needing the daemon's env. The shim authenticates with its own
+            # managed token and ignores this api_key, but a non-empty value is
+            # still required above.
+            self.api_url = (
+                os.environ.get("LUMERI_OPENAI_BASE_URL")
+                or _read_config_key("lumeri_openai_base_url")
+                or "https://api.openai.com/v1/chat/completions"
+            )
             self.model = model_override or _DEFAULT_OPENAI_MODEL
 
         else:  # openrouter (default)
@@ -407,12 +495,42 @@ class GeminiClientV3:
             self.model = model_override or _read_config_key("openrouter_model") or _DEFAULT_OPENROUTER_MODEL
             self.api_url = api_url
 
+        # Orchestration/tool-path temperature (RC5): low by default. The agent
+        # loop passes no temperature, so this becomes the effective default.
+        self.orchestration_temperature = _resolve_orchestration_temperature()
+
+        # Thinking/reasoning effort, switchable via `/model` (persisted to
+        # config.json:lumeri_v3_effort or env LUMERI_V3_EFFORT). Empty = leave the
+        # provider on its own default. Applied to reasoning-capable models below.
+        self.reasoning_effort = (
+            os.environ.get("LUMERI_V3_EFFORT") or _read_config_key("lumeri_v3_effort") or ""
+        ).strip().lower()
+        # Tri-state: None preserves each provider's compatibility default;
+        # explicit true/false is sent only when tools are present. This flag
+        # allows a model to PROPOSE multiple independent calls in one response;
+        # AgentLoopV3 still dispatches them deterministically by index.
+        self.parallel_tool_calls = _resolve_parallel_tool_calls()
+
+        # Startup visibility (RC5). Logs the RESOLVED provider/model/temperature
+        # ONLY — never the api_key, api_url credentials, or any config.json
+        # contents. (The former RC6 flash-tier warning is gone: tier names no
+        # longer map to capability — e.g. gemini-3.5-flash outperforms
+        # 3.1-pro — so model choice is config, not a downgrade to warn about.)
+        logger.info(
+            "Lumeri v3 orchestrator resolved: provider=%s model=%s temperature=%s effort=%s parallel_tool_calls=%s",
+            self.provider,
+            self.model,
+            self.orchestration_temperature,
+            self.reasoning_effort or "provider-default",
+            self.parallel_tool_calls,
+        )
+
     async def stream_turn(
         self,
         messages: list[dict[str, Any]],
         *,
         tools: list[dict[str, Any]] | None = None,
-        temperature: float = 0.7,
+        temperature: float | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream one turn. Yields delta dicts:
 
@@ -422,14 +540,34 @@ class GeminiClientV3:
         - ``{"kind": "finish", "reason": str}``
         - ``{"kind": "error", "error": str}``
         """
+        # None (the loop's default path) -> low orchestration temperature;
+        # an explicit value (a future creative-generation caller) overrides.
+        temp = (
+            self.orchestration_temperature
+            if temperature is None
+            else float(temperature)
+        )
         body: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "stream": True,
-            "temperature": temperature,
+            "temperature": temp,
         }
         if tools:
             body["tools"] = tools
+            if self.provider != "claude" and self.parallel_tool_calls is not None:
+                body["parallel_tool_calls"] = self.parallel_tool_calls
+
+        # Reasoning effort for thinking-capable models. OpenRouter (and the
+        # OpenAI-compatible providers routed through the same body) accept
+        # `reasoning.effort` ∈ {low, medium, high}; we map our extra "max" tier
+        # onto "high" for the wire while keeping "max" as a UI label. The Claude
+        # provider builds its own body (`_stream_blocking_claude`) and ignores
+        # this field.
+        if self.reasoning_effort and self.provider != "claude":
+            api_effort = "high" if self.reasoning_effort == "max" else self.reasoning_effort
+            if api_effort in ("low", "medium", "high"):
+                body["reasoning"] = {"effort": api_effort}
 
         loop = asyncio.get_running_loop()
         q: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
@@ -440,6 +578,8 @@ class GeminiClientV3:
             try:
                 for ev in _blocker(body):
                     loop.call_soon_threadsafe(q.put_nowait, ev)
+                    if ev.get("kind") == "error":
+                        break
             except Exception as exc:
                 loop.call_soon_threadsafe(
                     q.put_nowait,
@@ -551,6 +691,8 @@ class GeminiClientV3:
                     continue
                 for event in _parse_chunk(chunk):
                     yield event
+                    if event.get("kind") == "error":
+                        return
 
 
     def _stream_blocking_claude(self, body_openai: dict[str, Any]) -> Iterator[dict[str, Any]]:
@@ -633,6 +775,22 @@ class GeminiClientV3:
 
 def _parse_chunk(chunk: dict[str, Any]) -> Iterator[dict[str, Any]]:
     """Parse one OpenAI-compatible streaming chunk into delta events."""
+    # Error is a terminal top-level protocol frame. Check it before choices so
+    # an old bridge shape containing both error + fake stop cannot turn an
+    # upstream failure into a successful completion.
+    if "error" in chunk:
+        raw_error = chunk.get("error")
+        if isinstance(raw_error, dict):
+            message = raw_error.get("message") or raw_error.get("error")
+            code = raw_error.get("code")
+            if not message:
+                message = json.dumps(raw_error, ensure_ascii=False, sort_keys=True)
+            if code and str(code) not in str(message):
+                message = f"{message} ({code})"
+        else:
+            message = str(raw_error or "upstream stream error")
+        yield {"kind": "error", "error": str(message)}
+        return
     choices = chunk.get("choices") or []
     if not choices:
         return

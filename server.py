@@ -278,9 +278,23 @@ class _Handler(BaseHTTPRequestHandler):
             _json_response(self, 200, {"status": "ok", "has_key": _has_valid_key()})
             return
 
+        # ── File browser ──
+        if path.startswith("/files/"):
+            from gemia.file_browse_routes import try_handle as _files_try
+            if _files_try(self, method="GET", serve_file=lambda p: _file_response(self, p)):
+                return
+
         # ── Config ──
         if path == "/config":
-            _json_response(self, 200, {"has_key": _has_valid_key()})
+            cfg = {}
+            if _CONFIG_PATH.exists():
+                try:
+                    cfg = json.loads(_CONFIG_PATH.read_text())
+                except Exception:
+                    pass
+            from gemia import brain_config
+            status = brain_config.read_status(cfg)
+            _json_response(self, 200, status)
             return
 
         # ── Sandbox settings ──
@@ -332,12 +346,50 @@ class _Handler(BaseHTTPRequestHandler):
                         existing = json.loads(_CONFIG_PATH.read_text())
                     except Exception:
                         pass
-                for key in ("gemini_api_key", "vertex_project"):
-                    if key in payload:
-                        existing[key] = payload[key]
+                from gemia import brain_config
+                existing, changed = brain_config.apply_update(existing, payload)
                 _CONFIG_PATH.write_text(json.dumps(existing, indent=2))
                 _load_config_keys()
                 _json_response(self, 200, {"saved": True, "has_key": _has_valid_key()})
+            except Exception as exc:
+                _json_response(self, 400, {"error": str(exc)})
+            return
+
+        # ── Config list models ──
+        if path == "/config/list-models":
+            try:
+                payload = _read_json_body(self)
+                provider = payload.get("provider", "")
+                existing = {}
+                if _CONFIG_PATH.exists():
+                    try:
+                        existing = json.loads(_CONFIG_PATH.read_text())
+                    except Exception:
+                        pass
+                proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or existing.get("proxy")
+                from gemia import brain_config
+                res = brain_config.list_models(provider, existing, proxy=proxy or None)
+                _json_response(self, 200, res)
+            except Exception as exc:
+                _json_response(self, 400, {"error": str(exc)})
+            return
+
+        # ── Config test brain ──
+        if path == "/config/test-brain":
+            try:
+                payload = _read_json_body(self)
+                existing = {}
+                if _CONFIG_PATH.exists():
+                    try:
+                        existing = json.loads(_CONFIG_PATH.read_text())
+                    except Exception:
+                        pass
+                from gemia import brain_config
+                # Temporarily apply keys in payload to test client
+                brain_config.apply_update({}, payload)
+                proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or existing.get("proxy")
+                res = brain_config.test_provider(proxy=proxy or None)
+                _json_response(self, 200, res)
             except Exception as exc:
                 _json_response(self, 400, {"error": str(exc)})
             return

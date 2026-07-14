@@ -1,25 +1,27 @@
 """edit_image: crop | rotate | resize | blur | denoise | remove_background.
 
-Each op uses ffmpeg-only filters. ``crop``/``rotate``/``resize`` overlap with
-``transform_geometry`` on purpose — this verb is the image-specific surface
-the model reaches for when it's working with an image asset and doesn't
-need to think about geometry math. ``blur`` and ``denoise`` are image-only
-filters that don't belong in transform_geometry.
+The ffmpeg ops (``crop``/``rotate``/``resize``/``blur``/``denoise``) overlap
+with ``transform_geometry`` on purpose — this verb is the image-specific
+surface the model reaches for when it's working with an image asset and
+doesn't need to think about geometry math.
 
-``remove_background`` is intentionally NOT implemented in this batch.
-True background removal needs an ML model (U2Net / rembg / SAM) which
-batch 1 ("纯 ffmpeg, 低风险") excludes. Calling it raises
-NotImplementedError with a clear message so the model knows to fall back
-to another approach (e.g. chroma_key on a known-color background via a
-follow-up verb, or composite with a pre-cut PNG).
+``remove_background`` is a real ML subject/portrait matting op (see
+``gemia.picture.matting``): a U2Net human-segmentation net whose mask is
+refined edge-aware and colour-decontaminated, producing a clean alpha cutout
+for an *arbitrary* background — not a chroma/luma key that only works on green
+screens. It degrades to a GrabCut fallback when the model is unavailable, so
+it never hard-fails. Params: ``background`` (null → transparent PNG, a colour
+name / ``[r,g,b]`` / an asset_id / a path → composite over it), ``feather``
+(edge softness in px), ``matte_only`` (write the grayscale alpha instead).
 """
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any, Callable
 
 from gemia.errors import RECOVERY_FIX_ARGS, RECOVERY_SWITCH_TOOL, ToolError
-from gemia.tools._context import ToolContext
+from gemia.tools._context import ProgressUpdate, ToolContext
 from gemia.tools._ffmpeg import run_ffmpeg_with_progress
 
 
@@ -43,13 +45,16 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
             hint="For video use edit_video, color_grade, or transform_geometry. Extract a frame first if you need to edit a still.",
         )
 
+    if operation == "remove_background":
+        return await _run_remove_background(ctx, src, params)
+
     handler = _OPS.get(operation)
     if handler is None:
         raise ToolError(
             f"unknown edit_image operation: {operation!r}.",
             code="E_BAD_ARG",
             recovery=RECOVERY_FIX_ARGS,
-            valid_options=[op for op in _OPS if op != "remove_background"],
+            valid_options=list(_OPS) + ["remove_background"],
         )
 
     vf, label, metadata = handler(params)
@@ -130,20 +135,55 @@ def _op_denoise(params: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
     )
 
 
-def _op_remove_background(_params: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
-    # Honest typed failure rather than a fake background-removed image.
-    # remove_background needs an ML model (rembg / U2Net / SAM) that batch 1
-    # deliberately excludes. recovery=switch_tool tells the model to stop
-    # retrying this op and reach for a workaround instead.
-    raise ToolError(
-        "remove_background is not available — it needs an ML model that this build excludes.",
-        code="E_NOT_IMPLEMENTED",
-        recovery=RECOVERY_SWITCH_TOOL,
-        hint=(
-            "Workarounds: if the background is a solid known color, key it out; or "
-            "supply a pre-cut PNG with alpha and use composite to layer it."
-        ),
+async def _run_remove_background(
+    ctx: ToolContext, src: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    """Real ML matting: cut the subject out onto transparency (or a new bg)."""
+    try:
+        from gemia.picture import matting  # noqa: PLC0415
+    except Exception as exc:  # pragma: no cover - env without cv2/numpy
+        raise ToolError(
+            f"remove_background backend unavailable: {exc}",
+            code="E_NOT_AVAILABLE",
+            recovery=RECOVERY_SWITCH_TOOL,
+            hint="Install opencv-python + numpy; drop a U2Net onnx in ./models for best quality.",
+        ) from exc
+
+    background = params.get("background")
+    # An asset_id background composites the subject over another loaded image.
+    if isinstance(background, str) and ctx.registry.contains(background):
+        background = str(ctx.registry.get(background).path)
+    try:
+        feather = float(params.get("feather", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        raise ToolError(
+            f"feather must be a number, got {params.get('feather')!r}.",
+            code="E_BAD_ARG", recovery=RECOVERY_FIX_ARGS,
+        )
+    matte_only = bool(params.get("matte_only", False))
+
+    new_id = ctx.registry.allocate_id("image")
+    out_path = ctx.child_path(new_id, ".png")  # alpha needs PNG
+    ctx.emit_progress(ProgressUpdate(message="removing background (ML matting)…"))
+    info = await asyncio.to_thread(
+        matting.remove_background,
+        str(src.path), str(out_path),
+        background=background, feather=feather, matte_only=matte_only,
     )
+    what = "matte" if matte_only else ("cutout" if info.get("transparent") else "composite")
+    tier = "ML" if info.get("ml") else "fallback"
+    summary = (
+        f"remove_background {src.asset_id} — {what} "
+        f"[{tier}:{info.get('backend')}, subject {info.get('coverage', 0):.0%}]"
+    )
+    record = ctx.registry.register_output(
+        new_id, kind="image", path=out_path, summary=summary, lineage=[src.asset_id]
+    )
+    return {
+        "asset_id": new_id,
+        "summary": record.summary,
+        "metadata": {"operation": "remove_background", "kind": "image", **info},
+    }
 
 
 async def _run(
@@ -190,7 +230,6 @@ _OPS: dict[str, Callable[[dict[str, Any]], tuple[str, str, dict[str, Any]]]] = {
     "resize": _op_resize,
     "blur": _op_blur,
     "denoise": _op_denoise,
-    "remove_background": _op_remove_background,
 }
 
 

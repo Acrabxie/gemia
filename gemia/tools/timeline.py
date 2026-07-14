@@ -23,6 +23,8 @@ from typing import Any
 
 from gemia.tools._context import ToolContext
 from gemia.tools._ffmpeg import ffprobe_duration
+from gemia.video.lottie_renderer import select_lottie_renderer
+from lumerai.export_support import effects_warnings, transition_warnings
 
 
 _TEXT_DEFAULT_DURATION = 3.0
@@ -112,10 +114,14 @@ async def dispatch_insert(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
     else:
         record = ctx.registry.get(asset_id)
         media_kind = record.kind
-        # Video and audio both carry a real, probe-able duration; images don't.
+        # Video/audio/lottie carry real duration; images don't.
         probe_duration = 0.0
         if record.kind in {"video", "audio"}:
             probe_duration = float(ffprobe_duration(record.path))
+        elif record.kind == "lottie":
+            meta = select_lottie_renderer().get_metadata(str(record.path))
+            fps = float(meta.get("fps") or 30.0)
+            probe_duration = max(int(meta.get("frames") or 1) / max(fps, 1.0), 0.1)
         asset_payload = {
             "id": record.asset_id,
             "asset_id": record.asset_id,
@@ -126,7 +132,7 @@ async def dispatch_insert(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
         }
         source_in = _float_arg(args, "source_in") or 0.0
         source_out = _float_arg(args, "source_out")
-        if record.kind in {"video", "audio"}:
+        if record.kind in {"video", "audio", "lottie"}:
             if source_out is None:
                 source_out = probe_duration or source_in + 0.1
             duration = max(round(source_out - source_in, 6), 0.1)
@@ -145,7 +151,21 @@ async def dispatch_insert(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
 
     # Resolve target track; auto-create OV1/A1 for the first overlay/audio clip.
     track_id = str(args.get("track_id") or "")
-    if media_kind in {"image", "text"}:
+    if media_kind == "image":
+        # Images can go on video or overlay tracks (explicit track_id = V1 for main chain)
+        if track_id:
+            # Explicit track specified; ensure it exists
+            if not any(str(t.get("id")) == track_id for t in tracks):
+                # Find kind for track_id to know what kind of track to create
+                track_kind = "video" if track_id == "V1" else "overlay"
+                ops.append({"op": "add_track", "kind": track_kind, "track_id": track_id})
+        else:
+            # Default to overlay if no explicit track
+            overlay_tracks = [t for t in tracks if t.get("kind") == "overlay"]
+            track_id = str(overlay_tracks[0]["id"]) if overlay_tracks else "OV1"
+            if not any(str(t.get("id")) == track_id for t in tracks):
+                ops.append({"op": "add_track", "kind": "overlay", "track_id": track_id})
+    elif media_kind in {"text", "lottie"}:
         overlay_tracks = [t for t in tracks if t.get("kind") == "overlay"]
         if not track_id:
             track_id = str(overlay_tracks[0]["id"]) if overlay_tracks else "OV1"
@@ -159,6 +179,8 @@ async def dispatch_insert(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
             ops.append({"op": "add_track", "kind": "audio", "track_id": track_id})
     else:
         track_id = track_id or "V1"
+        if not any(str(t.get("id")) == track_id for t in tracks):
+            ops.append({"op": "add_track", "kind": "video", "track_id": track_id})
     clip["track_id"] = track_id
 
     at_time = _float_arg(args, "at_time")
@@ -281,7 +303,19 @@ async def dispatch_transition(args: dict[str, Any], ctx: ToolContext) -> dict[st
     if duration_sec is not None:
         op["duration_sec"] = duration_sec
     result = _project(ctx).apply_ops([op], label="timeline_add_transition")
-    return _summary(ctx, result, clip_id=clip_id)
+    out = _summary(ctx, result, clip_id=clip_id)
+    # Export honesty (docs/timeline-canonical-plan.md §4): fade/dissolve render
+    # on export since Phase 1; kinds without a renderer (wipe) warn at write —
+    # never silently, never rejected (OTIO/replay compatibility).
+    warnings = transition_warnings(op["kind"])
+    if warnings:
+        out["warnings"] = warnings
+        out["export_note"] = (
+            f"transition '{op['kind']}' is recorded and visible on the "
+            "timeline, but final export still renders a hard cut here "
+            "(fade/dissolve render; see docs/timeline-canonical-plan.md)."
+        )
+    return out
 
 
 async def dispatch_effects(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
@@ -290,8 +324,24 @@ async def dispatch_effects(args: dict[str, Any], ctx: ToolContext) -> dict[str, 
     if not isinstance(effects, dict) or not effects:
         raise ValueError("timeline_set_clip_effects needs a non-empty effects object")
     op = {"op": "set_clip_effects", "clip_id": clip_id, "effects": effects}
-    result = _project(ctx).apply_ops([op], label="timeline_set_clip_effects")
-    return _summary(ctx, result, clip_id=clip_id)
+    project = _project(ctx)
+    result = project.apply_ops([op], label="timeline_set_clip_effects")
+    out = _summary(ctx, result, clip_id=clip_id)
+    # Export honesty (docs/timeline-canonical-plan.md §4): warn — never reject —
+    # when the write stores fields the exporter will not render today.
+    clip = next(
+        (
+            c
+            for c in (project.load().get("timeline", {}).get("clips") or [])
+            if str(c.get("id")) == clip_id
+        ),
+        None,
+    )
+    media_kind = str((clip or {}).get("media_kind") or "video")
+    warnings = effects_warnings(media_kind, effects)
+    if warnings:
+        out["warnings"] = warnings
+    return out
 
 
 async def dispatch_add_track(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:

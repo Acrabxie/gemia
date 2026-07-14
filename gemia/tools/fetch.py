@@ -21,6 +21,13 @@ from typing import Any
 import certifi
 
 from gemia.tools._context import ToolContext
+from gemia.errors import (
+    RECOVERY_FIX_ARGS,
+    RECOVERY_SWITCH_TOOL,
+    RECOVERY_TRANSIENT_RETRY,
+    RECOVERY_NONE,
+    ToolError,
+)
 
 
 def _read_config(key: str) -> str | None:
@@ -43,10 +50,20 @@ def _sanitize_filename(name: str) -> str:
     """
     # Reject if name contains ".." anywhere (path traversal)
     if ".." in name:
-        raise ValueError(f"unsafe filename: contains path traversal (..) — {name}")
+        raise ToolError(
+            f"Unsafe filename: contains path traversal (..) — {name}",
+            code="E_BAD_ARG",
+            recovery=RECOVERY_FIX_ARGS,
+            hint="Filename must not contain .. or absolute paths",
+        )
     # Reject absolute paths
     if name.startswith("/"):
-        raise ValueError(f"unsafe filename: absolute path — {name}")
+        raise ToolError(
+            f"Unsafe filename: absolute path — {name}",
+            code="E_BAD_ARG",
+            recovery=RECOVERY_FIX_ARGS,
+            hint="Filename must not contain .. or absolute paths",
+        )
     # If name contains /, take only the basename (last component)
     basename = name.split("/")[-1]
     # If empty after cleanup, use a default
@@ -68,13 +85,20 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     """
     url = str(args.get("url") or "").strip()
     if not url:
-        raise ValueError("fetch requires a non-empty 'url' argument")
+        raise ToolError(
+            "URL is required and cannot be empty.",
+            code="E_BAD_ARG",
+            recovery=RECOVERY_FIX_ARGS,
+            hint="Pass a non-empty https:// URL",
+        )
 
     # https-only: block file://, http://, and other schemes
     if not url.startswith("https://"):
-        raise ValueError(
-            f"fetch requires https:// (blocking http, file://, and other schemes). "
-            f"Got: {url[:50]}"
+        raise ToolError(
+            f"Only https:// URLs are allowed (no http, file://, or other schemes). Got: {url[:80]}",
+            code="E_BAD_ARG",
+            recovery=RECOVERY_FIX_ARGS,
+            hint="Use https:// for secure connections",
         )
 
     # Validate and sanitize dest_name BEFORE attempting fetch (fail fast)
@@ -118,11 +142,14 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         try:
             resp = opener.open(req, timeout=30)
         except urllib.error.HTTPError as exc:
-            raise ValueError(
-                f"fetch HTTP {exc.code} from {url[:50]}: {exc.reason}"
+            raise ToolError(
+                f"HTTP {exc.code} error from {url[:80]}: {exc.reason}",
+                code="E_TRANSIENT",
+                recovery=RECOVERY_TRANSIENT_RETRY,
+                hint="The server returned an error; the request may succeed if retried",
             ) from exc
         except urllib.error.URLError as exc:
-            raise ValueError(f"fetch transport error: {exc.reason}") from exc
+            raise ToolError(f"fetch transport error: {exc.reason}", code="E_TRANSIENT", recovery=RECOVERY_TRANSIENT_RETRY) from exc
 
         with resp:
             data = resp.read()
@@ -135,44 +162,62 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
 
     try:
         data, content_type = await asyncio.to_thread(_fetch_blocking)
+    except ToolError:
+        raise
     except Exception as exc:
-        raise ValueError(f"fetch failed for {url[:50]}: {exc}") from exc
+        raise ToolError(f"fetch failed: {exc}", code="E_TRANSIENT", recovery=RECOVERY_TRANSIENT_RETRY) from exc
 
     if len(data) > MAX_SIZE:
-        raise ValueError(
-            f"fetch exceeded size limit: {len(data) / 1024 / 1024:.1f} MB > "
-            f"{MAX_SIZE / 1024 / 1024:.0f} MB"
+        raise ToolError(
+            f"Downloaded file ({len(data) / 1024 / 1024:.1f} MB) exceeds the {MAX_SIZE / 1024 / 1024:.0f} MB limit",
+            code="E_BUDGET",
+            recovery=RECOVERY_SWITCH_TOOL,
+            hint="File is too large; use a different source or split the download",
         )
 
     # Write to disk
     try:
         output_path.write_bytes(data)
     except OSError as exc:
-        raise ValueError(f"fetch failed to write to {output_path}: {exc}") from exc
+        raise ToolError(
+            f"Failed to write {output_path}: {exc}",
+            code="E_BAD_ARG",
+            recovery=RECOVERY_FIX_ARGS,
+            hint="Check that the workspace directory is writable",
+        ) from exc
 
-    # Try to register as asset (skip if non-media, like .zip/.json/.py)
-    asset_id = None
-    try:
-        record = ctx.registry.add_external(
-            output_path,
-            summary=f"fetched from {url[:60]}",
-        )
-        asset_id = record.asset_id
-    except ValueError:
-        # Not a recognized media type (video/image/audio) — skip registration
-        pass
-
-    # Build result
+    # Try to detect media type and allocate a media asset if possible.
+    media_type = _infer_media_type(content_type, dest_name)
     result: dict[str, Any] = {
         "path": str(output_path.relative_to(ctx.output_dir)),
         "size_bytes": len(data),
         "content_type": content_type,
-        "summary": f"downloaded {len(data) / 1024 / 1024:.1f} MB from URL",
     }
-    if asset_id:
-        result["asset_id"] = asset_id
+    summary = f"fetched {dest_name} ({len(data) / 1024:.1f} KB) from {url[:60]}"
+    if media_type:
+        new_id = ctx.registry.allocate_id(media_type)
+        ctx.registry.register_output(
+            new_id,
+            path=output_path,
+            kind=media_type,
+            summary=f"{summary} [{content_type}]",
+        )
+        result["asset_id"] = new_id
 
+    result["summary"] = summary
     return result
 
 
-__all__ = ["dispatch"]
+def _infer_media_type(content_type: str, filename: str) -> str | None:
+    """Infer media type (video/image/audio) from Content-Type and filename."""
+    ct_lower = content_type.lower()
+    fn_lower = filename.lower()
+
+    if "video" in ct_lower or fn_lower.endswith((".mp4", ".webm", ".mov", ".avi", ".mkv")):
+        return "video"
+    if "image" in ct_lower or fn_lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
+        return "image"
+    if "audio" in ct_lower or fn_lower.endswith((".mp3", ".wav", ".aac", ".m4a", ".flac")):
+        return "audio"
+
+    return None

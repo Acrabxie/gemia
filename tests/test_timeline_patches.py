@@ -220,10 +220,15 @@ def test_insert_clip_extended_video_on_audio_track_rejected() -> None:
     _expect_error("E_TRACK_KIND", project, op)
 
 
-def test_insert_clip_extended_image_on_video_track_is_strict() -> None:
+def test_insert_clip_extended_image_track_kinds() -> None:
+    # Images may sit on video or overlay tracks (image-based shotlist main
+    # chain); non-visual tracks stay strict.
     project = _project([])
     op = {"op": "insert_clip", "track_id": "V1", "data": {"clip": _image_clip("img_x", 0.0)}}
-    _expect_error("E_TRACK_KIND", project, op)
+    result = _apply(project, op)
+    assert [c["id"] for c in _clips(result, "V1")] == ["img_x"]
+    op_audio = {"op": "insert_clip", "track_id": "A1", "data": {"clip": _image_clip("img_y", 0.0)}}
+    _expect_error("E_TRACK_KIND", project, op_audio)
 
 
 def test_insert_clip_at_time_without_ripple_overlap_fails() -> None:

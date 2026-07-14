@@ -20,6 +20,7 @@ from typing import Any
 
 from gemia.tools._context import ToolContext
 from gemia.tools._ffmpeg import ffprobe_duration, ffprobe_metadata, short_summary
+from gemia.video.lottie_renderer import save_lottie_frame_png, select_lottie_renderer
 
 
 _THUMB_DIR_NAME = "thumbnails"
@@ -31,9 +32,25 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     record = ctx.registry.get(asset_id)
 
     loop = asyncio.get_running_loop()
-    metadata = await loop.run_in_executor(None, ffprobe_metadata, record.path)
-    duration = await loop.run_in_executor(None, ffprobe_duration, record.path)
-    summary_line = short_summary(metadata)
+    if record.kind == "lottie":
+        lottie_meta = await loop.run_in_executor(None, select_lottie_renderer().get_metadata, str(record.path))
+        fps = float(lottie_meta.get("fps") or 30.0)
+        frames = max(int(lottie_meta.get("frames") or 1), 1)
+        duration = frames / max(fps, 1.0)
+        metadata = {
+            "format": "lottie",
+            "width": int(lottie_meta.get("width") or 0),
+            "height": int(lottie_meta.get("height") or 0),
+            "fps": fps,
+            "frames": frames,
+            "duration": duration,
+            "codec": "lottie",
+        }
+        summary_line = f"Lottie {metadata['width']}x{metadata['height']} {frames} frames @ {fps:.2f} fps ({duration:.2f}s)"
+    else:
+        metadata = await loop.run_in_executor(None, ffprobe_metadata, record.path)
+        duration = await loop.run_in_executor(None, ffprobe_duration, record.path)
+        summary_line = short_summary(metadata)
 
     thumb_dir = Path(ctx.output_dir) / _THUMB_DIR_NAME
     thumb_dir.mkdir(parents=True, exist_ok=True)
@@ -100,6 +117,9 @@ def _make_thumbnail(kind: str, src: Path, dst: Path, duration: float) -> None:
             "-frames:v", "1",
             str(dst),
         ]
+    elif kind == "lottie":
+        save_lottie_frame_png(src, dst, width=512, height=512, frame_index=0)
+        return
     else:
         raise ValueError(f"unsupported asset kind for thumbnail: {kind!r}")
     proc = subprocess.run(cmd, capture_output=True, text=True)

@@ -27,6 +27,34 @@ _SEARCH_ENGINE = "duckduckgo_lite"
 _SEARCH_URL = "https://lite.duckduckgo.com/lite/"
 _MAX_SEARCH_BYTES = 2 * 1024 * 1024
 _MAX_PAGE_BYTES = 3 * 1024 * 1024
+
+# ── BYOK search-provider framework ───────────────────────────────────────────
+# web_search is pluggable. Each provider reads its key(s) from ~/.gemia/config.json
+# (via the existing _read_config) and issues a single request through the existing
+# _build_opener() (proxy-aware). Adapters return a NORMALIZED list of
+# {title, url, snippet} dicts (extra fields allowed). On ANY provider error the
+# dispatcher falls back to the no-key duckduckgo scraper and records a note.
+_USER_AGENT = "Lumeri/4.0 (+https://lumeri.local)"
+_MAX_PROVIDER_BYTES = 2 * 1024 * 1024
+
+# Order auto-detect probes config for a present key/URL. Paid BYOK engines rank
+# first (a present key means the operator opted into that engine), then searxng —
+# the self-hosted, keyless free default, auto-detected only when searxng_url is
+# configured. duckduckgo needs no config and is the universal last-resort
+# fallback, so it is never auto-detected (only the explicit/last-resort path).
+_AUTO_DETECT_ORDER = ("tavily", "serper", "brave", "exa", "google_cse", "bing", "searxng")
+# Providers selectable via the schema enum / search_provider config / per-call arg.
+_VALID_PROVIDERS = (
+    "auto",
+    "tavily",
+    "serper",
+    "brave",
+    "exa",
+    "google_cse",
+    "bing",
+    "searxng",
+    "duckduckgo",
+)
 # DuckDuckGo Lite returns ~10 results per page. Default to a full page (the
 # previous default of 5 silently discarded half of it). Going past one page
 # would require following the Lite "next page" form (extra round-trips), so
@@ -271,8 +299,315 @@ def _read_response(resp: Any, *, max_bytes: int) -> tuple[bytes, str]:
     return data, content_type
 
 
+# ── provider resolution ──────────────────────────────────────────────────────
+
+
+def _resolve_provider(args: dict[str, Any]) -> tuple[str, dict[str, str]]:
+    """Decide which search engine serves this call and gather its credentials.
+
+    Precedence:
+      1. per-call ``args["provider"]`` (when given and not "auto")
+      2. config ``search_provider``
+      3. AUTO-DETECT: first provider in ``_AUTO_DETECT_ORDER`` whose key(s) are
+         present in config
+      4. "duckduckgo" (no key, universal fallback)
+
+    Returns ``(provider_name, creds)``. ``creds`` is the (possibly empty) dict of
+    resolved keys for that provider; duckduckgo always resolves to ``{}``.
+    """
+    requested = str(args.get("provider") or "").strip().lower()
+    if requested and requested != "auto":
+        if requested not in _VALID_PROVIDERS:
+            raise ValueError(
+                f"unknown search provider {requested!r}; "
+                f"valid: {', '.join(p for p in _VALID_PROVIDERS if p != 'auto')}"
+            )
+        return requested, _provider_creds(requested)
+
+    configured = (_read_config("search_provider") or "").strip().lower()
+    if configured and configured != "auto":
+        if configured in _VALID_PROVIDERS:
+            return configured, _provider_creds(configured)
+        # Unknown configured value: ignore and fall through to auto-detect.
+
+    for name in _AUTO_DETECT_ORDER:
+        creds = _provider_creds(name)
+        if creds:
+            return name, creds
+
+    return "duckduckgo", {}
+
+
+def _provider_creds(provider: str) -> dict[str, str]:
+    """Read a provider's key(s) from config. Empty dict => not configured."""
+    if provider == "duckduckgo":
+        return {}
+    if provider == "searxng":
+        # SearXNG is keyless but needs a self-hosted instance URL. An optional
+        # bearer token covers reverse-proxy-protected instances.
+        url = _read_config("searxng_url")
+        if not url:
+            return {}
+        creds = {"url": url}
+        key = _read_config("searxng_api_key")
+        if key:
+            creds["key"] = key
+        return creds
+    if provider == "google_cse":
+        key = _read_config("google_cse_key")
+        cx = _read_config("google_cse_id")
+        if key and cx:
+            return {"key": key, "cx": cx}
+        return {}
+    config_key = {
+        "tavily": "tavily_api_key",
+        "brave": "brave_api_key",
+        "serper": "serper_api_key",
+        "exa": "exa_api_key",
+        "bing": "bing_api_key",
+    }.get(provider)
+    if not config_key:
+        return {}
+    value = _read_config(config_key)
+    return {"key": value} if value else {}
+
+
+# ── provider HTTP helper ─────────────────────────────────────────────────────
+
+
+def _request_json(
+    url: str,
+    *,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    body: dict[str, Any] | None = None,
+    timeout: float = 20,
+) -> Any:
+    """Issue one proxy-aware request and parse the JSON response.
+
+    Uses the existing _build_opener() so provider calls honour the configured
+    proxy. Raises ValueError on transport/HTTP/parse failure so the dispatcher
+    can fall back uniformly.
+    """
+    opener = _build_opener()
+    req_headers = {"User-Agent": _USER_AGENT, "Accept": "application/json"}
+    if headers:
+        req_headers.update(headers)
+    data: bytes | None = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        req_headers.setdefault("Content-Type", "application/json")
+    req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
+    try:
+        resp = opener.open(req, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        raise ValueError(f"HTTP {exc.code}: {exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        raise ValueError(f"transport error: {exc.reason}") from exc
+    raw, _content_type = _read_response(resp, max_bytes=_MAX_PROVIDER_BYTES)
+    try:
+        return json.loads(raw.decode("utf-8", errors="replace"))
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError(f"invalid JSON from provider: {exc}") from exc
+
+
+def _norm(value: Any) -> str:
+    return str(value) if value is not None else ""
+
+
+# ── provider adapters: each returns a normalized list[{title, url, snippet}] ──
+
+
+def _search_tavily(query: str, limit: int, creds: dict[str, str]) -> list[dict[str, str]]:
+    payload = _request_json(
+        "https://api.tavily.com/search",
+        method="POST",
+        body={"api_key": creds["key"], "query": query, "max_results": limit},
+    )
+    results = []
+    for item in (payload.get("results") or [])[:limit]:
+        results.append(
+            {
+                "title": _norm(item.get("title")),
+                "url": _norm(item.get("url")),
+                "snippet": _norm(item.get("content")),
+            }
+        )
+    return results
+
+
+def _search_brave(query: str, limit: int, creds: dict[str, str]) -> list[dict[str, str]]:
+    url = "https://api.search.brave.com/res/v1/web/search?" + urllib.parse.urlencode(
+        {"q": query, "count": limit}
+    )
+    payload = _request_json(
+        url,
+        method="GET",
+        headers={
+            "X-Subscription-Token": creds["key"],
+            "Accept": "application/json",
+        },
+    )
+    web = payload.get("web") or {}
+    results = []
+    for item in (web.get("results") or [])[:limit]:
+        results.append(
+            {
+                "title": _norm(item.get("title")),
+                "url": _norm(item.get("url")),
+                "snippet": _norm(item.get("description")),
+            }
+        )
+    return results
+
+
+def _search_serper(query: str, limit: int, creds: dict[str, str]) -> list[dict[str, str]]:
+    payload = _request_json(
+        "https://google.serper.dev/search",
+        method="POST",
+        headers={"X-API-KEY": creds["key"], "Content-Type": "application/json"},
+        body={"q": query, "num": limit},
+    )
+    results = []
+    for item in (payload.get("organic") or [])[:limit]:
+        results.append(
+            {
+                "title": _norm(item.get("title")),
+                "url": _norm(item.get("link")),
+                "snippet": _norm(item.get("snippet")),
+            }
+        )
+    return results
+
+
+def _search_google_cse(
+    query: str, limit: int, creds: dict[str, str]
+) -> list[dict[str, str]]:
+    num = max(1, min(10, limit))
+    url = "https://www.googleapis.com/customsearch/v1?" + urllib.parse.urlencode(
+        {"key": creds["key"], "cx": creds["cx"], "q": query, "num": num}
+    )
+    payload = _request_json(url, method="GET")
+    results = []
+    for item in (payload.get("items") or [])[:limit]:
+        results.append(
+            {
+                "title": _norm(item.get("title")),
+                "url": _norm(item.get("link")),
+                "snippet": _norm(item.get("snippet")),
+            }
+        )
+    return results
+
+
+def _search_bing(query: str, limit: int, creds: dict[str, str]) -> list[dict[str, str]]:
+    url = "https://api.bing.microsoft.com/v7.0/search?" + urllib.parse.urlencode(
+        {"q": query, "count": limit}
+    )
+    payload = _request_json(
+        url,
+        method="GET",
+        headers={"Ocp-Apim-Subscription-Key": creds["key"]},
+    )
+    web_pages = payload.get("webPages") or {}
+    results = []
+    for item in (web_pages.get("value") or [])[:limit]:
+        results.append(
+            {
+                "title": _norm(item.get("name")),
+                "url": _norm(item.get("url")),
+                "snippet": _norm(item.get("snippet")),
+            }
+        )
+    return results
+
+
+def _search_exa(query: str, limit: int, creds: dict[str, str]) -> list[dict[str, str]]:
+    payload = _request_json(
+        "https://api.exa.ai/search",
+        method="POST",
+        headers={"x-api-key": creds["key"], "Content-Type": "application/json"},
+        body={"query": query, "numResults": limit},
+    )
+    results = []
+    for item in (payload.get("results") or [])[:limit]:
+        snippet = item.get("text") or item.get("snippet") or ""
+        results.append(
+            {
+                "title": _norm(item.get("title")),
+                "url": _norm(item.get("url")),
+                "snippet": _norm(snippet),
+            }
+        )
+    return results
+
+
+def _search_searxng(query: str, limit: int, creds: dict[str, str]) -> list[dict[str, str]]:
+    """Query a self-hosted SearXNG instance via its JSON API.
+
+    SearXNG is a keyless metasearch engine — it aggregates Google/Bing/DuckDuckGo/
+    etc. and returns JSON at ``{base}/search?format=json``. ``creds["url"]`` is the
+    instance base URL; ``creds["key"]`` (optional) adds a bearer token for
+    reverse-proxy-protected instances. Each result carries ``content`` as snippet.
+    """
+    base = creds["url"].rstrip("/")
+    endpoint = base if base.endswith("/search") else base + "/search"
+    url = endpoint + "?" + urllib.parse.urlencode(
+        {"q": query, "format": "json", "safesearch": "1"}
+    )
+    headers = {"Accept": "application/json"}
+    key = creds.get("key")
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    payload = _request_json(url, method="GET", headers=headers)
+    results = []
+    for item in (payload.get("results") or [])[:limit]:
+        results.append(
+            {
+                "title": _norm(item.get("title")),
+                "url": _norm(item.get("url")),
+                "snippet": _norm(item.get("content")),
+            }
+        )
+    return results
+
+
+_PROVIDER_ADAPTERS = {
+    "tavily": _search_tavily,
+    "brave": _search_brave,
+    "serper": _search_serper,
+    "google_cse": _search_google_cse,
+    "bing": _search_bing,
+    "exa": _search_exa,
+    "searxng": _search_searxng,
+}
+
+
+def _search_duckduckgo(query: str, limit: int) -> list[dict[str, str]]:
+    """The no-key DuckDuckGo Lite scraper (existing behaviour)."""
+    opener = _build_opener()
+    url = _SEARCH_URL + "?" + urllib.parse.urlencode({"q": query})
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": _USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml",
+        },
+    )
+    try:
+        resp = opener.open(req, timeout=20)
+    except urllib.error.HTTPError as exc:
+        raise ValueError(f"web_search HTTP {exc.code}: {exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        raise ValueError(f"web_search transport error: {exc.reason}") from exc
+    data, _content_type = _read_response(resp, max_bytes=_MAX_SEARCH_BYTES)
+    parser = _DDGHTMLParser()
+    parser.feed(data.decode("utf-8", errors="replace"))
+    return parser.results[:limit]
+
+
 async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
-    """Search the public web and return compact results."""
+    """Search the public web (BYOK pluggable) and return compact results."""
     query = str(args.get("query") or "").strip()
     if not query:
         raise ValueError("web_search requires a non-empty 'query' argument")
@@ -283,42 +618,45 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         maximum=_MAX_SEARCH_LIMIT,
     )
 
-    opener = _build_opener()
-    url = _SEARCH_URL + "?" + urllib.parse.urlencode({"q": query})
+    provider, creds = _resolve_provider(args)
+    served_by = provider
+    fallback_note: str | None = None
+    results: list[dict[str, str]] = []
 
-    def _blocking() -> bytes:
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Lumeri/4.0 (+https://lumeri.local)",
-                "Accept": "text/html,application/xhtml+xml",
-            },
-        )
+    if provider != "duckduckgo":
+        adapter = _PROVIDER_ADAPTERS[provider]
+
+        def _run_provider() -> list[dict[str, str]]:
+            return adapter(query, limit, creds)
+
         try:
-            resp = opener.open(req, timeout=20)
-        except urllib.error.HTTPError as exc:
-            raise ValueError(f"web_search HTTP {exc.code}: {exc.reason}") from exc
-        except urllib.error.URLError as exc:
-            raise ValueError(f"web_search transport error: {exc.reason}") from exc
-        data, _content_type = _read_response(resp, max_bytes=_MAX_SEARCH_BYTES)
-        return data
+            results = await asyncio.to_thread(_run_provider)
+        except Exception as exc:  # network/auth/parse -> fall back, never hard-fail
+            fallback_note = (
+                f"provider {provider!r} failed ({exc}); fell back to duckduckgo"
+            )
+            served_by = "duckduckgo"
 
-    try:
-        html = await asyncio.to_thread(_blocking)
-    except Exception as exc:
-        raise ValueError(f"web_search failed for query {query!r}: {exc}") from exc
+    if served_by == "duckduckgo":
+        def _run_ddg() -> list[dict[str, str]]:
+            return _search_duckduckgo(query, limit)
 
-    parser = _DDGHTMLParser()
-    parser.feed(html.decode("utf-8", errors="replace"))
-    results = parser.results[:limit]
+        try:
+            results = await asyncio.to_thread(_run_ddg)
+        except Exception as exc:
+            raise ValueError(f"web_search failed for query {query!r}: {exc}") from exc
 
+    engine = _SEARCH_ENGINE if served_by == "duckduckgo" else served_by
     payload = {
         "query": query,
-        "engine": _SEARCH_ENGINE,
+        "engine": engine,
+        "provider": served_by,
         "result_count": len(results),
         "results": results,
         "summary": f"found {len(results)} web results for {query!r}",
     }
+    if fallback_note:
+        payload["fallback"] = fallback_note
     payload["path"] = _write_json(ctx, "web-search", query, payload)
     return payload
 
@@ -393,4 +731,4 @@ async def dispatch_open(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any
     return payload
 
 
-__all__ = ["dispatch", "dispatch_open"]
+__all__ = ["dispatch", "dispatch_open", "_resolve_provider"]

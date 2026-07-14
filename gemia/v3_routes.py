@@ -1,13 +1,15 @@
 """HTTP routes for Lumeri v3 sessions.
 
     POST   /sessions                            create session
-    GET    /sessions/{id}                       info (assets, latest_event_id)
+    GET    /sessions/{id}                       info (assets, latest_event_id, plan_mode, protocol_version)
     POST   /sessions/{id}/turn                  submit user message (202)
+    POST   /sessions/{id}/plan_mode             toggle plan mode {"enabled": bool}
     POST   /sessions/{id}/assets                upload asset (raw body + X-Filename)
     GET    /sessions/{id}/assets                list session assets
     GET    /sessions/{id}/assets/{asset_id}     serve asset file (Range supported)
     POST   /sessions/{id}/close                 close session
     GET    /sessions/{id}/stream                SSE event stream (Last-Event-ID)
+    GET    /sessions/{id}/transcript            durable NDJSON transcript (?since_seq=N; works after close)
 
 ``try_handle(handler, method=...)`` is the single entrypoint server.py
 calls. Returns True if the request was handled, False to let the host
@@ -29,6 +31,7 @@ import mimetypes
 import os
 import re
 import uuid
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
@@ -36,7 +39,9 @@ from urllib.parse import parse_qs, unquote, urlparse
 from gemia.session_manager import SessionLimitError, SessionRunner, get_manager
 from gemia.transport.sse import REGISTRY as SSE_REGISTRY
 from gemia.transport.sse import iter_events
-from lumerai.patches import TimelinePatchError
+from gemia.v3_contract import PROTOCOL_VERSION
+from lumerai.export_support import effects_warnings, transition_warnings
+from lumerai.patches import _TRANSITION_KINDS, TimelinePatchError
 
 
 _DEFAULT_MAX_UPLOAD_BYTES = 500 * 1024 * 1024
@@ -91,7 +96,7 @@ def _route_post(handler, path: str, query: dict) -> bool:
             return True
         return _session_timeline_op(handler, runner)
 
-    m = re.match(r"^/sessions/([^/]+)/(turn|assets|close)$", path)
+    m = re.match(r"^/sessions/([^/]+)/(turn|assets|close|ask_response|plan_mode)$", path)
     if not m:
         return False
     session_id, action = m.group(1), m.group(2)
@@ -106,13 +111,24 @@ def _route_post(handler, path: str, query: dict) -> bool:
         return _upload_asset(handler, runner)
     if action == "close":
         return _close_session(handler, runner)
+    if action == "ask_response":
+        return _ask_response(handler, runner)
+    if action == "plan_mode":
+        return _set_plan_mode(handler, runner)
     return False
 
 
 def _route_get(handler, path: str, query: dict, *, body: bool) -> bool:
+    if path == "/sessions":
+        return _list_sessions(handler)
+
     m = re.match(r"^/sessions/([^/]+)/stream$", path)
     if m:
         return _sse_stream(handler, m.group(1), query, body=body)
+
+    m = re.match(r"^/sessions/([^/]+)/transcript$", path)
+    if m:
+        return _session_transcript(handler, m.group(1), query, body=body)
 
     m = re.match(r"^/sessions/([^/]+)/timeline$", path)
     if m:
@@ -138,9 +154,12 @@ def _route_get(handler, path: str, query: dict, *, body: bool) -> bool:
 
 def _create_session(handler) -> bool:
     try:
-        from gemia import accounts
+        from gemia import identity
 
-        account_id = accounts.current_account_id()
+        # Per-request pin honored: a client that pins X-Lumeri-Account gets
+        # its session bound to THAT account even if another client flips the
+        # global active.json mid-flight.
+        account_id = identity.resolve_account_id(handler)
     except Exception:
         account_id = None
     try:
@@ -171,6 +190,71 @@ def _submit_turn(handler, runner: SessionRunner) -> bool:
         _json_error(handler, 409, "turn already in progress for this session")
         return True
     _json_response(handler, 202, {"session_id": runner.session_id, "accepted": True})
+    return True
+
+
+def _ask_response(handler, runner: SessionRunner) -> bool:
+    """Deliver a user's answer to a pending ``elicit`` question.
+
+    Validates the answer against the question schema BEFORE resolving the
+    bridge future. On failure the future stays pending and the user can retry.
+    """
+    body = _read_json_body(handler)
+    if body is None:
+        return True
+    question_id = body.get("question_id")
+    answers = body.get("answers")
+    if not isinstance(question_id, str) or not question_id:
+        _json_error(handler, 400, "request body must include 'question_id' string")
+        return True
+    if not isinstance(answers, dict):
+        _json_error(handler, 400, "request body must include 'answers' object")
+        return True
+
+    question_dict = runner.get_pending_question(question_id)
+    if question_dict is None:
+        _json_error(handler, 404, f"no pending question: {question_id}")
+        return True
+
+    from gemia.tools.ask import AskAnswer, AskQuestion, validate_ask_answer_all
+
+    try:
+        question_obj = AskQuestion.from_dict(question_dict)
+    except Exception:
+        # Schema changed between emit and answer — accept as-is to avoid wedge.
+        pass
+    else:
+        answer_obj = AskAnswer(question_id=question_id, answers=answers)
+        field_errors = validate_ask_answer_all(question_obj, answer_obj)
+        if field_errors:
+            _json_response(handler, 422, {
+                "error": "answer validation failed",
+                "code": "E_ASK_INVALID_ANSWER",
+                "question_id": question_id,
+                "field_errors": field_errors,
+            })
+            return True
+
+    delivered = runner.deliver_ask_answer(question_id, answers)
+    if not delivered:
+        _json_error(handler, 404, f"no pending question: {question_id}")
+        return True
+    _json_response(handler, 200, {"question_id": question_id, "delivered": True})
+    return True
+
+
+def _set_plan_mode(handler, runner: SessionRunner) -> bool:
+    """Toggle the session's plan mode. The agent broadcasts a
+    ``plan_mode_changed`` SSE event so every connected client stays in sync."""
+    body = _read_json_body(handler)
+    if body is None:
+        return True
+    enabled = body.get("enabled")
+    if not isinstance(enabled, bool):
+        _json_error(handler, 400, "request body must include boolean 'enabled'")
+        return True
+    state = runner.set_plan_mode(enabled)
+    _json_response(handler, 200, {"session_id": runner.session_id, "plan_mode": state})
     return True
 
 
@@ -241,6 +325,56 @@ def _close_session(handler, runner: SessionRunner) -> bool:
 # ── GET handlers ──────────────────────────────────────────────────────
 
 
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _session_transcript(handler, session_id: str, query: dict, *, body: bool) -> bool:
+    """Serve the durable event transcript (NDJSON, one {seq, ts, event} per
+    line). Works for CLOSED sessions too — the transcript outlives the runner
+    and the 200-event SSE replay buffer; this is the resync source for a
+    client that attached late or reconnected after a restart.
+
+    ``?since_seq=N`` skips lines with seq <= N (incremental catch-up).
+    """
+    if not _SESSION_ID_RE.match(session_id):
+        _json_error(handler, 400, "invalid session id")
+        return True
+    path = get_manager().sessions_root / session_id / "transcript.jsonl"
+    if not path.exists():
+        _json_error(handler, 404, f"no transcript for session: {session_id}")
+        return True
+
+    since_seq = 0
+    raw_since = query.get("since_seq")
+    if raw_since:
+        try:
+            since_seq = max(0, int(raw_since[0]))
+        except (TypeError, ValueError):
+            _json_error(handler, 400, "since_seq must be an integer")
+            return True
+
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+    if not body:
+        return True
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if since_seq:
+                    try:
+                        if int(json.loads(line).get("seq") or 0) <= since_seq:
+                            continue
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                handler.wfile.write(line.encode("utf-8"))
+        handler.wfile.flush()
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    return True
+
+
 def _session_info(handler, session_id: str) -> bool:
     runner = get_manager().get(session_id)
     if runner is None:
@@ -250,7 +384,45 @@ def _session_info(handler, session_id: str) -> bool:
         "session_id": session_id,
         "assets": runner.list_assets(),
         "latest_event_id": SSE_REGISTRY.latest_event_id(session_id),
+        "plan_mode": runner.plan_mode,
+        "protocol_version": PROTOCOL_VERSION,
     })
+    return True
+
+
+def _list_sessions(handler) -> bool:
+    """Read-only snapshot of live runners + pending async jobs (background panel).
+
+    Avoids manager.get() on purpose — get() touches last_used_at, and a
+    monitoring read must not keep sessions alive. Runner internals are read
+    defensively (the agent loop is being refactored in a parallel worktree),
+    so a missing attribute degrades to an empty jobs list, never a 500.
+    """
+    manager = get_manager()
+    try:
+        with manager._lock:
+            runners = list(manager._runners.values())
+    except AttributeError:
+        runners = [r for r in (manager.get(sid) for sid in manager.list_sessions()) if r]
+    sessions = []
+    for runner in runners:
+        jobs: list[dict[str, Any]] = []
+        try:
+            registry = runner.agent._tool_ctx.jobs
+            jobs = [rec.to_dict() for rec in registry.list_pending()]
+        except Exception:
+            jobs = []
+        sessions.append({
+            "session_id": getattr(runner, "session_id", ""),
+            "account_id": getattr(runner, "account_id", "") or "",
+            "created_at": getattr(runner, "created_at", None),
+            "last_used_at": getattr(runner, "last_used_at", None),
+            "turn_in_progress": bool(getattr(runner, "turn_in_progress", False)),
+            "plan_mode": bool(getattr(runner, "plan_mode", False)),
+            "pending_jobs": jobs,
+        })
+    sessions.sort(key=lambda s: s.get("last_used_at") or 0, reverse=True)
+    _json_response(handler, 200, {"sessions": sessions})
     return True
 
 
@@ -273,6 +445,9 @@ def _timeline_payload_dict(session_id: str, project_id: str, project: dict, meta
         asset = asset_map.get(str(clip.get("asset_id") or "")) or {}
         clips_by_track.setdefault(tid, []).append({
             "id": str(clip.get("id") or ""),
+            # asset_id is surfaced so the frontend can fetch the clip's source
+            # media (/sessions/{id}/assets/{asset_id}) for filmstrip + waveform.
+            "asset_id": str(clip.get("asset_id") or ""),
             "name": str(clip.get("name") or asset.get("name") or "clip"),
             "start": float(clip.get("start") or 0.0),
             "duration": float(clip.get("duration") or 0.1),
@@ -283,22 +458,49 @@ def _timeline_payload_dict(session_id: str, project_id: str, project: dict, meta
             "enabled": bool(clip.get("enabled", True)),
             "effects": clip.get("effects") if isinstance(clip.get("effects"), dict) else {},
             "text_config": clip.get("text_config") if isinstance(clip.get("text_config"), dict) else None,
-            "transition": clip.get("transition") if isinstance(clip.get("transition"), dict) else None,
+            # lumerai stores the outgoing transition as clip["transition_after"]
+            # (patches.py _op_add_transition); the payload key stays "transition"
+            # for both frontends. Reading the old "transition" key surfaced
+            # nothing, ever — add_transition looked applied but was invisible.
+            "transition": clip.get("transition_after") if isinstance(clip.get("transition_after"), dict) else None,
         })
     for clips in clips_by_track.values():
         clips.sort(key=lambda c: float(c.get("start") or 0.0))
 
     tracks = []
+    emitted_track_ids: set[str] = set()
     for track in tracks_raw:
         if not isinstance(track, dict):
             continue
         tid = str(track.get("id") or "")
+        if not tid:
+            continue
+        emitted_track_ids.add(tid)
         tracks.append({
             "id": tid,
             "kind": str(track.get("kind") or "video"),
             "name": str(track.get("name") or tid),
             "duck_under": track.get("duck_under") if isinstance(track.get("duck_under"), str) else None,
             "clips": clips_by_track.get(tid, []),
+        })
+    for tid in sorted(clips_by_track):
+        if tid in emitted_track_ids:
+            continue
+        clips = clips_by_track[tid]
+        kinds = {str(c.get("media_kind") or "") for c in clips if isinstance(c, dict)}
+        if "audio" in kinds:
+            kind = "audio"
+        elif "image" in kinds or "text" in kinds or tid.startswith("OV"):
+            kind = "overlay"
+        else:
+            kind = "video"
+        label = {"audio": "Audio", "overlay": "Overlay"}.get(kind, "Video")
+        tracks.append({
+            "id": tid,
+            "kind": kind,
+            "name": f"{label} {tid}",
+            "duck_under": None,
+            "clips": clips,
         })
 
     return {
@@ -310,6 +512,10 @@ def _timeline_payload_dict(session_id: str, project_id: str, project: dict, meta
         "width": int(timeline.get("width") or 1920),
         "height": int(timeline.get("height") or 1080),
         "tracks": tracks,
+        # The storyboard IR rides the timeline payload so the web outline
+        # panel refreshes through the existing poll + timeline_op force-fetch
+        # (set_shotlist/update_shot land in the same patch log as clip ops).
+        "shotlist": project.get("shotlist") if isinstance(project.get("shotlist"), dict) else None,
     }
 
 
@@ -332,7 +538,9 @@ def _session_timeline(handler, session_id: str) -> bool:
 
 
 # User direct-edit op tokens -> the same patches.py ops the model's verbs emit.
-_USER_EDIT_OPS = {"move", "trim", "split", "delete", "set_time", "set_effects"}
+# ``set_effects`` also carries the direct-UI BLEND op (effects.blend_mode) and the
+# PIP op (effects.scale/x/y); ``add_transition`` carries the CROSSFADE op.
+_USER_EDIT_OPS = {"move", "trim", "split", "delete", "set_time", "set_effects", "add_transition"}
 
 
 def _build_user_edit_op(op_name: str, clip_id: str, body: dict) -> dict[str, Any]:
@@ -382,6 +590,19 @@ def _build_user_edit_op(op_name: str, clip_id: str, body: dict) -> dict[str, Any
         if not isinstance(effects, dict):
             raise ValueError("set_effects requires an 'effects' object")
         return {"op": "set_clip_effects", "clip_id": clip_id, "effects": effects, "provenance": prov}
+    if op_name == "add_transition":
+        # Direct-UI CROSSFADE op -> lumerai _op_add_transition. The patch op's own
+        # E_BAD_ARG validation covers adjacency/duration; we only pre-check that the
+        # kind is a known transition so a typo fails fast as a 400 here.
+        kind = str(body.get("kind") or "")
+        if kind not in _TRANSITION_KINDS:
+            raise ValueError(
+                f"add_transition.kind must be one of {sorted(_TRANSITION_KINDS)}, got {kind!r}"
+            )
+        op = {"op": "add_transition", "clip_id": clip_id, "kind": kind, "provenance": prov}
+        if body.get("duration_sec") is not None:
+            op["duration_sec"] = _num("duration_sec")
+        return op
     raise ValueError(f"unhandled op '{op_name}'")
 
 
@@ -411,10 +632,22 @@ def _session_timeline_op(handler, runner: SessionRunner) -> bool:
     project = runner.agent.project
     try:
         # SAME path as the verbs: ProjectStore append-only patch log + undo,
-        # and ProjectHandle.on_patch emits the timeline_op SSE event.
-        project.apply_ops([patch_op], label=f"user_edit:{op_name}")
+        # and ProjectHandle.on_patch emits the timeline_op SSE event. Hopped
+        # onto the session loop (run_project_edit) so user edits serialize
+        # with agent verbs and their SSE emits stay ordered.
+        runner.run_project_edit(
+            lambda: project.apply_ops([patch_op], label=f"user_edit:{op_name}")
+        )
     except TimelinePatchError as exc:
         _json_error(handler, 400, exc.message, code=exc.code)
+        return True
+    except FuturesTimeoutError:
+        _json_error(
+            handler, 503,
+            "edit is queued behind a long-running step and has not applied yet — "
+            "refresh the timeline to see whether it landed",
+            code="E_BUSY",
+        )
         return True
     except Exception as exc:
         _json_error(handler, 500, f"failed to apply edit: {exc}")
@@ -426,10 +659,38 @@ def _session_timeline_op(handler, runner: SessionRunner) -> bool:
     except Exception as exc:
         _json_error(handler, 500, f"applied, but could not reload project: {exc}")
         return True
-    _json_response(handler, 200, _timeline_payload_dict(
+    payload = _timeline_payload_dict(
         runner.session_id, project.project_id, project_state, meta,
-    ))
+    )
+    # Export honesty (docs/timeline-canonical-plan.md §4): the 200 response
+    # carries write-time warnings when the edit stored fields the exporter
+    # will not render today. Warn, never reject.
+    warnings = _user_edit_warnings(op_name, clip_id, body, project_state)
+    if warnings:
+        payload["warnings"] = warnings
+    _json_response(handler, 200, payload)
     return True
+
+
+def _user_edit_warnings(
+    op_name: str, clip_id: str, body: dict, project_state: dict
+) -> list[str]:
+    """Write-time export-honesty warnings for one applied user edit."""
+    if op_name == "add_transition":
+        return transition_warnings(str(body.get("kind") or ""))
+    if op_name == "set_effects":
+        clip = next(
+            (
+                c
+                for c in (project_state.get("timeline", {}).get("clips") or [])
+                if str(c.get("id")) == clip_id
+            ),
+            None,
+        )
+        media_kind = str((clip or {}).get("media_kind") or "video")
+        effects = body.get("effects")
+        return effects_warnings(media_kind, effects if isinstance(effects, dict) else {})
+    return []
 
 
 def _apply_user_undo(handler, runner: SessionRunner, body: dict) -> bool:
@@ -442,7 +703,15 @@ def _apply_user_undo(handler, runner: SessionRunner, body: dict) -> bool:
         return True
     project = runner.agent.project
     try:
-        project.undo(max(1, min(steps, 50)))
+        runner.run_project_edit(lambda: project.undo(max(1, min(steps, 50))))
+    except FuturesTimeoutError:
+        _json_error(
+            handler, 503,
+            "undo is queued behind a long-running step and has not applied yet — "
+            "refresh the timeline to see whether it landed",
+            code="E_BUSY",
+        )
+        return True
     except Exception as exc:
         _json_error(handler, 400, f"undo failed: {exc}")
         return True
@@ -497,6 +766,18 @@ def _sse_stream(handler, session_id: str, query: dict, *, body: bool) -> bool:
     if not body:
         return True
     try:
+        # Per-connection hello frame. Deliberately NOT pushed through the SSE
+        # registry (it would consume a replay-buffer event id and be replayed
+        # out of order on reconnect) and deliberately id-LESS, so neither the
+        # browser EventSource nor the CLI parser advances Last-Event-ID on it.
+        # Plain data frame (no `event:` name): both frontends dispatch it like
+        # any other kind and warn (non-blocking) on version mismatch.
+        hello = json.dumps(
+            {"kind": "protocol_hello", "protocol_version": PROTOCOL_VERSION},
+            ensure_ascii=False,
+        )
+        handler.wfile.write(f"data: {hello}\n\n".encode("utf-8"))
+        handler.wfile.flush()
         for chunk in iter_events(session_id, last_event_id=last_id):
             handler.wfile.write(chunk)
             handler.wfile.flush()

@@ -15,10 +15,11 @@ DEFAULT_HEIGHT = 1080
 DEFAULT_FPS = 30.0
 IMAGE_DURATION = 3.0
 
-MEDIA_KINDS = {"video", "image", "audio", "text"}
+MEDIA_KINDS = {"video", "image", "audio", "text", "lottie"}
 TRACK_KINDS = {"video", "overlay", "audio"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 AUDIO_EXTENSIONS = {".flac", ".wav", ".mp3", ".m4a", ".aac"}
+LOTTIE_EXTENSIONS = {".json", ".lottie"}
 
 
 def empty_project(*, account_id: str | None = None, title: str = "Untitled Project") -> dict[str, Any]:
@@ -58,7 +59,110 @@ def empty_project(*, account_id: str | None = None, title: str = "Untitled Proje
         "metadata": {
             "generator": "gemia",
         },
+        "shotlist": empty_shotlist(),
     }
+
+
+# ── shotlist / storyboard IR ──────────────────────────────────────────────
+# The shotlist is an outline/storyboard-driven editing plan that lives inside
+# project_state so it inherits the append-only patch log (undo + audit) for
+# free, exactly like timeline edits. It is orthogonal to the timeline: shots
+# describe *intent* (what each beat should show, how long, what text), while
+# clips are the *result* once a shot is filled with an asset and assembled.
+
+SHOT_SOURCES = {"search", "generate", "unset"}
+SHOT_STATUSES = {"draft", "filled", "placed"}
+_SHOT_TRANSITIONS = {"cut", "dissolve", "wipe", "fade"}
+
+
+def empty_shotlist() -> dict[str, Any]:
+    return {
+        "logline": "",
+        "style": "",
+        "target_duration_sec": None,
+        "scenes": [],
+    }
+
+
+def _normalize_transition(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    kind = str(raw.get("kind") or "cut").strip().lower()
+    if kind not in _SHOT_TRANSITIONS:
+        kind = "cut"
+    if kind == "cut":
+        return None
+    return {"kind": kind, "duration_sec": max(0.0, _float_or(raw.get("duration_sec"), 0.5))}
+
+
+def _normalize_shot(raw: Any, *, scene_idx: int, shot_idx: int) -> dict[str, Any]:
+    raw = raw if isinstance(raw, dict) else {}
+    source = str(raw.get("source") or "unset").strip().lower()
+    if source not in SHOT_SOURCES:
+        source = "unset"
+    status = str(raw.get("status") or "draft").strip().lower()
+    if status not in SHOT_STATUSES:
+        status = "draft"
+    return {
+        "id": str(raw.get("id") or "") or f"s{scene_idx}_shot{shot_idx}",
+        "description": str(raw.get("description") or ""),
+        "duration_sec": max(0.1, _float_or(raw.get("duration_sec"), 3.0)),
+        "on_screen_text": _optional_str(raw.get("on_screen_text")),
+        "narration": _optional_str(raw.get("narration")),
+        "mood": _optional_str(raw.get("mood")),
+        "source": source,
+        "search_query": _optional_str(raw.get("search_query")),
+        "asset_id": _optional_str(raw.get("asset_id")),
+        "clip_id": _optional_str(raw.get("clip_id")),
+        "transition_after": _normalize_transition(raw.get("transition_after")),
+        "status": status,
+        "notes": _optional_str(raw.get("notes")),
+    }
+
+
+def _normalize_scene(raw: Any, *, scene_idx: int) -> dict[str, Any]:
+    raw = raw if isinstance(raw, dict) else {}
+    shots_raw = raw.get("shots") if isinstance(raw.get("shots"), list) else []
+    shots = [
+        _normalize_shot(shot, scene_idx=scene_idx, shot_idx=i)
+        for i, shot in enumerate(shots_raw)
+    ]
+    return {
+        "id": str(raw.get("id") or "") or f"scene{scene_idx}",
+        "title": str(raw.get("title") or ""),
+        "shots": shots,
+    }
+
+
+def normalize_shotlist(raw: Any) -> dict[str, Any]:
+    """Coerce a (possibly partial, model-authored) shotlist into canonical shape.
+
+    Never raises: unknown/garbage entries are dropped, ids are backfilled, and
+    numeric/enum fields are clamped so a half-formed draft still round-trips.
+    """
+    if not isinstance(raw, dict):
+        return empty_shotlist()
+    scenes_raw = raw.get("scenes") if isinstance(raw.get("scenes"), list) else []
+    scenes = [_normalize_scene(scene, scene_idx=i) for i, scene in enumerate(scenes_raw)]
+    target = raw.get("target_duration_sec")
+    return {
+        "logline": str(raw.get("logline") or ""),
+        "style": str(raw.get("style") or ""),
+        "target_duration_sec": (
+            round(_float_or(target, 0.0), 3) if isinstance(target, (int, float)) else None
+        ),
+        "scenes": scenes,
+    }
+
+
+def iter_shots(shotlist: dict[str, Any]):
+    """Yield ``(scene, shot)`` pairs in scene/shot order for a normalized shotlist."""
+    for scene in (shotlist or {}).get("scenes") or []:
+        if not isinstance(scene, dict):
+            continue
+        for shot in scene.get("shots") or []:
+            if isinstance(shot, dict):
+                yield scene, shot
 
 
 def normalize_project(
@@ -105,7 +209,7 @@ def legacy_project_state_from_project(project: dict[str, Any]) -> dict[str, Any]
             {
                 "id": str(item.get("id") or f"clip_{len(clips)}"),
                 "assetId": str(item.get("asset_id") or asset.get("asset_id") or asset.get("id") or ""),
-                "trackId": str(item.get("track_id") or ("A1" if media_kind == "audio" else "V1")),
+                "trackId": str(item.get("track_id") or _default_track_id_for_media_kind(media_kind)),
                 "mediaKind": media_kind,
                 "mimeType": str(asset.get("mime_type") or ""),
                 "name": str(item.get("name") or asset.get("name") or "media"),
@@ -233,6 +337,7 @@ def _normalize_canonical_project(project: dict[str, Any], *, account_id: str | N
     }
     metadata = project.get("metadata") if isinstance(project.get("metadata"), dict) else {}
     normalized["metadata"] = {**normalized["metadata"], **metadata}
+    normalized["shotlist"] = normalize_shotlist(project.get("shotlist"))
     return normalized
 
 
@@ -309,10 +414,13 @@ def _timeline_clip_from_legacy(clip: dict[str, Any], asset: dict[str, Any], *, s
         duration = IMAGE_DURATION
         source_in = 0.0
         source_out = IMAGE_DURATION
+    elif media_kind == "lottie":
+        duration = max(0.1, real_duration or max(0.1, raw_source_out - source_in))
+        source_out = source_in + duration
     return {
         "id": str(clip.get("id") or f"clip_{uuid.uuid4().hex[:8]}"),
         "asset_id": asset["id"],
-        "track_id": str(clip.get("trackId") or ("A1" if media_kind == "audio" else "V1")),
+        "track_id": str(clip.get("trackId") or _default_track_id_for_media_kind(media_kind)),
         "name": str(clip.get("name") or asset.get("name") or "media"),
         "media_kind": media_kind,
         "start": round(start, 6),
@@ -351,6 +459,12 @@ def _normalize_timeline_clip(clip: dict[str, Any]) -> dict[str, Any]:
         duration = explicit if explicit > 0 else IMAGE_DURATION
         source_in = 0.0
         source_out = duration
+    elif media_kind == "lottie":
+        duration = max(_float_or(clip.get("duration"), 0.1), 0.1)
+        source_in = max(_float_or(clip.get("source_in"), 0.0), 0.0)
+        source_out = _float_or(clip.get("source_out"), source_in + duration)
+        if source_out <= source_in + 1e-3:
+            source_out = source_in + duration
     else:
         duration = max(_float_or(clip.get("duration"), 0.1), 0.1)
         source_in = _float_or(clip.get("source_in"), 0.0)
@@ -360,7 +474,7 @@ def _normalize_timeline_clip(clip: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": str(clip.get("id") or f"clip_{uuid.uuid4().hex[:8]}"),
         "asset_id": str(clip.get("asset_id") or ""),
-        "track_id": str(clip.get("track_id") or ("A1" if media_kind == "audio" else "V1")),
+        "track_id": str(clip.get("track_id") or _default_track_id_for_media_kind(media_kind)),
         "name": str(clip.get("name") or "media"),
         "media_kind": media_kind,
         "start": max(_float_or(clip.get("start"), 0.0), 0.0),
@@ -452,6 +566,8 @@ def _media_kind_for_clip(clip: dict[str, Any], metadata: dict[str, Any]) -> str:
 
 def _media_kind_for_name(name: str, mime_type: str = "") -> str:
     mime = mime_type.lower()
+    if mime in {"application/dotlottie", "application/vnd.lottie+json"}:
+        return "lottie"
     if mime.startswith("image/"):
         return "image"
     if mime.startswith("audio/"):
@@ -461,7 +577,17 @@ def _media_kind_for_name(name: str, mime_type: str = "") -> str:
         return "image"
     if suffix in AUDIO_EXTENSIONS:
         return "audio"
+    if suffix in LOTTIE_EXTENSIONS:
+        return "lottie"
     return "video"
+
+
+def _default_track_id_for_media_kind(media_kind: str) -> str:
+    if media_kind == "audio":
+        return "A1"
+    if media_kind in {"image", "text", "lottie"}:
+        return "OV1"
+    return "V1"
 
 
 def _title_from_legacy_state(project_state: dict[str, Any]) -> str:

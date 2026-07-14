@@ -58,7 +58,9 @@ def test_agent_loop_preserves_gemini_tool_call_extra_content(tmp_path: Path) -> 
 
     asyncio.run(loop.run_turn("做个mg动画"))
 
-    assert client.calls == 2
+    # The tool protocol remains intact; because the creative goal produced no
+    # asset, the ledger performs one full-route retry before ending incomplete.
+    assert client.calls == 3
     second_messages = client.seen_messages[1]
     assistant = next(
         msg for msg in second_messages
@@ -134,4 +136,38 @@ def test_parse_chunk_forwards_late_tool_call_extra_content() -> None:
             "index": 0,
             "extra_content": {"thought_signature": "sig-late"},
         }
+    ]
+
+
+def test_parse_chunk_top_level_error_is_terminal_before_choices() -> None:
+    chunk = {
+        "error": {
+            "message": "upstream failed",
+            "type": "upstream_error",
+            "code": "response_failed",
+        },
+        "choices": [
+            {
+                "delta": {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "partial",
+                            "function": {"name": "run_shell", "arguments": "{"},
+                        }
+                    ]
+                },
+                "finish_reason": "stop",
+            }
+        ],
+    }
+
+    assert list(_parse_chunk(chunk)) == [
+        {"kind": "error", "error": "upstream failed (response_failed)"}
+    ]
+
+
+def test_parse_chunk_accepts_string_error_without_choices() -> None:
+    assert list(_parse_chunk({"error": "connection reset"})) == [
+        {"kind": "error", "error": "connection reset"}
     ]

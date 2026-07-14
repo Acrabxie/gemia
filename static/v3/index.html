@@ -3,70 +3,202 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Lumeri v3</title>
+<title>Lumeri</title>
+<link rel="icon" type="image/svg+xml" href="/v3/lumeri-favicon.svg" />
 <link rel="stylesheet" href="/v3/v3.css" />
 </head>
 <body>
 <header class="app-header">
-  <div class="title-block">
-    <h1>Lumeri v3</h1>
-    <span class="session-id" id="session-id-label">—</span>
-  </div>
-  <div class="header-actions">
-    <button type="button" id="sandbox-toggle-btn" class="sandbox-toggle" title="沙盒已开启（点击关闭）">沙盒</button>
-    <span class="status-pill" id="connection-pill">offline</span>
-    <button type="button" id="new-session-btn">new session</button>
-  </div>
+  <span class="brand">
+    <img class="brand-logo" src="/v3/lumeri-mark.svg" alt="Lumeri" width="26" height="19" />
+    <h1>Lumeri</h1>
+  </span>
 </header>
 
 <main class="app-main">
-  <section class="left-pane" id="timeline-pane">
-    <div class="empty-state" id="empty-state">
-      <p>Upload a clip and describe what you want.</p>
-      <p>The agent will pick the actions and stream progress back here.</p>
+  <!-- LEFT · preview stage: browser-style tab strip, then the active tab's content -->
+  <section class="preview-stage" id="preview-stage" data-tab="preview">
+    <div class="stage-tabbar" id="stage-tabs" role="tablist" aria-label="工作区视图">
+      <div class="stage-tab-list" id="stage-tab-list"></div>
+      <button type="button" id="stage-add-btn" class="stage-add-btn" title="添加视图" aria-label="添加视图" aria-haspopup="menu" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-plus"/></svg>
+      </button>
+      <span class="stage-tabbar-spacer"></span>
+      <button type="button" id="panel-refresh-btn" class="library-small-btn icon-btn" title="刷新" aria-label="刷新" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-refresh"/></svg></button>
+      <div id="stage-add-menu" class="stage-add-menu" hidden role="menu" aria-label="添加视图"></div>
     </div>
-    <div class="timeline" id="timeline" hidden></div>
+
+    <!-- full-area workspace view (outline / tasks / files) shown instead of the preview -->
+    <div class="stage-panel" id="stage-panel" hidden>
+      <div class="panel-tray-body" id="panel-tray-body"></div>
+    </div>
+
+    <div class="empty-state" id="empty-state">
+      <img class="empty-mark" src="/v3/lumeri-mark.svg" alt="Lumeri" width="92" height="66" />
+      <h2 class="empty-title">开始创作</h2>
+    </div>
+
+    <div class="stage-scroll" id="stage-scroll">
+      <div class="asset-grid" id="asset-grid"></div>
+    </div>
+
+    <!-- CapCut-style project timeline: collapsible drawer, auto-opens when a timeline exists -->
+    <div class="timeline-drawer" id="timeline-drawer">
+      <section id="project-timeline-panel" class="ptl"></section>
+    </div>
   </section>
 
-  <section class="right-pane">
-    <h2 class="pane-heading">Session assets</h2>
-    <div class="asset-grid" id="asset-grid">
-      <p class="placeholder">No assets yet.</p>
+  <!-- RIGHT · chat rail: session head, history, cohesive input -->
+  <aside class="chat-rail" id="chat-rail">
+    <div class="rail-head">
+      <!-- connection dot + session id kept for JS wiring but no longer shown (user request) -->
+      <span class="status-pill" id="connection-pill" role="status" title="offline" aria-label="offline" hidden></span>
+      <span class="session-id" id="session-id-label" hidden>—</span>
+      <span class="rail-head-spacer"></span>
+      <button type="button" id="new-session-btn" class="rail-btn icon-btn" title="新会话" aria-label="新会话"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-new-chat"/></svg></button>
+      <button type="button" id="account-btn" class="account-btn rail-btn icon-btn" title="登录 / 账户" aria-label="登录 / 账户"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-user"/></svg></button>
     </div>
-  </section>
+
+    <div class="rail-history" id="rail-history">
+      <div class="timeline" id="timeline" hidden></div>
+    </div>
+
+    <!-- plan approval bar: filled by v3.js while plan mode is on -->
+    <div id="plan-bar" class="plan-bar" hidden></div>
+
+    <!-- ask dock: rendered by v3.js when elicit awaits a user answer -->
+    <div id="ask-dock" class="ask-dock" hidden></div>
+
+    <!-- cohesive input shell: one piece, two states (collapsed pill ↔ grown card) -->
+    <footer class="composer input-shell" id="input-shell">
+      <!-- slash-command palette (unchanged behavior), anchored to the shell -->
+      <div id="slash-menu" class="slash-menu" hidden></div>
+
+      <!-- "+" popover: the single entry point for everything -->
+      <div id="plus-menu" class="plus-menu" hidden role="menu" aria-label="添加">
+        <button type="button" id="upload-btn" class="plus-item" role="menuitem">
+          <svg class="plus-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 8.5l-9.4 9.4a4 4 0 0 1-5.7-5.7l9-9a2.6 2.6 0 0 1 3.7 3.7l-9 9a1.3 1.3 0 0 1-1.8-1.8l8.3-8.3"/></svg>
+          <span class="plus-label">上传</span>
+          <span class="plus-tail">⌘U</span>
+        </button>
+        <button type="button" class="plus-item" data-plus="slash" role="menuitem">
+          <svg class="plus-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 7 5 5-5 5"/><path d="M13 17h6"/></svg>
+          <span class="plus-label">快捷指令</span>
+          <span class="plus-tail">/</span>
+        </button>
+
+        <div class="plus-divider" role="separator"></div>
+        <div class="plus-item plus-switch" data-plus="plan" role="menuitemcheckbox" aria-checked="false" tabindex="0">
+          <svg class="plus-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4 5.6l1 1 2-2M4 11.6l1 1 2-2M4 17.6l1 1 2-2"/></svg>
+          <span class="plus-label">计划模式</span>
+          <button type="button" id="plan-toggle-btn" class="plan-toggle switch" title="计划模式：只查看和规划，批准后才执行改动">计划</button>
+        </div>
+        <div class="plus-item plus-switch" data-plus="sandbox" role="menuitemcheckbox" aria-checked="true" tabindex="0">
+          <svg class="plus-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.5 3 8 7 9 4-1 7-4.5 7-9V6l-7-3z"/></svg>
+          <span class="plus-label">沙盒</span>
+          <button type="button" id="sandbox-toggle-btn" class="sandbox-toggle switch" title="沙盒已开启（点击关闭）">沙盒</button>
+        </div>
+
+        <div class="plus-divider" role="separator"></div>
+        <button type="button" class="plus-item" data-plus="assets" role="menuitem">
+          <svg class="plus-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg>
+          <span class="plus-label">素材库</span>
+          <span class="plus-tail">›</span>
+        </button>
+      </div>
+
+      <input type="file" id="upload-input" hidden />
+      <button type="button" id="plus-btn" class="plus-btn" aria-haspopup="menu" aria-expanded="false" title="添加" aria-label="添加">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+      <textarea
+        id="prompt-input"
+        rows="1"
+        placeholder="描述你想要的视频，或输入 / 唤起命令…"
+      ></textarea>
+      <button type="button" id="send-btn" class="send-btn" disabled aria-label="发送">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+      </button>
+    </footer>
+  </aside>
 </main>
 
-<!-- Project timeline: shows track/clip layout from ProjectStore -->
-<section id="project-timeline-panel" class="project-timeline-panel" hidden>
-  <div class="project-timeline-header">
-    <span class="project-timeline-title">Timeline</span>
-    <span class="project-timeline-meta" id="project-timeline-meta"></span>
+<!-- Assets tray: summoned media library (moved here, ids kept) -->
+<div id="assets-tray" class="assets-tray" hidden>
+  <div class="assets-tray-panel">
+    <div class="assets-tray-head">
+      <h2 class="pane-heading">媒体库</h2>
+      <div class="assets-tray-actions">
+        <button type="button" id="library-refresh-btn" class="library-small-btn icon-btn" title="刷新" aria-label="刷新"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-refresh"/></svg></button>
+        <button type="button" id="library-annotate-btn" class="library-small-btn icon-btn" title="标注视频" aria-label="标注视频"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-wand"/></svg></button>
+        <button type="button" id="assets-tray-close" class="library-small-btn icon-btn" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button>
+      </div>
+    </div>
+    <div class="media-library-grid" id="media-library-grid">
+      <p class="placeholder">登录后可用</p>
+    </div>
   </div>
-  <div class="project-timeline-tracks" id="project-timeline-tracks"></div>
-  <div class="pt-edit-actions" id="pt-edit-actions">
-    <span class="pt-edit-hint" id="pt-edit-hint">select a clip to edit</span>
-    <button class="pt-edit-btn" id="pt-split-btn" title="Split the selected clip at its midpoint">split</button>
-    <button class="pt-edit-btn" id="pt-delete-btn" title="Delete the selected clip (or press Delete)">delete</button>
-    <button class="pt-edit-btn" id="pt-undo-btn" title="Undo the last timeline change">↶ undo</button>
-  </div>
-  <div class="pt-quick-actions" id="pt-quick-actions">
-    <button class="pt-action-btn" data-cmd="export the project at 1080p quality">↑ export 1080p</button>
-    <button class="pt-action-btn" data-cmd="export the project as draft quality">draft export</button>
-    <button class="pt-action-btn" data-cmd="add a title overlay at the start of the timeline">add title</button>
-    <button class="pt-action-btn" data-cmd="get the current timeline layout">get timeline</button>
-  </div>
-</section>
+</div>
 
-<footer class="composer">
-  <input type="file" id="upload-input" hidden />
-  <button type="button" id="upload-btn" class="composer-btn">＋ upload clip</button>
-  <textarea
-    id="prompt-input"
-    rows="2"
-    placeholder="比如：把这段视频前 5 秒慢动作处理,加暖色调和标题,导出 1080p"
-  ></textarea>
-  <button type="button" id="send-btn" class="composer-btn primary" disabled>send</button>
-</footer>
+<!-- Login dialog: Google + email one-time-code, built/handled in v3.js -->
+<div id="auth-modal" class="auth-modal" hidden>
+  <div class="auth-backdrop" data-auth-close></div>
+  <div class="auth-dialog" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+    <button type="button" class="auth-x" data-auth-close aria-label="关闭">×</button>
+
+    <!-- Signed-out view -->
+    <div class="auth-view" id="auth-view-signin">
+      <div class="auth-brand">
+        <img src="/v3/lumeri-mark.svg" alt="" width="40" height="29" />
+        <h2 id="auth-title">登录 Lumeri</h2>
+      </div>
+
+      <button type="button" id="auth-google-btn" class="auth-google" hidden>
+        <svg viewBox="0 0 18 18" width="18" height="18" aria-hidden="true">
+          <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"/>
+          <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.81.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18z"/>
+          <path fill="#FBBC05" d="M3.97 10.72A5.4 5.4 0 0 1 3.68 9c0-.6.1-1.18.29-1.72V4.95H.96A9 9 0 0 0 0 9c0 1.45.35 2.83.96 4.05l3.01-2.33z"/>
+          <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.59C13.46.89 11.43 0 9 0A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z"/>
+        </svg>
+        使用 Google 账号登录
+      </button>
+
+      <div class="auth-divider" id="auth-divider" hidden><span>或</span></div>
+
+      <!-- Email step 1: request a code -->
+      <form class="auth-step" id="auth-email-form">
+        <label class="auth-field">
+          <input type="email" id="auth-email" placeholder="邮箱" aria-label="邮箱" autocomplete="email" required />
+        </label>
+        <button type="submit" id="auth-send-code" class="auth-primary">发送验证码</button>
+      </form>
+
+      <!-- Email step 2: enter the code -->
+      <form class="auth-step" id="auth-code-form" hidden>
+        <p class="auth-code-hint">验证码已发送至 <strong id="auth-code-target"></strong></p>
+        <label class="auth-field">
+          <input type="text" id="auth-code" inputmode="numeric" maxlength="6" placeholder="6 位验证码" aria-label="验证码" autocomplete="one-time-code" />
+        </label>
+        <button type="submit" id="auth-verify" class="auth-primary">登录</button>
+        <div class="auth-code-actions">
+          <button type="button" id="auth-resend" class="auth-link" disabled>重新发送</button>
+          <button type="button" id="auth-change-email" class="auth-link">换个邮箱</button>
+        </div>
+      </form>
+
+      <p class="auth-error" id="auth-error" hidden></p>
+    </div>
+
+    <!-- Signed-in view -->
+    <div class="auth-view" id="auth-view-account" hidden>
+      <div class="auth-brand">
+        <div class="auth-avatar" id="auth-avatar" aria-hidden="true"></div>
+        <p class="auth-sub" id="auth-account-email"></p>
+      </div>
+      <button type="button" id="auth-logout" class="auth-secondary">退出登录</button>
+    </div>
+  </div>
+</div>
 
 <script src="/v3/v3.js" defer></script>
 </body>

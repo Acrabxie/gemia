@@ -1,0 +1,18 @@
+id: stock-media+timeline-ops
+trigger_skills: [stock-media, timeline-ops]
+trigger_keywords_min: [视频]
+plan_template:
+  - id: step_1
+    function: gemia.video.stock_media.fetch_stock_media
+    args:
+      query: child playing claw machine arcade
+      provider: auto
+      media_type: video
+      limit: 8
+    input: "$input"
+    output: "$step_1"
+  - id: step_2
+    function: gemia.video.timeline.concat
+    args: {}
+    input: ["$input", "$step_1"]
+    output: "$output"

@@ -22,10 +22,11 @@ if TYPE_CHECKING:  # runtime-free: only the loop constructs the handle
     from gemia.project_store import ProjectHandle
 
 
-_KIND_PREFIX = {"video": "v", "image": "img", "audio": "aud", "otio": "otio"}
+_KIND_PREFIX = {"video": "v", "image": "img", "audio": "aud", "lottie": "lot", "otio": "otio"}
 _VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 _AUDIO_EXTS = {".wav", ".mp3", ".aac", ".flac", ".ogg", ".m4a"}
+_LOTTIE_EXTS = {".json", ".lottie"}
 
 
 def _now() -> str:
@@ -40,6 +41,8 @@ def infer_kind(path: Path) -> str:
         return "image"
     if ext in _AUDIO_EXTS:
         return "audio"
+    if ext in _LOTTIE_EXTS:
+        return "lottie"
     raise ValueError(f"cannot infer asset kind from extension: {ext!r} ({path})")
 
 
@@ -70,7 +73,7 @@ class AssetRegistry:
 
     def __init__(self) -> None:
         self._records: dict[str, AssetRecord] = {}
-        self._counters: dict[str, int] = {"video": 0, "image": 0, "audio": 0}
+        self._counters: dict[str, int] = {"video": 0, "image": 0, "audio": 0, "lottie": 0}
 
     def add_external(self, path: Path, *, summary: str | None = None) -> AssetRecord:
         path = Path(path).expanduser().resolve()

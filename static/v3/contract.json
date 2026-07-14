@@ -1,0 +1,57 @@
+{
+  "ask_controls": [
+    "custom_panel",
+    "multi_select",
+    "panel",
+    "select",
+    "slider",
+    "text"
+  ],
+  "error_codes": [
+    "E_AI",
+    "E_ASK",
+    "E_ASK_INVALID_ANSWER",
+    "E_ASK_INVALID_CHOICE",
+    "E_ASK_INVALID_SCHEMA",
+    "E_ASK_INVALID_TYPE",
+    "E_BUDGET",
+    "E_BUSY",
+    "E_CANCELLED",
+    "E_CONFIG",
+    "E_INPUT",
+    "E_MEDIA",
+    "E_PLAN",
+    "E_PLAN_MODE",
+    "E_TOOL"
+  ],
+  "event_kinds": [
+    "ask_question",
+    "budget_gate",
+    "completion_check",
+    "model_text_delta",
+    "model_tool_call_ready",
+    "model_tool_call_start",
+    "plan_gate",
+    "plan_mode_changed",
+    "protocol_hello",
+    "replay_gap",
+    "subagent_result",
+    "subagent_start",
+    "timeline_op",
+    "tool_exec_error",
+    "tool_exec_progress",
+    "tool_exec_result",
+    "tool_exec_start",
+    "turn_complete",
+    "turn_error",
+    "turn_start",
+    "turn_wrapup"
+  ],
+  "protocol_version": 1,
+  "recovery": [
+    "fix_args",
+    "none",
+    "switch_tool",
+    "transient_retry"
+  ]
+}
