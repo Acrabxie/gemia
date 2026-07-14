@@ -8,8 +8,6 @@ dist/
 build/
 *.whl
 .eggs/
-tauri-app/src-tauri/target/
-tauri-app/src-tauri/binaries/
 
 # Virtual environments
 .venv/
@@ -30,39 +28,43 @@ htmlcov/
 .DS_Store
 ._*
 
-# Environment
+# Environment & secrets
 .env
 .env.*
 
-# Gemia runtime data
+# Runtime data — never commit
 inputs/
 outputs/
 output/
 temp/
-tasks/
 plans/
 projects/
 sessions/
 workspaces/
-# skills_v2/ is tracked — preset skills are part of the repo
 frames/
 styled/
 logs/
 demo/
+uploads/
+timeline/
+previews/
+cache/
+media/
 notes/
-.playwright-cli/
 
 # Logs
 *.log
 
-# Editor / migration backups (local only — never commit point-in-time snapshots)
+# Editor / migration backups
 *.bak
 *.bak-*
 *.orig
 
-# Dev debug (local only)
+# Dev debug
 dev_feedback.txt
 
 # PyInstaller artifacts
 *.spec
-gemia-server.spec
+
+# API keys
+config.json
