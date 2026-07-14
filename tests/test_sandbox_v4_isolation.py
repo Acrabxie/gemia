@@ -28,7 +28,13 @@ from gemia.sandbox_v4 import (
     DEFAULT_CREDENTIAL_DENY,
     build_two_tier_profile,
 )
-from gemia.creative_sandbox_runner import _sandbox_exec_usable
+def _sandbox_exec_usable(path: str) -> bool:
+    import subprocess
+    try:
+        r = subprocess.run([path, "-p", "(version 1)(allow default)"], capture_output=True, timeout=3)
+        return r.returncode == 0
+    except Exception:
+        return False
 
 _SANDBOX_EXEC = shutil.which("sandbox-exec")
 _USABLE = bool(_SANDBOX_EXEC) and sys.platform == "darwin" and _sandbox_exec_usable(_SANDBOX_EXEC or "")

@@ -26,7 +26,13 @@ from pathlib import Path
 
 import pytest
 
-from gemia.creative_sandbox_runner import _sandbox_exec_usable
+def _sandbox_exec_usable(path: str) -> bool:
+    import subprocess
+    try:
+        r = subprocess.run([path, "-p", "(version 1)(allow default)"], capture_output=True, timeout=3)
+        return r.returncode == 0
+    except Exception:
+        return False
 from gemia.tools import fetch as fetch_mod
 from gemia.tools import run_shell as run_shell_mod
 from gemia.tools import web_search as web_search_mod

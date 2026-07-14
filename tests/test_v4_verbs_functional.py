@@ -143,6 +143,7 @@ class TestVertexGenerateVideo:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """dispatch() should return job_id immediately without polling."""
+        monkeypatch.setenv("VERTEX_VIDEO_MODEL", "veo-3.1-fast-generate-preview")
         seen: dict[str, Any] = {}
 
         def fake_init(self, **kwargs):

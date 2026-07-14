@@ -45,7 +45,29 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from .creative_sandbox_runner import _escape_profile_path, _sandbox_exec_usable
+_SANDBOX_EXEC_USABLE: bool | None = None
+
+
+def _escape_profile_path(path: Path) -> str:
+    return str(path).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _sandbox_exec_usable(sandbox_exec: str) -> bool:
+    global _SANDBOX_EXEC_USABLE
+    if _SANDBOX_EXEC_USABLE is not None:
+        return _SANDBOX_EXEC_USABLE
+    try:
+        proc = subprocess.run(
+            [sandbox_exec, "-p", "(version 1)\n(allow default)", "/usr/bin/true"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception:
+        _SANDBOX_EXEC_USABLE = False
+    else:
+        _SANDBOX_EXEC_USABLE = proc.returncode == 0
+    return _SANDBOX_EXEC_USABLE
 
 __all__ = [
     "DEFAULT_OUTSIDE_CREATE_ROOTS",

@@ -14,16 +14,62 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from gemia.accounts import account_root
-from gemia.asset_identity import asset_identity_for_record, attach_asset_identity
 from gemia.media_ingest import probe_still_metadata
 from gemia.project_model import IMAGE_DURATION
-from gemia.video.timeline_assets import (
-    SUPPORTED_MEDIA_EXTENSIONS,
-    extract_waveform_peaks,
-    generate_timeline_thumbnails,
-    media_kind_for_path,
-    probe_media,
-)
+
+# Inline stubs for deleted modules (asset_identity, video.timeline_assets).
+# These provide minimal functionality for the list_assets path used by v3.
+
+SUPPORTED_MEDIA_EXTENSIONS = {
+    ".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".flv",
+    ".mp3", ".wav", ".aac", ".flac", ".ogg", ".m4a",
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp",
+}
+
+
+def media_kind_for_path(path) -> str:
+    """Guess media kind from file extension."""
+    ext = str(path).rsplit(".", 1)[-1].lower() if "." in str(path) else ""
+    if ext in {"mp4", "mov", "avi", "mkv", "webm", "m4v", "flv"}:
+        return "video"
+    if ext in {"mp3", "wav", "aac", "flac", "ogg", "m4a"}:
+        return "audio"
+    return "image"
+
+
+def probe_media(path: str) -> dict:
+    """Minimal media probe using ffprobe if available."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", path],
+            capture_output=True, text=True, timeout=10,
+        )
+        if out.returncode == 0:
+            import json
+            info = json.loads(out.stdout).get("format", {})
+            return {"duration": float(info.get("duration", 0)), "format": info.get("format_name", "")}
+    except Exception:
+        pass
+    return {}
+
+
+def generate_timeline_thumbnails(path: str, cache_dir, count: int = 8) -> list:
+    return []
+
+
+def extract_waveform_peaks(path: str, samples: int = 512) -> list:
+    return []
+
+
+def asset_identity_for_record(row) -> dict:
+    return {"asset_id": row.get("id", "") if isinstance(row, dict) else ""}
+
+
+def attach_asset_identity(payload: dict) -> dict:
+    if "asset_identity" not in payload:
+        payload["asset_identity"] = asset_identity_for_record(payload)
+    return payload
 
 MEDIA_LIBRARY_SCHEMA_VERSION = 1
 
