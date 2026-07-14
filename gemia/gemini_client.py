@@ -39,9 +39,9 @@ _DEFAULT_MODEL = "google/gemini-3.1-pro"
 # Per-provider default models (used when LUMERI_V3_MODEL is not set)
 _DEFAULT_VERTEX_MODEL    = "google/gemini-3.1-pro"
 _DEFAULT_GEMINI_MODEL    = "gemini-3.1-pro"
-_DEFAULT_CLAUDE_MODEL    = "claude-3-5-sonnet"
+_DEFAULT_CLAUDE_MODEL    = "claude-fable-5"
 _DEFAULT_OPENROUTER_MODEL = _DEFAULT_MODEL
-_DEFAULT_OPENAI_MODEL    = "o1"
+_DEFAULT_OPENAI_MODEL    = "gpt-5.6-sol"
 
 # Auto-probe priority: first provider with credentials wins
 _PROVIDER_PRIORITY = ("vertex", "gemini", "claude", "openrouter", "openai")
