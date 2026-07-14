@@ -122,7 +122,7 @@ def test_dispatcher_decodes_base64_and_writes_png_to_workdir(
     # Args passed through correctly
     assert seen["prompt"] == "a cyberpunk city skyline at night"
     assert seen["aspect_ratio"] == "16:9"
-    assert seen["model"] == "gemini-3.1-flash-image-preview"
+    assert seen["model"] == "gemini-3.1-flash-image"
     assert seen["image_size"] == "2K"
 
 

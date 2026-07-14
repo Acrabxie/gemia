@@ -403,7 +403,7 @@ def test_gemini_client_proxy_econnrefused_error_provides_diagnostic() -> None:
     # We don't actually make the request; we just verify the error path works.
     client = GeminiClientV3(
         api_key="test-key-unused",
-        model="google/gemini-3.1-pro-preview",
+        model="google/gemini-3.1-pro",
         proxy="socks5h://127.0.0.1:59999",  # High port, almost certainly not listening
     )
 

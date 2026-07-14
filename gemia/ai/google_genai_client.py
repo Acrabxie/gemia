@@ -54,7 +54,7 @@ import certifi
 from gemia.gemini_client import _vertex_access_token, _ADC_PATH
 
 
-_DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image-preview"  # Nano Banana 2
+_DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image"  # Nano Banana 2
 _DEFAULT_API_VERSION = "v1beta1"  # Vertex; preview models + image config live here
 _DEFAULT_LOCATION = "global"
 _DEFAULT_TIMEOUT_SEC = 60.0

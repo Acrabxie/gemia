@@ -23,7 +23,7 @@ from gemia.budget_guard import tool_cost_usd
 from gemia.tools._context import ToolContext, ProgressUpdate
 
 
-_DEFAULT_MODEL = "veo-3.1-fast-generate-preview"
+_DEFAULT_MODEL = "veo-3.1-generate"
 _DEFAULT_LOCATION = "us-central1"
 _DEFAULT_MAX_WAIT_SEC = 300.0
 _DEFAULT_POLL_INTERVAL_SEC = 10.0
