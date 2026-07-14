@@ -1,3 +1,0 @@
-# Lumeri Contributors
-
-- Acrabxie
