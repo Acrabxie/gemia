@@ -17,7 +17,7 @@ def account_id_for(ctx: ToolContext) -> str:
     if explicit:
         return explicit
     try:
-        from gemia import accounts
+        from gemia import public_identity as accounts
 
         return str(accounts.current_account_id() or "").strip()
     except Exception:

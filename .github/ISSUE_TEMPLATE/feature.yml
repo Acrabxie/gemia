@@ -1,0 +1,23 @@
+name: Feature request
+description: Propose a creator-workflow improvement.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Creator workflow
+      description: What are you trying to create, and where does the current workflow stop?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the visible result rather than only a new tool name.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

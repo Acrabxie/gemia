@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from gemia import accounts
+from gemia import public_identity as accounts
 
 PIN_HEADER = "X-Lumeri-Account"
 

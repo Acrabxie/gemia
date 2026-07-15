@@ -198,7 +198,7 @@ evidence logs/docs.
 ### Run
 
 ```sh
-cd "/Volumes/Extreme SSD/gemia"
+cd /path/to/lumeri
 python3 server.py --port 7788 --host 127.0.0.1
 ```
 
@@ -214,7 +214,7 @@ prompt textarea. Drop a clip, type what you want, click `send`.
 If you forget how it works:
 
 ```sh
-cd "/Volumes/Extreme SSD/gemia"
+cd /path/to/lumeri
 git checkout claude/jolly-clarke-JO7E3
 python3 scripts/m3_real_task.py
 ```

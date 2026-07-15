@@ -118,12 +118,11 @@ def set_sandbox_disabled(value: bool) -> None:
 def is_sandbox_disabled() -> bool:
     return _SANDBOX_DISABLED
 
-# Acrab decision #2 (2026-06-07): out-of-zone create roots.
-# $HOME + /private/tmp + /Volumes/Extreme SSD (Acrab's external-disk output habit).
+# Public defaults permit explicit creates under the user's home and system temp.
+# Callers can pass additional roots for other mounted volumes when needed.
 DEFAULT_OUTSIDE_CREATE_ROOTS: tuple[str, ...] = (
     str(Path.home()),
     "/private/tmp",
-    "/Volumes/Extreme SSD",
 )
 
 # Credentials excluded from BOTH read and write. ~/.gemia/config.json holds

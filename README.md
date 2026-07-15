@@ -1,81 +1,87 @@
-# Lumeri Video
+# Lumeri
 
-An agentic video project workspace. The AI model drives a multi-turn loop over your timeline using structured tools; you watch, edit, and correct in real time.
+**Lumeri** is a family of AI creative tools built around a small vocabulary of
+clean, composable primitives that a model can plan and execute.
 
-## Product Loop
+**Lumeri Video** is the first product in the family. It is an agentic video
+workspace where the model works over a persistent timeline using structured
+tools while you watch, edit, and correct the result.
 
-```
+> The public product and GitHub repository name is **Lumeri**. The Python
+> package and some engineering paths still use the historical name `gemia`.
+
+## Product loop
+
+```text
 Import media
-→ Persist Project / Timeline
-→ Model calls media tools (multi-turn)
-→ Unified TimelinePatch modifies project
-→ Render low-res preview
-→ Analyze timing, visuals, audio
-→ Self-correct from structured errors
-→ Accept user feedback or direct timeline edits
-→ Undo / fork
+→ Persist project and timeline
+→ Model calls media tools over multiple turns
+→ TimelinePatch updates the project
+→ Render and inspect a preview
+→ Revise from structured feedback
 → Export MP4 or OTIO
 ```
 
 ## Architecture
 
-| Layer | What it does |
+| Layer | Responsibility |
 |---|---|
-| `server.py` | Single HTTP entry point |
-| `gemia/v3_routes.py` | Session API (`/sessions/*`) |
-| `gemia/agent_loop_v3.py` | Multi-turn model ↔ tool loop |
-| `gemia/tools/` | 18 media tools (FFmpeg, Gemini GenAI) |
-| `gemia/budget_guard.py` | Cost and step limits |
-| `gemia/errors.py` | Structured error + recovery protocol |
-| `gemia/session_manager.py` | Session lifecycle |
-| `gemia/session_telemetry.py` | Observability |
-| `gemia/transport/sse.py` | Server-Sent Events |
-| `gemia/project_model.py` | Timeline data model |
-| `gemia/project_store.py` | Persistent project state |
-| `gemia/project_render.py` | FFmpeg-based preview renderer |
+| `server.py` | Local HTTP entry point |
+| `gemia/v3_routes.py` | Session API and streaming |
+| `gemia/agent_loop_v3.py` | Multi-turn model/tool loop |
+| `gemia/tools/` | Media tools built on FFmpeg and Python |
+| `gemia/project_model.py` | Persistent timeline model |
+| `gemia/project_render.py` | Preview renderer |
 | `gemia/project_export.py` | Full-quality export |
-| `lumerai/patches.py` | TimelinePatch vocabulary (shared by AI and human) |
-| `lumerai/otio_adapter.py` | OpenTimelineIO ↔ Lumeri round-trip |
-| `lumerai/sandbox.py` | Sandboxed script execution |
-| `static/v3/` | Web UI (timeline, chat, preview) |
+| `lumerai/patches.py` | Shared timeline patch vocabulary |
+| `lumerai/otio_adapter.py` | OpenTimelineIO interchange |
+| `static/v3/` | Local web interface |
 
 ## Install
 
+Python 3.12+ and FFmpeg are required.
+
 ```bash
-git clone https://github.com/Acrabxie/lumeri.git && cd lumeri
-pip install -e ".[dev]"
+git clone https://github.com/Acrabxie/lumeri.git
+cd lumeri
+python -m pip install -e ".[dev]"
 
-# FFmpeg is required
-brew install ffmpeg   # macOS
-# or: apt install ffmpeg  # Linux
+# macOS
+brew install ffmpeg
 
-# Configure a Google model provider
-export GEMINI_API_KEY="..."       # from Google AI Studio
-# or: export VERTEX_PROJECT="..."  # uses gcloud ADC
+# Ubuntu
+sudo apt-get install ffmpeg
 ```
 
-## Quick Start
+Configure a supported model provider through environment variables or the
+local setup UI, then start Lumeri:
 
 ```bash
-# Start the server
 python server.py
-# Open http://127.0.0.1:7788 in your browser
+# Open http://127.0.0.1:7788/v3/
 ```
 
-## Run Tests
+The open-source build uses one local workspace. Hosted sign-in, email delivery,
+cloud account management, billing, and subscriptions are not included in this
+repository.
+
+## Tests
 
 ```bash
-python -m pytest tests/ -v
+python -m pytest tests/ -q
 ```
 
-Tests cover: tool protocol, timeline patches, direct edit, project render/export, OTIO interchange, self-correction, sandbox security, session/SSE, build verb, and verbs functional.
+The suite covers tool contracts, timeline patches, render/export behavior,
+OpenTimelineIO interchange, self-correction, sandboxing, sessions, and the web
+server.
 
-## Current Limitations
+## Contributing
 
-- Preview rendering requires FFmpeg on PATH.
-- Generative tools (image/video/audio generation) require a valid Gemini API key or Vertex AI project.
-- The web UI is functional but early-stage; no offline/PWA support.
-- No GPU acceleration; all processing runs on CPU via FFmpeg.
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+
+## Contributors
+
+See [CONTRIBUTORS.md](CONTRIBUTORS.md).
 
 ## License
 

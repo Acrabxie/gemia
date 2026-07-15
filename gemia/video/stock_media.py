@@ -317,7 +317,7 @@ def _maybe_import_to_media_library(path: Path, result: dict[str, Any], enabled: 
     if not enabled:
         return None
     try:
-        from gemia.accounts import current_account_id
+        from gemia.public_identity import current_account_id
         from gemia.media_library import import_media
 
         account_id = current_account_id()

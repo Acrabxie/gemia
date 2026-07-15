@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from gemia.accounts import account_root
+from gemia.public_identity import account_root
 from gemia.media_ingest import probe_still_metadata
 from gemia.project_model import IMAGE_DURATION
 

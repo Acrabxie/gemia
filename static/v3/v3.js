@@ -579,7 +579,7 @@
       return;
     }
     if (state.mediaLibraryStatus === "signed-out") {
-      els.mediaLibraryGrid.innerHTML = `<p class="placeholder">登录后可用</p>`;
+      els.mediaLibraryGrid.innerHTML = `<p class="placeholder">媒体库暂不可用</p>`;
       return;
     }
     if (!state.mediaLibrary.length) {
@@ -2590,7 +2590,7 @@
     overlay.hidden = false;
     fetch("/config").then((r) => r.json()).then((cfg) => {
       const info = cfg.brain;
-      if (!info) { setErr("需先登录才能配置供应商"); return; }
+      if (!info) { setErr("当前无法加载供应商配置"); return; }
       st.info = info;
       st.vals = { effort: info.effort || "medium" };
       st.providerOrder = (info.providers || []).map((p) => p.id);
@@ -2618,7 +2618,6 @@
     { name: "setup",   desc: "配置 AI 供应商与密钥" },
     { name: "sandbox", desc: "切换沙盒开关（关闭后改动落到真实工程）" },
     { name: "library", desc: "刷新媒体库标注" },
-    { name: "login",   desc: "登录 / 账户" },
   ];
   const slash = { open: false, items: [], sel: 0 };
 
@@ -2677,7 +2676,6 @@
       case "setup":   openSetupPanel(); break;
       case "sandbox": els.sandboxBtn?.click(); break;
       case "library": els.libraryRefreshBtn?.click(); break;
-      case "login":   $("#account-btn")?.click(); break;
     }
     els.promptInput.value = "";
     slashClose();
@@ -3213,218 +3211,6 @@
   });
   syncSandbox();
   setupTimelineDirectEdit();
-
-  // ── account / login (Google + email one-time-code) ──────────────────
-  function setupAuth() {
-    const modal = $("#auth-modal");
-    const accountBtn = $("#account-btn");
-    if (!modal || !accountBtn) return;
-    const viewSignin = $("#auth-view-signin");
-    const viewAccount = $("#auth-view-account");
-    const googleBtn = $("#auth-google-btn");
-    const divider = $("#auth-divider");
-    const emailForm = $("#auth-email-form");
-    const codeForm = $("#auth-code-form");
-    const emailInput = $("#auth-email");
-    const codeInput = $("#auth-code");
-    const sendBtn = $("#auth-send-code");
-    const verifyBtn = $("#auth-verify");
-    const resendBtn = $("#auth-resend");
-    const changeBtn = $("#auth-change-email");
-    const codeTarget = $("#auth-code-target");
-    const errBox = $("#auth-error");
-    const logoutBtn = $("#auth-logout");
-    const acctEmail = $("#auth-account-email");
-    const avatar = $("#auth-avatar");
-
-    let session = null;
-    let pendingEmail = "";
-    let resendTimer = null;
-
-    const showErr = (msg) => { errBox.textContent = msg || ""; errBox.hidden = !msg; };
-    const clearErr = () => showErr("");
-
-    // Signed in = Google photo when present, else round initial badge;
-    // signed out = person icon. Email lives in title.
-    function applySession(data) {
-      session = data || {};
-      const acct = session.account;
-      if (acct && acct.email) {
-        if (acct.picture) {
-          accountBtn.innerHTML = "";
-          const img = document.createElement("img");
-          img.className = "account-photo";
-          img.alt = "";
-          img.referrerPolicy = "no-referrer";
-          img.src = acct.picture;
-          img.onerror = () => { accountBtn.textContent = acct.email.trim().charAt(0).toUpperCase(); };
-          accountBtn.appendChild(img);
-        } else {
-          accountBtn.textContent = acct.email.trim().charAt(0).toUpperCase();
-        }
-        accountBtn.title = acct.email;
-        accountBtn.setAttribute("aria-label", `账户：${acct.email}`);
-        accountBtn.classList.add("signed-in");
-      } else {
-        accountBtn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-user"/></svg>';
-        accountBtn.title = "登录 / 账户";
-        accountBtn.setAttribute("aria-label", "登录 / 账户");
-        accountBtn.classList.remove("signed-in");
-      }
-    }
-
-    async function refreshSession() {
-      try {
-        const r = await fetch("/auth/session");
-        if (r.ok) applySession(await r.json());
-      } catch {}
-      return session;
-    }
-
-    async function postAuth(url, body) {
-      const r = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body || {}),
-      });
-      let data = {};
-      try { data = await r.json(); } catch {}
-      if (!r.ok) throw new Error(data.user_message || data.error || `请求失败 (${r.status})`);
-      return data;
-    }
-
-    function stopResend() { if (resendTimer) { clearInterval(resendTimer); resendTimer = null; } }
-    function startResend(secs) {
-      stopResend();
-      let left = secs;
-      const tick = () => {
-        resendBtn.disabled = left > 0;
-        resendBtn.textContent = left > 0 ? `重新发送（${left}s）` : "重新发送";
-        if (left <= 0) { stopResend(); return; }
-        left -= 1;
-      };
-      tick();
-      resendTimer = setInterval(tick, 1000);
-    }
-
-    function showEmailStep() { emailForm.hidden = false; codeForm.hidden = true; stopResend(); }
-    function showCodeStep(email) {
-      pendingEmail = email;
-      codeTarget.textContent = email;
-      emailForm.hidden = true;
-      codeForm.hidden = false;
-      codeInput.value = "";
-      startResend(60);
-      codeInput.focus();
-    }
-
-    function renderModal() {
-      clearErr();
-      const acct = session && session.account;
-      viewAccount.hidden = !acct;
-      viewSignin.hidden = !!acct;
-      if (acct) {
-        acctEmail.textContent = acct.email || acct.name || "已登录";
-        if (acct.picture) {
-          avatar.innerHTML = "";
-          const img = document.createElement("img");
-          img.className = "account-photo";
-          img.alt = "";
-          img.referrerPolicy = "no-referrer";
-          img.src = acct.picture;
-          img.onerror = () => { avatar.textContent = (acct.email || acct.name || "?").trim().charAt(0).toUpperCase(); };
-          avatar.appendChild(img);
-        } else {
-          avatar.textContent = (acct.email || acct.name || "?").trim().charAt(0).toUpperCase();
-        }
-        return;
-      }
-      const hasGoogle = !!(session && session.has_google_client_id);
-      googleBtn.hidden = !hasGoogle;
-      divider.hidden = !hasGoogle;
-      showEmailStep();
-    }
-
-    function openModal() {
-      renderModal();
-      modal.hidden = false;
-      if (!(session && session.account)) emailInput.focus();
-    }
-    function closeModal() { modal.hidden = true; stopResend(); clearErr(); }
-
-    async function requestCode(email) {
-      clearErr();
-      sendBtn.disabled = true; sendBtn.textContent = "发送中…";
-      try {
-        await postAuth("/auth/email/start", { email });
-        showCodeStep(email);
-      } catch (e) {
-        showErr(e.message);
-      } finally {
-        sendBtn.disabled = false; sendBtn.textContent = "发送验证码";
-      }
-    }
-
-    accountBtn.addEventListener("click", () => { modal.hidden ? openModal() : closeModal(); });
-    modal.querySelectorAll("[data-auth-close]").forEach((el) => el.addEventListener("click", closeModal));
-    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !modal.hidden) closeModal(); });
-
-    googleBtn.addEventListener("click", async () => {
-      clearErr();
-      try {
-        const data = await postAuth("/auth/google/start", {});
-        if (!data.authorization_url) throw new Error("Google 登录未配置");
-        const win = window.open(data.authorization_url, "lumeri-google-login", "width=480,height=640");
-        const onMsg = async (ev) => {
-          if (ev.origin !== location.origin) return;
-          if (!ev.data || ev.data.type !== "lumeri-auth-complete") return;
-          window.removeEventListener("message", onMsg);
-          try { win && win.close(); } catch {}
-          await refreshSession();
-          if (session && session.account) { renderModal(); setTimeout(closeModal, 600); }
-          else showErr("Google 登录未完成");
-        };
-        window.addEventListener("message", onMsg);
-      } catch (e) { showErr(e.message); }
-    });
-
-    emailForm.addEventListener("submit", (e) => {
-      e.preventDefault();
-      const v = emailInput.value.trim();
-      if (v) requestCode(v);
-    });
-    resendBtn.addEventListener("click", () => { if (pendingEmail) requestCode(pendingEmail); });
-    changeBtn.addEventListener("click", () => { showEmailStep(); clearErr(); emailInput.focus(); });
-
-    codeForm.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      clearErr();
-      const code = codeInput.value.replace(/\D/g, "");
-      if (code.length !== 6) { showErr("请输入 6 位数字验证码"); return; }
-      verifyBtn.disabled = true; verifyBtn.textContent = "登录中…";
-      try {
-        const data = await postAuth("/auth/email/verify", { email: pendingEmail, code });
-        applySession(data);
-        renderModal();
-        setTimeout(closeModal, 500);
-      } catch (e2) {
-        showErr(e2.message);
-      } finally {
-        verifyBtn.disabled = false; verifyBtn.textContent = "登录";
-      }
-    });
-
-    logoutBtn.addEventListener("click", async () => {
-      try { applySession(await postAuth("/auth/logout", {})); } catch {}
-      renderModal();
-    });
-
-    refreshSession().then(() => {
-      const params = new URLSearchParams(location.search || "");
-      if (params.get("login") === "1" || params.get("auth") === "1") openModal();
-    });
-  }
-  setupAuth();
 
   // boot
   createSession().catch((err) => {

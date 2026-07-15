@@ -30,7 +30,7 @@ from gemia.transport.sse import REGISTRY, iter_events  # noqa: E402
 WORK = Path("/tmp/lumeri-v3-milestone")
 CLIP = Path("/tmp/clip.mp4")
 PROMPT = "把 /tmp/clip.mp4 前 5 秒裁掉,加暖色调,导出 1080p"
-EVIDENCE_LOG = Path("/Volumes/Extreme SSD/gemia/docs/v3-alive-evidence.log")
+EVIDENCE_LOG = Path(__file__).resolve().parent.parent / "docs" / "v3-alive-evidence.log"
 
 
 def generate_test_clip(out: Path) -> None:

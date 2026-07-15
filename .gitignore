@@ -62,6 +62,8 @@ notes/
 
 # Dev debug
 dev_feedback.txt
+agent_log.md
+HUMAN_NEEDED.md
 
 # PyInstaller artifacts
 *.spec
