@@ -1,7 +1,7 @@
 """v4 build — two-tier sandbox profile (M1 isolation layer).
 
 This is the security命门 of the v4 build effort (networking / bash / code-writing).
-It builds the macOS ``sandbox-exec`` SBPL profile that enforces Acrab's two-tier
+It builds the macOS ``sandbox-exec`` SBPL profile that enforces Acrabxie's two-tier
 permission model. The kernel-level ``sandbox-exec`` boundary is the *only* real
 wall (see ``docs/v4-build-readiness/11-sandbox-impl-plan.md`` §1.5); the legacy
 ``creative_sandbox_permissions`` AST/argv allowlist is downgraded to advisory

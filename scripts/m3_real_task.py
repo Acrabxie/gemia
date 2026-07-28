@@ -13,7 +13,7 @@ Drives /v3 with Playwright headless chromium:
   - ffprobes the final asset on disk
 
 Writes:
-  - docs/v3-A-M3-real-task.md         master report (Acrab-readable)
+  - docs/v3-A-M3-real-task.md         master report (Acrabxie-readable)
   - docs/v3-A-M3-screenshots/*.png    UI screenshots
   - docs/v3-A-M3-sse.json             raw event log
 """

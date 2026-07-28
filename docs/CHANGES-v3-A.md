@@ -1,7 +1,7 @@
 # Lumeri v3-A branch — what changed and how to use it
 
 > Branch: `claude/jolly-clarke-JO7E3`
-> Target audience: Acrab a month from now, or anyone picking this up
+> Target audience: Acrabxie a month from now, or anyone picking this up
 > from a cold start.
 
 ---
@@ -209,7 +209,7 @@ A new session is created automatically on page load. The UI shows
 the session_id, a `live` connection pill, an upload button, and a
 prompt textarea. Drop a clip, type what you want, click `send`.
 
-### 5-minute reproduction (Acrab cold start)
+### 5-minute reproduction (Acrabxie cold start)
 
 If you forget how it works:
 
@@ -292,7 +292,7 @@ then fixed in this branch before handoff:
 - **A7** `/v3` still auto-creates a fresh session on page load. Session
   cleanup now exists, but there is no "resume existing live session" UX.
 - **A8** There is still no entry point from the main Tauri UI at `/` into
-  `/v3`. Acrab has to know the URL.
+  `/v3`. Acrabxie has to know the URL.
 - **Production hardening** Auth, per-user quota, durable session store,
   request logging, and external process supervision are still absent.
 
@@ -357,19 +357,19 @@ You asked for my honest take, including whether I disagree with the
 ### Where I agree with you
 
 M4 polish ("fix UI nits, refine status text, prettify") **is** a
-trap right now. Acrab hasn't actually used the thing yet. Polish
+trap right now. Acrabxie hasn't actually used the thing yet. Polish
 needs feedback from real use, not me guessing.
 
 ### Where I disagree
 
 There's a category of work that isn't "polish" but also isn't a new
-milestone — it's **what stands between Acrab and actually using
+milestone — it's **what stands between Acrabxie and actually using
 v3**. Without it, you'll never get the feedback that justifies M4.
 Specifically:
 
 1. **A8 (no link from main UI to /v3) is the #1 thing.** Right now
    the v3 page is reachable only if you type `/v3` into the URL bar.
-   Acrab will open the Tauri app, see the old UI, and either use
+   Acrabxie will open the Tauri app, see the old UI, and either use
    that (and not exercise v3) or close the app frustrated. Adding a
    single button or tab in the existing nav that opens `/v3` is
    ~5 lines of edit in the Tauri main app — not a milestone, just
@@ -378,7 +378,7 @@ Specifically:
 2. **A7 (no live-session resume UX) is next.** The backend now has
    caps and idle cleanup, but refresh still creates a new session.
    Add a session picker or "reconnect to last session" path before
-   asking Acrab to run long jobs.
+   asking Acrabxie to run long jobs.
 
 3. **A5 (stub verbs) should be decided explicitly.** Either hide the
    10 unimplemented schemas for the first user test, or implement the
@@ -388,7 +388,7 @@ Specifically:
 That is not M4 polish. It is "make the entry path usable enough to
 collect real feedback."
 
-### After Acrab starts using it
+### After Acrabxie starts using it
 
 Then wait for feedback. The first real-use bugs will tell you what
 M4 should be. My guess based on the code: it'll be about stub-verb

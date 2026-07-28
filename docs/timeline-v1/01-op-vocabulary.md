@@ -1,6 +1,6 @@
 # Timeline v1 — M1 Op 词汇表规格
 
-> 拍板依据（2026-06-13，Acrab）：细粒度 verb、overlay-as-clip、ripple 默认关、
+> 拍板依据（2026-06-13，Acrabxie）：细粒度 verb、overlay-as-clip、ripple 默认关、
 > v1 = 视频轨 + overlay/text 轨（音频轨与关键帧仅预留字段）。
 > 本文是 `lumerai/patches.py` 与 `gemia/project_model.py` 扩展的实现契约。
 >

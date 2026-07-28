@@ -6,7 +6,7 @@ Two layers:
     scrubbing (no base64 in result), and DISPATCHER registration WITHOUT
     hitting the network.
   - **Live**: real API call gated behind ``LUMERI_RUN_LIVE_STUDIO=1`` env
-    var so CI never burns Acrab's $300 credit. Sets a small ``max_usd``
+    var so CI never burns Acrabxie's $300 credit. Sets a small ``max_usd``
     on BudgetGuard to ensure we don't accidentally fire a chain of calls.
 
 A separate test verifies BudgetGuard correctly intercepts a
