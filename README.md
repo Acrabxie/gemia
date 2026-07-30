@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/lumeri-working.svg" width="180" alt="Lumeri working animation">
+</p>
+
 # Lumeri
 
 **Lumeri** is a family of AI creative tools built around a small vocabulary of
