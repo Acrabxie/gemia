@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/lumeri-working.gif" width="180" alt="Lumeri working animation"/>
+  <img src="docs/assets/lumeri-working.gif" width="180" alt="Lumeri working animation" />
 </p>
 
 # Lumeri
