@@ -1,6 +1,9 @@
 name: Build Lumeri README animation
 
 on:
+  pull_request:
+    branches:
+      - main
   push:
     branches:
       - agent/lumeri-working-gif
@@ -14,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
 
       - name: Render the SVG animation frames
         shell: bash
