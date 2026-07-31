@@ -20,6 +20,12 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
 
+      - name: Install the GIF encoder
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
       - name: Render the SVG animation frames
         shell: bash
         run: |
