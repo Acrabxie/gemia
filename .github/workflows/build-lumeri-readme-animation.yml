@@ -1,0 +1,73 @@
+name: Build Lumeri README animation
+
+on:
+  push:
+    branches:
+      - agent/lumeri-working-gif
+
+permissions:
+  contents: write
+
+jobs:
+  render:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Render the SVG animation frames
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/lumeri-working-frames
+          for index in $(seq 0 99); do
+            frame=$(printf '%03d' "$index")
+            budget=$((100 + index * 33))
+            google-chrome \
+              --headless=new \
+              --no-sandbox \
+              --hide-scrollbars \
+              --allow-file-access-from-files \
+              --default-background-color=00000000 \
+              --window-size=90,44 \
+              --virtual-time-budget="$budget" \
+              --screenshot="/tmp/lumeri-working-frames/frame-${frame}.png" \
+              "file://${GITHUB_WORKSPACE}/docs/assets/lumeri-working.svg" \
+              >/dev/null 2>&1
+          done
+
+      - name: Encode a GitHub-safe animated GIF
+        shell: bash
+        run: |
+          set -euo pipefail
+          ffmpeg -y \
+            -framerate 30 \
+            -i /tmp/lumeri-working-frames/frame-%03d.png \
+            -filter_complex "[0:v]scale=180:88:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff:reserve_transparent=1[p];[b][p]paletteuse=dither=sierra2_4a:diff_mode=rectangle" \
+            -loop 0 \
+            docs/assets/lumeri-working.gif
+          ffprobe -v error \
+            -show_entries stream=codec_name,width,height,nb_frames,duration \
+            -of default=noprint_wrappers=1 \
+            docs/assets/lumeri-working.gif
+
+      - name: Keep only the finished repository sign
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          readme = Path('README.md')
+          text = readme.read_text()
+          old = 'docs/assets/lumeri-working.svg'
+          new = 'docs/assets/lumeri-working.gif'
+          if old not in text:
+              raise SystemExit('README SVG reference was not found')
+          readme.write_text(text.replace(old, new, 1))
+          PY
+          git rm .github/workflows/build-lumeri-readme-animation.yml
+          git config user.name Acrabxie
+          git config user.email Acrabxie@users.noreply.github.com
+          git add README.md docs/assets/lumeri-working.gif
+          git commit -m "use GIF for GitHub animation playback"
+          git push
