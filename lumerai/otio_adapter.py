@@ -28,6 +28,8 @@ import mimetypes
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 
 import opentimelineio as otio
 from opentimelineio import opentime, schema as otio_schema
@@ -55,6 +57,27 @@ _LUMERI_NS = "lumeri"
 
 # Generator kind sentinel used for text clips.
 _TEXT_GENERATOR_KIND = "lumeri_text"
+
+
+def _external_target_url(source_path: str) -> str:
+    """Return a bundle-safe URL for an existing local media file."""
+
+    if not source_path:
+        return ""
+    path = Path(source_path).expanduser()
+    if path.is_file():
+        return path.resolve().as_uri()
+    return source_path
+
+
+def _source_path_from_target_url(target_url: str) -> str:
+    """Convert a local file URL back to the host-native filesystem path."""
+
+    parsed = urlparse(target_url)
+    if parsed.scheme.lower() != "file":
+        return target_url
+    netloc = f"//{parsed.netloc}" if parsed.netloc else ""
+    return url2pathname(unquote(f"{netloc}{parsed.path}"))
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +219,7 @@ def _clip_to_otio(
         asset = assets.get(str(clip.get("asset_id") or "")) or {}
         source_path = str(asset.get("source_path") or "")
         media_ref = otio_schema.ExternalReference(
-            target_url=source_path,
+            target_url=_external_target_url(source_path),
             available_range=available_range,
         )
 
@@ -311,7 +334,9 @@ def otio_to_project(tl: otio_schema.Timeline, *, account_id: str | None = None) 
 
             # Rebuild asset from ExternalReference.
             if isinstance(item.media_reference, otio_schema.ExternalReference):
-                source_path = str(item.media_reference.target_url or "")
+                source_path = _source_path_from_target_url(
+                    str(item.media_reference.target_url or "")
+                )
                 if not asset_id:
                     asset_id = _make_asset_id(source_path or name)
                 if asset_id not in assets_by_key:

@@ -64,6 +64,7 @@ def _matrix(stdout: str) -> dict[str, str]:
 # 1. profile string structure (no sandbox needed)                             #
 # --------------------------------------------------------------------------- #
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox profile is macOS-only")
 def test_profile_resolves_symlinked_paths(tmp_path: Path) -> None:
     # macOS resolves /tmp to /private/tmp, while Linux keeps /tmp. The profile
     # must contain whichever canonical path the current host resolves.
