@@ -58,8 +58,8 @@ jobs:
               throw "Lumeri did not become healthy on port 7788."
             }
 
-            $home = Invoke-WebRequest -Uri "http://127.0.0.1:7788/" -UseBasicParsing
-            if ($home.StatusCode -ne 200 -or $home.Content -notmatch "Lumeri") {
+            $workspaceResponse = Invoke-WebRequest -Uri "http://127.0.0.1:7788/" -UseBasicParsing
+            if ($workspaceResponse.StatusCode -ne 200 -or $workspaceResponse.Content -notmatch "Lumeri") {
               throw "The browser workspace did not load from port 7788."
             }
 
