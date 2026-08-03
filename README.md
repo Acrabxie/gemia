@@ -93,6 +93,14 @@ switching, hosted email, billing, or subscriptions. It always opens one local
 workspace stored on the current computer. Model-provider configuration remains
 local to that computer and is never committed to Git.
 
+Media editing, rendering, export, local voiceover, Windows fonts, Blender
+discovery, and OpenTimelineIO bundles run natively on Windows. Arbitrary
+model-generated `build`/`run_shell` code stays locked by default because native
+Windows does not ship the macOS kernel sandbox used by Lumeri. The local owner
+may explicitly disable **Sandbox** in the Lumeri menu to allow PowerShell and
+Python execution with full computer access; Lumeri never enables that unsafe
+mode automatically.
+
 ## Tests
 
 ```bash

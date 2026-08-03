@@ -57,7 +57,8 @@ def _pil_text_overlay(
             check=True, capture_output=True,
         )
 
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import Image, ImageDraw
+        from gemia.video.fonts import load_pillow_font
         import os
 
         frames = sorted(f for f in os.listdir(td) if f.endswith(".png"))
@@ -86,10 +87,7 @@ def _pil_text_overlay(
             # Draw text lines
             y_pos = H - text_y_from_bottom
             for line_text, fontsize, rgb in lines:
-                try:
-                    font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", fontsize)
-                except Exception:
-                    font = ImageFont.load_default()
+                font = load_pillow_font(fontsize)
                 draw.text((text_x, y_pos), line_text, font=font, fill=(*rgb, 255))
                 y_pos += fontsize + line_gap
 
@@ -870,10 +868,8 @@ def _pil_subtitle_overlay(
             img = Image.open(fp).convert("RGBA")
             overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
             draw = ImageDraw.Draw(overlay)
-            try:
-                font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", fontsize)
-            except Exception:
-                font = ImageFont.load_default()
+            from gemia.video.fonts import load_pillow_font
+            font = load_pillow_font(fontsize)
             y = H - fontsize - 30
             for entry in active:
                 draw.text((W // 2, y), entry["text"], font=font, fill=(*color, 255), anchor="mm")

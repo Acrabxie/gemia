@@ -875,18 +875,9 @@ def _wrap_lines(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFo
 
 
 def _font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    candidates = [
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        "/Library/Fonts/Arial Unicode.ttf",
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/System/Library/Fonts/Helvetica.ttc",
-    ]
-    for candidate in candidates:
-        try:
-            return ImageFont.truetype(candidate, size=size)
-        except Exception:
-            continue
-    return ImageFont.load_default()
+    from gemia.video.fonts import load_pillow_font
+
+    return load_pillow_font(size, bold=bold)
 
 
 def _rounded_rect(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], *, radius: int, fill: tuple[int, int, int, int]) -> None:

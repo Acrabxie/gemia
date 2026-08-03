@@ -39,6 +39,7 @@ rerunnable isolation probe.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -75,6 +76,8 @@ __all__ = [
     "build_two_tier_profile",
     "build_v4_sandbox_command",
     "ensure_packages",
+    "native_sandbox_available",
+    "sandbox_status",
     "set_sandbox_disabled",
     "is_sandbox_disabled",
 ]
@@ -117,6 +120,28 @@ def set_sandbox_disabled(value: bool) -> None:
 
 def is_sandbox_disabled() -> bool:
     return _SANDBOX_DISABLED
+
+
+def native_sandbox_available() -> bool:
+    """Return whether the shipped kernel sandbox can enforce this host."""
+
+    sandbox_exec = shutil.which("sandbox-exec")
+    return bool(
+        sandbox_exec
+        and sys.platform == "darwin"
+        and _sandbox_exec_usable(sandbox_exec)
+    )
+
+
+def sandbox_status() -> dict[str, object]:
+    available = native_sandbox_available()
+    disabled = is_sandbox_disabled()
+    return {
+        "sandbox_disabled": disabled,
+        "sandbox_available": available,
+        "code_execution_available": available or disabled,
+        "host_platform": "windows" if os.name == "nt" else sys.platform,
+    }
 
 # Public defaults permit explicit creates under the user's home and system temp.
 # Callers can pass additional roots for other mounted volumes when needed.
@@ -281,7 +306,7 @@ def build_v4_sandbox_command(
     """
     argv = [str(a) for a in args]
     sandbox_exec = shutil.which("sandbox-exec")
-    if not sandbox_exec or sys.platform != "darwin" or not _sandbox_exec_usable(sandbox_exec):
+    if not sandbox_exec or not native_sandbox_available():
         return argv, False
     profile = build_two_tier_profile(
         workspace_dir,

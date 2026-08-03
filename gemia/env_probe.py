@@ -208,6 +208,12 @@ def probe_environment() -> dict[str, Any]:
             "ffprobe": ffprobe_present,
         },
     }
+    try:
+        from gemia.sandbox_v4 import sandbox_status
+
+        result["sandbox"] = sandbox_status()
+    except Exception:
+        result["sandbox"] = {}
     _CACHE = result
     return result
 
@@ -247,6 +253,7 @@ def format_environment_summary(env: dict[str, Any] | None = None) -> str:
         exe = env.get("python_executable", "python3")
         packages: dict[str, str | None] = env.get("packages", {}) or {}
         tools: dict[str, Any] = env.get("tools", {}) or {}
+        sandbox: dict[str, Any] = env.get("sandbox", {}) or {}
 
         installed_bits: list[str] = []
         absent_names: list[str] = []
@@ -276,18 +283,25 @@ def format_environment_summary(env: dict[str, Any] | None = None) -> str:
             ffmpeg_text = "ffmpeg ✗ (not installed)"
         ffprobe_text = "ffprobe ✓" if tools.get("ffprobe") else "ffprobe ✗"
 
+        os_name = str(env.get("os") or "unknown")
+        shell_name = "PowerShell" if os_name.lower() == "windows" else "Bash"
+        if sandbox.get("sandbox_available"):
+            execution_text = "Secure code sandbox: available and enabled by default."
+        elif sandbox.get("sandbox_disabled"):
+            execution_text = "Secure code sandbox: explicitly disabled by the computer owner; code runs with full local access."
+        else:
+            execution_text = "Secure code sandbox: unavailable on this host; build/run_shell are locked until the computer owner explicitly disables Sandbox."
+
         return (
-            f"Environment: Python {py_version} at {exe} "
-            f"(use python3, not python). "
+            f"Environment: {os_name}, native shell {shell_name}, Python {py_version} at {exe}. "
             f"Installed: {installed_text}. "
             f"NOT installed: {absent_text}. "
-            f"{ffmpeg_text}, {ffprobe_text}."
+            f"{ffmpeg_text}, {ffprobe_text}. {execution_text}"
         )
     except Exception:
         # Last-resort fallback: a minimal but valid, non-empty summary that
         # still names python3 and ffmpeg so prompt assembly never breaks.
         return (
-            "Environment: Python (version unknown) "
-            "(use python3, not python). "
+            "Environment: Python (version unknown). "
             "Installed: (probe failed). ffmpeg ✗, ffprobe ✗."
         )

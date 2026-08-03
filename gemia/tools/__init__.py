@@ -15,7 +15,7 @@ Implemented:
     - batch 2.2/2.3 (provider media): generate_video (Veo LRO via Vertex),
       generate_audio (Lyria predict via Vertex)
     - batch 3 (v4 build): web_search / web_open / fetch (host-side internet),
-      run_shell (sandboxed bash via the M1 two-tier sandbox-exec boundary)
+      run_shell (native PowerShell/Bash; sandboxed where the host supports it)
     - timeline v1: get_timeline + fine-grained timeline_* document verbs +
       render_preview (persistent per-session timeline, logged + undoable)
 

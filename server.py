@@ -299,8 +299,8 @@ class _Handler(BaseHTTPRequestHandler):
 
         # ── Sandbox settings ──
         if path == "/settings/sandbox":
-            from gemia.sandbox_v4 import is_sandbox_disabled
-            _json_response(self, 200, {"sandbox_disabled": is_sandbox_disabled()})
+            from gemia.sandbox_v4 import sandbox_status
+            _json_response(self, 200, sandbox_status())
             return
 
         # ── v3 session routes ──
@@ -400,8 +400,8 @@ class _Handler(BaseHTTPRequestHandler):
                 payload = _read_json_body(self)
                 from gemia.sandbox_v4 import set_sandbox_disabled
                 set_sandbox_disabled(bool(payload.get("disabled", False)))
-                from gemia.sandbox_v4 import is_sandbox_disabled
-                _json_response(self, 200, {"sandbox_disabled": is_sandbox_disabled()})
+                from gemia.sandbox_v4 import sandbox_status
+                _json_response(self, 200, sandbox_status())
             except Exception as exc:
                 _json_response(self, 400, {"error": str(exc)})
             return

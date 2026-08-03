@@ -426,19 +426,9 @@ def _palette(style: str) -> dict[str, str]:
 
 
 def _font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    candidates = [
-        "/System/Library/Fonts/PingFang.ttc",
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/Library/Fonts/Arial Unicode.ttf",
-    ]
-    for path in candidates:
-        if path and Path(path).exists():
-            try:
-                return ImageFont.truetype(path, max(int(size), 8))
-            except Exception:
-                continue
-    return ImageFont.load_default()
+    from gemia.video.fonts import load_pillow_font
+
+    return load_pillow_font(size, bold=bold)
 
 
 def _fit_font(text: str, max_width: float, max_size: int, min_size: int, *, bold: bool) -> ImageFont.ImageFont:

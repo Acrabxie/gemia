@@ -808,7 +808,7 @@ class TestRunShellSandboxEnforcement:
             pytest.skip("sandbox-exec is available; test only runs when unavailable")
 
         # If we reach here, sandbox-exec is not available
-        with pytest.raises(RuntimeError, match="sandbox-exec unavailable"):
+        with pytest.raises(RuntimeError, match="sandbox|secure command"):
             asyncio.run(
                 _run_shell.dispatch(
                     {"command": "echo hi"},

@@ -302,8 +302,17 @@ def _find_blender() -> str | None:
         os.environ.get("LUMERI_BLENDER_PATH", ""),
         os.environ.get("GEMIA_BLENDER_PATH", ""),
         shutil.which("blender") or "",
-        "/Applications/Blender.app/Contents/MacOS/Blender",
     ]
+    program_files = os.environ.get("ProgramFiles", "")
+    if program_files:
+        candidates.extend(
+            str(path)
+            for path in sorted(
+                Path(program_files).glob("Blender Foundation/Blender */blender.exe"),
+                reverse=True,
+            )
+        )
+    candidates.append("/Applications/Blender.app/Contents/MacOS/Blender")
     for item in candidates:
         if item and Path(item).exists():
             return str(Path(item))

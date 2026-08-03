@@ -1092,10 +1092,8 @@ def timecode_burn(
             tc_str = f"{hh:02d}:{mm:02d}:{ss:02d}:{ff:02d}"
             img = Image.open(fpath).convert("RGB")
             draw = ImageDraw.Draw(img)
-            try:
-                font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", font_size)
-            except Exception:
-                font = ImageFont.load_default()
+            from gemia.video.fonts import load_pillow_font
+            font = load_pillow_font(font_size, monospaced=True)
             tw = draw.textlength(tc_str, font=font)
             tx = (W - tw) / 2
             ty = H - font_size - 10 if position == "bottom" else 10
@@ -5563,14 +5561,10 @@ def video_text_caption(
 ) -> None:
     """Add a styled text caption at a specific time range using drawtext or PIL fallback."""
     # Try drawtext first
-    import glob as _glob
+    from gemia.video.fonts import resolve_font_path
     enable = f"between(t,{start_time},{end_time})"
-    font_candidates = (
-        _glob.glob("/System/Library/Fonts/**/*.ttf", recursive=True) +
-        _glob.glob("/usr/share/fonts/**/*.ttf", recursive=True) +
-        _glob.glob("/Library/Fonts/*.ttf")
-    )
-    font_opt = f":fontfile='{font_candidates[0]}'" if font_candidates else ""
+    resolved_font = resolve_font_path()
+    font_opt = f":fontfile='{resolved_font}'" if resolved_font else ""
     vf = (
         f"drawtext=text='{text}':x={x}:y={y}:fontsize={font_size}"
         f"{font_opt}:fontcolor={font_color}:box=1:boxcolor={box_color}:enable='{enable}'"
@@ -6988,10 +6982,8 @@ def video_text_lower_third(input_path: "str", output_path: "str", *, text: "str"
             draw = ImageDraw.Draw(overlay)
             bg = (*bg_color, int(bg_opacity * 255))
             draw.rectangle([0, bar_y, w, bar_y + bar_h], fill=bg)
-            try:
-                font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", font_size)
-            except Exception:
-                font = ImageFont.load_default()
+            from gemia.video.fonts import load_pillow_font
+            font = load_pillow_font(font_size)
             draw.text((int(w * 0.05), bar_y + (bar_h - font_size) // 2), text, fill=(*text_color, 255), font=font)
             img = img.convert("RGBA")
             img.alpha_composite(overlay)
@@ -7036,10 +7028,8 @@ def video_burn_in_timecode(input_path: "str", output_path: "str", *, font_size: 
             "bottom_right": (w - font_size * 10, h - font_size - 10),
         }
         pos = positions_map.get(position, (10, 10))
-        try:
-            font = ImageFont.truetype("/System/Library/Fonts/Courier New.ttf", font_size)
-        except Exception:
-            font = ImageFont.load_default()
+        from gemia.video.fonts import load_pillow_font
+        font = load_pillow_font(font_size, monospaced=True)
         fnames = sorted(os.listdir(frames_dir))
         for idx, fname in enumerate(fnames):
             fpath = os.path.join(frames_dir, fname)

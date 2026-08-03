@@ -1262,8 +1262,7 @@ def text_to_speech(
 ) -> str:
     """Generate speech audio from text.
 
-    Primary backend: macOS ``say`` command.
-    Fallback: ``espeak`` (Linux/cross-platform).
+    Backends: macOS ``say``, Windows SAPI, then ``espeak``.
 
     Args:
         text: Text string to synthesize.
@@ -1274,7 +1273,7 @@ def text_to_speech(
     Returns:
         The *output_path*.
     """
-    import subprocess, shutil, tempfile
+    import base64, os, subprocess, shutil, tempfile
     from pathlib import Path
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -1303,6 +1302,57 @@ def text_to_speech(
                     raise RuntimeError(f"ffmpeg convert failed:\n{proc2.stderr}")
         return output_path
 
+    # Windows SAPI — native, offline, and present on supported Windows builds.
+    if os.name == "nt":
+        # Windows PowerShell includes System.Speech on supported desktop
+        # builds. Prefer it over PowerShell 7, where that assembly may be
+        # unavailable depending on the installed .NET runtime.
+        powershell = shutil.which("powershell") or shutil.which("powershell.exe") or shutil.which("pwsh")
+        if powershell:
+            with tempfile.TemporaryDirectory() as td:
+                temp_root = Path(td)
+                text_path = temp_root / "speech.txt"
+                wav_path = Path(output_path) if ext == ".wav" else temp_root / "speech.wav"
+                text_path.write_text(text, encoding="utf-8")
+
+                def _ps_literal(value: str) -> str:
+                    return "'" + value.replace("'", "''") + "'"
+
+                # SAPI rate is -10..10 rather than words-per-minute. Map the
+                # supported Lumeri range around a natural 175 WPM midpoint.
+                sapi_rate = max(-10, min(10, round((int(rate) - 175) / 22.5)))
+                lines = [
+                    "Add-Type -AssemblyName System.Speech",
+                    "$synth = [System.Speech.Synthesis.SpeechSynthesizer]::new()",
+                    f"$synth.Rate = {sapi_rate}",
+                ]
+                if voice != "auto":
+                    lines.append(f"$synth.SelectVoice({_ps_literal(voice)})")
+                lines.extend(
+                    [
+                        f"$synth.SetOutputToWaveFile({_ps_literal(str(wav_path))})",
+                        f"$synth.Speak([IO.File]::ReadAllText({_ps_literal(str(text_path))}, [Text.Encoding]::UTF8))",
+                        "$synth.Dispose()",
+                    ]
+                )
+                encoded = base64.b64encode("\n".join(lines).encode("utf-16le")).decode("ascii")
+                proc = subprocess.run(
+                    [powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+                    capture_output=True,
+                    text=True,
+                )
+                if proc.returncode != 0:
+                    raise RuntimeError(f"Windows SAPI failed:\n{proc.stderr}")
+                if ext != ".wav":
+                    proc2 = subprocess.run(
+                        ["ffmpeg", "-y", "-i", str(wav_path), output_path],
+                        capture_output=True,
+                        text=True,
+                    )
+                    if proc2.returncode != 0:
+                        raise RuntimeError(f"ffmpeg convert failed:\n{proc2.stderr}")
+            return output_path
+
     # espeak fallback
     if shutil.which("espeak"):
         cmd = ["espeak", "-s", str(rate), "-w", output_path, text]
@@ -1312,8 +1362,7 @@ def text_to_speech(
         return output_path
 
     raise EnvironmentError(
-        "text_to_speech requires macOS 'say' or 'espeak'. "
-        "Install espeak: brew install espeak"
+        "text_to_speech requires macOS 'say', Windows SAPI, or 'espeak'."
     )
 
 

@@ -1,4 +1,4 @@
-"""run_shell — execute a bash command in an isolated sandbox.
+"""run_shell — execute a host-shell command in an isolated sandbox.
 
 The workspace directory is fully writable. Outside the workspace, files can
 only be created, not modified/deleted. Credentials (~/.ssh, ~/.config/gcloud,
@@ -14,36 +14,30 @@ Returns {exit_code, stdout_tail, stderr_tail, timed_out, sandbox_enforced, works
 from __future__ import annotations
 
 import asyncio
-import os
-import signal
 import subprocess
-from pathlib import Path
 from typing import Any
 
-from gemia.sandbox_v4 import build_v4_sandbox_command, is_sandbox_disabled
+from gemia.host_execution import (
+    minimal_subprocess_env,
+    sandbox_unavailable_message,
+    shell_command,
+)
+from gemia.sandbox_v4 import (
+    build_v4_sandbox_command,
+    is_sandbox_disabled,
+    native_sandbox_available,
+)
 from gemia.tools._context import ToolContext
 
 
 def _minimal_env() -> dict[str, str]:
-    """Return a minimal environment: only PATH, HOME, TMPDIR, LANG.
+    """Backward-compatible alias used by older tests and callers."""
 
-    Avoids leaking secrets like OPENROUTER_API_KEY, GEMINI_API_KEY, etc.
-    into the subprocess.
-    """
-    env = {}
-    for key in ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"):
-        if key in os.environ:
-            env[key] = os.environ[key]
-    # Ensure basic paths exist
-    if "PATH" not in env:
-        env["PATH"] = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-    if "HOME" not in env:
-        env["HOME"] = str(Path.home())
-    return env
+    return minimal_subprocess_env()
 
 
 async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
-    """Run a bash command in an isolated sandbox.
+    """Run a native host-shell command in an isolated sandbox.
 
     Args:
         command: required, bash command string
@@ -76,19 +70,20 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     # When the user has explicitly disabled the sandbox (POST /settings/sandbox),
     # run the raw command with full system access and report enforced=False
     # honestly — do NOT raise.
-    if is_sandbox_disabled():
-        cmd = ["/bin/bash", "-c", command]
+    sandbox_disabled = is_sandbox_disabled()
+    if not sandbox_disabled and not native_sandbox_available():
+        raise RuntimeError(sandbox_unavailable_message())
+    raw_cmd, shell_name = shell_command(command)
+    if sandbox_disabled:
+        cmd = raw_cmd
         enforced = False
     else:
         cmd, enforced = build_v4_sandbox_command(
-            ["/bin/bash", "-c", command],
+            raw_cmd,
             workspace_dir=ctx.output_dir,
         )
         if not enforced:
-            raise RuntimeError(
-                "sandbox-exec unavailable or failed on this host; refusing to run "
-                "command without sandbox enforcement"
-            )
+            raise RuntimeError(sandbox_unavailable_message())
 
     # Run in subprocess with minimal environment
     exit_code = None
@@ -126,6 +121,7 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         "stderr_tail": stderr_tail,
         "timed_out": timed_out,
         "sandbox_enforced": enforced,
+        "shell": shell_name,
         "workspace_dir": str(ctx.output_dir),
     }
 

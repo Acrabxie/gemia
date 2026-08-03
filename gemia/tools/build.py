@@ -36,9 +36,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from gemia.sandbox_v4 import build_v4_sandbox_command, is_sandbox_disabled
+from gemia.host_execution import (
+    interpreter_command,
+    minimal_subprocess_env,
+    process_group_kwargs,
+    sandbox_unavailable_message,
+    terminate_process_tree,
+)
+from gemia.sandbox_v4 import (
+    build_v4_sandbox_command,
+    is_sandbox_disabled,
+    native_sandbox_available,
+)
 from gemia.tools._context import ToolContext
-from gemia.tools.run_shell import _minimal_env
 
 
 # Module-level process tracking: job_id -> (Popen, deadline_monotonic)
@@ -87,13 +97,23 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         language = "node"
     elif language in ("bash", "shell", "sh"):
         language = "bash"
+    elif language in ("powershell", "pwsh", "ps1"):
+        language = "powershell"
     elif language not in ("python3", "python", "go", "ruby", "rust"):
         # Strict validation: only known languages pass through
         raise ValueError(
-            f"Unsupported language '{language}'. Supported: python3, node, bash, go, ruby, rust"
+            f"Unsupported language '{language}'. Supported: python3, node, bash, powershell, go, ruby, rust"
         )
 
-    filename = str(args.get("filename") or "script.py").strip()
+    default_filename = {
+        "powershell": "script.ps1",
+        "node": "script.js",
+        "bash": "script.sh",
+        "go": "main.go",
+        "ruby": "script.rb",
+        "rust": "main.rs",
+    }.get(language, "script.py")
+    filename = str(args.get("filename") or default_filename).strip()
     if "/" in filename or "\\" in filename:
         raise ValueError(f"filename must not contain path separators, got {filename!r}")
 
@@ -129,9 +149,12 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     # JobRegistry generates "build_<uuid hex[:8]>" — collision-free, unlike
     # a wallclock-derived id. Builds produce workspace files, not registry
     # assets, so there is no pending asset to pre-allocate.
+    sandbox_disabled = is_sandbox_disabled()
+    if not sandbox_disabled and not native_sandbox_available():
+        raise RuntimeError(sandbox_unavailable_message())
     record = ctx.jobs.submit(
         kind="build",
-        provider=f"local:{language}-sandbox",
+        provider=f"local:{language}-{'unsafe' if sandbox_disabled else 'sandbox'}",
         operation_name="pending",
         pending_asset_id="-",
         estimated_eta_sec=timeout_sec,
@@ -154,31 +177,18 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     # Build sandboxed command. When the user has explicitly disabled the
     # sandbox (POST /settings/sandbox), run the raw command with full system
     # access and report enforced=False honestly — do NOT raise.
-    # Map language to interpreter
-    interpreters = {
-        "python3": "/usr/bin/env python3",
-        "python": "/usr/bin/env python3",
-        "node": "/usr/bin/env node",
-        "bash": "/bin/bash",
-        "go": "/usr/bin/env go run",
-        "ruby": "/usr/bin/env ruby",
-        "rust": "/usr/bin/env rustc",
-    }
-    interpreter = interpreters.get(language, "/usr/bin/env python3")
-    
-    if is_sandbox_disabled():
-        cmd = interpreter.split() + [str(script_path), *script_args]
+    raw_cmd, runtime_name = interpreter_command(language, script_path, script_args)
+
+    if sandbox_disabled:
+        cmd = raw_cmd
         enforced = False
     else:
         cmd, enforced = build_v4_sandbox_command(
-            interpreter.split() + [str(script_path), *script_args],
+            raw_cmd,
             workspace_dir=ctx.output_dir,
         )
         if not enforced:
-            raise RuntimeError(
-                "sandbox-exec unavailable or failed on this host; refusing to run "
-                "code without sandbox enforcement"
-            )
+            raise RuntimeError(sandbox_unavailable_message())
 
     # Start process with new session (process group isolation)
     deadline = time.monotonic() + timeout_sec
@@ -189,8 +199,8 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
                 stdout=out_f,
                 stderr=err_f,
                 cwd=str(ctx.output_dir),
-                env=_minimal_env(),
-                start_new_session=True,  # Process group isolation
+                env=minimal_subprocess_env(),
+                **process_group_kwargs(),
             )
     except Exception as e:
         stdout_log.unlink(missing_ok=True)
@@ -209,6 +219,7 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         "stdout_log": str(stdout_log.relative_to(ctx.output_dir)),
         "stderr_log": str(stderr_log.relative_to(ctx.output_dir)),
         "sandbox_enforced": enforced,
+        "runtime": runtime_name,
         "summary": note,
     }
 
@@ -252,10 +263,7 @@ def _check_job_impl(job_id: str, ctx: ToolContext) -> dict[str, Any]:
             now = time.monotonic()
             if now > deadline:
                 # Timeout: kill process group
-                try:
-                    os.killpg(os.getpgid(proc.pid), 9)
-                except OSError:
-                    pass  # Already gone
+                terminate_process_tree(proc)
                 exit_code = proc.wait(timeout=1)
                 timeout_sec = record.estimated_eta_sec
                 ctx.jobs.update_from_poll(
