@@ -62,12 +62,36 @@ local setup UI, then start Lumeri:
 
 ```bash
 python server.py
-# Open http://127.0.0.1:7788/v3/
+# Open http://127.0.0.1:7788/
 ```
 
-The open-source build uses one local workspace. Hosted sign-in, email delivery,
-cloud account management, billing, and subscriptions are not included in this
-repository.
+### Windows 10/11
+
+Install 64-bit Python 3.12 or newer, Git, and a complete FFmpeg package whose
+`ffmpeg` and `ffprobe` commands are on `PATH`. Then open PowerShell in the
+cloned repository:
+
+```powershell
+.\scripts\windows\setup.ps1
+.\scripts\windows\start.ps1
+```
+
+The start script runs the source checkout directly on
+`http://127.0.0.1:7788/` and opens the browser workspace. It does not build or
+install an EXE. Run `doctor.ps1` for a non-destructive prerequisite and port
+check, or pass `-Port 7790` to both doctor/start when 7788 is already occupied.
+
+PowerShell execution policy is left unchanged. If your machine blocks local
+scripts, review the scripts first and invoke them for the current process only:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
+The public build has no account system: no registration, login, account
+switching, hosted email, billing, or subscriptions. It always opens one local
+workspace stored on the current computer. Model-provider configuration remains
+local to that computer and is never committed to Git.
 
 ## Tests
 

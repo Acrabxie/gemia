@@ -88,8 +88,10 @@ def font_roots(*, repo_root: str | Path | None = None, include_system: bool = Tr
         roots.extend([root / "assets" / "fonts", root / "fonts", root / "static" / "fonts"])
 
     if include_system:
+        windows_root = Path(os.environ.get("WINDIR") or "C:/Windows")
         roots.extend(
             [
+                windows_root / "Fonts",
                 Path.home() / "Library" / "Fonts",
                 Path("/Library/Fonts"),
                 Path("/System/Library/Fonts"),

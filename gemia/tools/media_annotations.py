@@ -6,22 +6,14 @@ from typing import Any
 from gemia.tools._context import ProgressUpdate, ToolContext
 
 
-def _account_id(ctx: ToolContext) -> str:
-    explicit = str(ctx.extra.get("account_id") or "").strip()
-    if explicit:
-        return explicit
-    try:
-        from gemia import public_identity as accounts
+def _workspace_id(ctx: ToolContext) -> str:
+    from gemia.tools._library_session import workspace_id_for
 
-        return str(accounts.current_account_id() or "").strip()
-    except Exception:
-        return ""
+    return workspace_id_for(ctx)
 
 
 async def dispatch_annotate(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
-    account_id = _account_id(ctx)
-    if not account_id:
-        raise ValueError("annotate_media requires a signed-in account")
+    account_id = _workspace_id(ctx)
     from gemia.media_annotations import annotate_asset_heuristic
     from gemia.media_library import list_assets
 
@@ -69,9 +61,7 @@ async def dispatch_annotate(args: dict[str, Any], ctx: ToolContext) -> dict[str,
 
 
 async def dispatch_get(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
-    account_id = _account_id(ctx)
-    if not account_id:
-        raise ValueError("get_media_annotations requires a signed-in account")
+    account_id = _workspace_id(ctx)
     from gemia.media_annotations import list_annotations
 
     asset_id = str(args.get("library_asset_id") or args.get("asset_id") or "")
@@ -85,9 +75,7 @@ async def dispatch_get(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]
 
 
 async def dispatch_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
-    account_id = _account_id(ctx)
-    if not account_id:
-        raise ValueError("write_media_annotation requires a signed-in account")
+    account_id = _workspace_id(ctx)
     from gemia.media_annotations import create_annotation, update_annotation
 
     asset_id = str(args.get("library_asset_id") or args.get("asset_id") or "")

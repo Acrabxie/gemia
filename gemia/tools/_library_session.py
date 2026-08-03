@@ -11,15 +11,15 @@ from typing import Any
 from gemia.tools._context import ToolContext
 
 
-def account_id_for(ctx: ToolContext) -> str:
-    """Resolve the active account id: explicit ctx override, else the process account."""
-    explicit = str(ctx.extra.get("account_id") or "").strip()
+def workspace_id_for(ctx: ToolContext) -> str:
+    """Resolve the one local workspace used by the public runtime."""
+    explicit = str(ctx.extra.get("workspace_id") or "").strip()
     if explicit:
         return explicit
     try:
-        from gemia import public_identity as accounts
+        from gemia.local_workspace import current_workspace_id
 
-        return str(accounts.current_account_id() or "").strip()
+        return current_workspace_id()
     except Exception:
         return ""
 
@@ -60,4 +60,4 @@ def ensure_session_asset(ctx: ToolContext, asset: dict[str, Any]) -> str | None:
     return record.asset_id
 
 
-__all__ = ["account_id_for", "ensure_session_asset"]
+__all__ = ["ensure_session_asset", "workspace_id_for"]

@@ -89,16 +89,7 @@ def _native_tool_schemas(types) -> list[Any]:
                 "Create a new Lumeri editing session and return its session_id. "
                 "Pass that session_id to every other tool."
             ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "account_id": {
-                        "type": "string",
-                        "description": "Optional account id for provenance.",
-                    }
-                },
-                "required": [],
-            },
+            inputSchema={"type": "object", "properties": {}, "required": []},
             annotations=types.ToolAnnotations(readOnlyHint=False, openWorldHint=False),
         ),
         T(
@@ -306,9 +297,7 @@ async def _handle_native(
     """
     if name == "create_session":
         try:
-            runner = await asyncio.to_thread(
-                mgr.create_session, account_id=args.get("account_id")
-            )
+            runner = await asyncio.to_thread(mgr.create_session)
         except SessionLimitError as exc:
             raise _ToolError(
                 json.dumps(

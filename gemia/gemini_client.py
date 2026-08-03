@@ -466,12 +466,9 @@ class GeminiClientV3:
             ).strip()
             if not self.api_key:
                 raise RuntimeError("OPENAI_API_KEY required for openai provider (env or config.json:openai_api_key).")
-            # Base URL is config-readable (not env-only) so the openai path can
-            # be pinned to a local bridge — e.g. the codex-shim that fronts a
-            # ChatGPT subscription — from ~/.gemia/config.json alone, without
-            # needing the daemon's env. The shim authenticates with its own
-            # managed token and ignores this api_key, but a non-empty value is
-            # still required above.
+            # Keep the endpoint configurable for local or enterprise
+            # OpenAI-compatible providers. Authentication remains the provider's
+            # responsibility; the public runtime contains no account bridge.
             self.api_url = (
                 os.environ.get("LUMERI_OPENAI_BASE_URL")
                 or _read_config_key("lumeri_openai_base_url")

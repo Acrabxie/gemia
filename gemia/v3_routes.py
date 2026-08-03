@@ -154,16 +154,7 @@ def _route_get(handler, path: str, query: dict, *, body: bool) -> bool:
 
 def _create_session(handler) -> bool:
     try:
-        from gemia import identity
-
-        # Per-request pin honored: a client that pins X-Lumeri-Account gets
-        # its session bound to THAT account even if another client flips the
-        # global active.json mid-flight.
-        account_id = identity.resolve_account_id(handler)
-    except Exception:
-        account_id = None
-    try:
-        runner = get_manager().create_session(account_id=account_id)
+        runner = get_manager().create_session()
     except SessionLimitError as exc:
         _json_error(handler, 503, str(exc))
         return True
@@ -414,7 +405,6 @@ def _list_sessions(handler) -> bool:
             jobs = []
         sessions.append({
             "session_id": getattr(runner, "session_id", ""),
-            "account_id": getattr(runner, "account_id", "") or "",
             "created_at": getattr(runner, "created_at", None),
             "last_used_at": getattr(runner, "last_used_at", None),
             "turn_in_progress": bool(getattr(runner, "turn_in_progress", False)),

@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from gemia.tools._context import ToolContext
-from gemia.tools._library_session import account_id_for, ensure_session_asset
+from gemia.tools._library_session import ensure_session_asset, workspace_id_for
 
 _VALID_KINDS = {"video", "image", "audio", "any"}
 _DEFAULT_LIMIT = 8
@@ -41,8 +41,8 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         raise ValueError(f"search_media kind must be one of {sorted(_VALID_KINDS)}")
     limit = _clamp_limit(args.get("limit"))
 
-    account_id = account_id_for(ctx)
-    if not account_id:
+    workspace_id = workspace_id_for(ctx)
+    if not workspace_id:
         return {
             "query": query,
             "kind": kind,
@@ -51,18 +51,18 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
             "results": [],
             "unindexed_count": 0,
             "index_hint": "",
-            "summary": "no account context; sign in to search the media library",
+            "summary": "local media workspace is unavailable",
         }
 
     from gemia.media_library import get_asset
     from gemia.media_search import search_media_annotations
 
-    raw = search_media_annotations(account_id, query, kind=kind, limit=limit)
+    raw = search_media_annotations(workspace_id, query, kind=kind, limit=limit)
 
     results: list[dict[str, Any]] = []
     for item in raw["results"]:
         library_asset_id = str(item.get("library_asset_id") or "")
-        asset = get_asset(account_id, library_asset_id) if library_asset_id else None
+        asset = get_asset(workspace_id, library_asset_id) if library_asset_id else None
         session_asset_id = ensure_session_asset(ctx, asset) if asset else None
         if not session_asset_id:
             # backing file gone: skip so the model never gets an unusable id

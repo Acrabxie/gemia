@@ -2213,17 +2213,17 @@
     if (!overlay) {
       overlay = document.createElement("div");
       overlay.id = "model-modal";
-      overlay.className = "auth-modal";
+      overlay.className = "dialog-modal";
       overlay.hidden = true;
       overlay.innerHTML = `
         <div class="model-backdrop" data-model-close></div>
-        <div class="auth-dialog model-dialog" role="dialog" aria-modal="true" aria-labelledby="model-title">
-          <button type="button" class="auth-x" data-model-close aria-label="关闭">×</button>
+        <div class="dialog-shell model-dialog" role="dialog" aria-modal="true" aria-labelledby="model-title">
+          <button type="button" class="dialog-close" data-model-close aria-label="关闭">×</button>
           <h2 id="model-title">模型与思考强度</h2>
           <div class="model-list" id="model-list"></div>
           <div class="model-effort-label">思考强度</div>
           <div class="model-efforts" id="model-efforts"></div>
-          <p class="auth-error" id="model-error" hidden></p>
+          <p class="dialog-error" id="model-error" hidden></p>
         </div>`;
       document.body.appendChild(overlay);
       overlay.querySelectorAll("[data-model-close]").forEach((el) =>
@@ -2288,12 +2288,12 @@
     if (!overlay) {
       overlay = document.createElement("div");
       overlay.id = "setup-modal";
-      overlay.className = "auth-modal";
+      overlay.className = "dialog-modal";
       overlay.hidden = true;
       overlay.innerHTML = `
         <div class="model-backdrop" data-setup-close></div>
-        <div class="auth-dialog setup-dialog" role="dialog" aria-modal="true" aria-labelledby="setup-title">
-          <button type="button" class="auth-x" data-setup-close aria-label="关闭">×</button>
+        <div class="dialog-shell setup-dialog" role="dialog" aria-modal="true" aria-labelledby="setup-title">
+          <button type="button" class="dialog-close" data-setup-close aria-label="关闭">×</button>
           <h2 id="setup-title">AI 供应商配置</h2>
           <p class="setup-sub">拖动排序供应商优先级，选中后配置密钥与模型。</p>
           <div class="setup-providers" id="setup-providers"></div>
@@ -2303,7 +2303,7 @@
             <button type="button" class="setup-save" id="setup-save">保存并启用</button>
           </div>
           <p class="setup-result" id="setup-result" hidden></p>
-          <p class="auth-error" id="setup-error" hidden></p>
+          <p class="dialog-error" id="setup-error" hidden></p>
         </div>`;
       document.body.appendChild(overlay);
       overlay.querySelectorAll("[data-setup-close]").forEach((el) =>
