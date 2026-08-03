@@ -90,9 +90,21 @@ jobs:
             $edge = $edgeCandidates | Select-Object -First 1
             if (-not $edge) { throw "Microsoft Edge was not found on the Windows runner." }
 
+            $edgeProfile = Join-Path $env:RUNNER_TEMP "lumeri-edge-profile"
+            $edgeDom = Join-Path $env:RUNNER_TEMP "lumeri-edge-dom.html"
             $edgeStderr = Join-Path $env:RUNNER_TEMP "lumeri-edge-stderr.log"
-            $renderedDom = & $edge --headless=new --disable-gpu --no-first-run --disable-features=OptimizationGuideModelDownloading,OptimizationHints --virtual-time-budget=5000 --dump-dom "http://127.0.0.1:7788/" 2>$edgeStderr
-            $renderedText = $renderedDom -join "`n"
+            $edgeArgs = @(
+              "--headless",
+              "--disable-gpu",
+              "--no-first-run",
+              "--disable-features=OptimizationGuideModelDownloading,OptimizationHints",
+              "--user-data-dir=$edgeProfile",
+              "--virtual-time-budget=5000",
+              "--dump-dom",
+              "http://127.0.0.1:7788/"
+            )
+            $edgeProc = Start-Process -FilePath $edge -ArgumentList $edgeArgs -Wait -PassThru -RedirectStandardOutput $edgeDom -RedirectStandardError $edgeStderr
+            $renderedText = Get-Content $edgeDom -Raw -ErrorAction SilentlyContinue
             if ($renderedText -notmatch "代码执行锁定" -or $renderedText -notmatch "Ctrl\+U") {
               throw "The rendered Windows workspace did not expose its locked execution state and Windows shortcut labels."
             }
