@@ -317,12 +317,10 @@ def _maybe_import_to_media_library(path: Path, result: dict[str, Any], enabled: 
     if not enabled:
         return None
     try:
-        from gemia.public_identity import current_account_id
+        from gemia.local_workspace import current_workspace_id
         from gemia.media_library import import_media
 
-        account_id = current_account_id()
-        if not account_id:
-            return None
+        account_id = current_workspace_id()
         original_name = f"{result.get('provider')}-{result.get('id')}{path.suffix}"
         return import_media(account_id, path, original_name=original_name)
     except Exception:

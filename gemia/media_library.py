@@ -1,4 +1,4 @@
-"""Account-scoped media asset library for Gemia."""
+"""Local-workspace media asset library for Lumeri."""
 from __future__ import annotations
 
 import hashlib
@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from gemia.public_identity import account_root
+from gemia.local_workspace import workspace_root
 from gemia.media_ingest import probe_still_metadata
 from gemia.project_model import IMAGE_DURATION
 
@@ -79,7 +79,7 @@ class MediaLibraryError(ValueError):
 
 
 def media_root(account_id: str) -> Path:
-    return account_root(account_id) / "media"
+    return workspace_root(account_id) / "media"
 
 
 def library_path(account_id: str) -> Path:

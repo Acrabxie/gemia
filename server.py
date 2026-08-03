@@ -51,7 +51,7 @@ def _has_valid_key() -> bool:
     return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("VERTEX_PROJECT"))
 
 
-def _configured_server_host(default: str = "0.0.0.0") -> str:
+def _configured_server_host(default: str = "127.0.0.1") -> str:
     return os.environ.get("LUMERI_HOST") or os.environ.get("GEMIA_HOST") or default
 
 

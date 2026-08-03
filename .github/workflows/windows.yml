@@ -1,0 +1,81 @@
+name: Windows 7788
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-7788-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-7788:
+    name: Windows 7788 source runtime
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install FFmpeg
+        shell: pwsh
+        run: choco install ffmpeg --yes --no-progress
+      - name: Install Lumeri and tests
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -e ".[dev]"
+      - name: Check Python syntax
+        run: python -m compileall -q gemia lumerai lumenframe server.py
+      - name: Run full test suite on Windows
+        run: python -m pytest tests/ -q
+      - name: Start and probe port 7788
+        shell: pwsh
+        run: |
+          $stdout = Join-Path $env:RUNNER_TEMP "lumeri-stdout.log"
+          $stderr = Join-Path $env:RUNNER_TEMP "lumeri-stderr.log"
+          $proc = Start-Process python -ArgumentList @("-m", "gemia", "serve", "--host", "127.0.0.1", "--port", "7788") -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          try {
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 60; $attempt++) {
+              Start-Sleep -Milliseconds 500
+              try {
+                $health = Invoke-RestMethod -Uri "http://127.0.0.1:7788/health" -TimeoutSec 2
+                if ($health.status -eq "ok") { $ready = $true; break }
+              } catch {}
+            }
+            if (-not $ready) {
+              Get-Content $stdout -ErrorAction SilentlyContinue
+              Get-Content $stderr -ErrorAction SilentlyContinue
+              throw "Lumeri did not become healthy on port 7788."
+            }
+
+            $workspaceResponse = Invoke-WebRequest -Uri "http://127.0.0.1:7788/" -UseBasicParsing
+            if ($workspaceResponse.StatusCode -ne 200 -or $workspaceResponse.Content -notmatch "Lumeri") {
+              throw "The browser workspace did not load from port 7788."
+            }
+
+            $accountStatus = 0
+            try {
+              $accountStatus = (Invoke-WebRequest -Uri "http://127.0.0.1:7788/auth/session" -UseBasicParsing -ErrorAction Stop).StatusCode
+            } catch {
+              if ($null -ne $_.Exception.Response) {
+                $accountStatus = [int]$_.Exception.Response.StatusCode
+              } else {
+                throw
+              }
+            }
+            if ($accountStatus -ne 404) {
+              throw "The removed account endpoint returned HTTP $accountStatus instead of 404."
+            }
+          } finally {
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+          }

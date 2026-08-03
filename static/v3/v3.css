@@ -206,18 +206,6 @@ button:disabled, button.primary:disabled {
 
 /* (sandbox toggle is now a switch inside the "+" menu — see .switch below) */
 
-/* Signed in the button becomes a round badge: Google photo or initial (email in title). */
-.account-btn.signed-in {
-  color: var(--m3-on-primary-container); background: var(--m3-primary-container); box-shadow: none;
-  font-size: 14px; font-weight: 600; border-radius: 50%;
-  overflow: hidden;
-}
-.account-photo { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
-.account-btn.signed-in:hover {
-  background: color-mix(in srgb, var(--m3-on-primary-container) 8%, var(--m3-primary-container));
-  box-shadow: none;
-}
-
 /* ── Main split · LEFT preview stage · RIGHT chat rail ───────────────── */
 .app-main {
   flex: 1;
@@ -1369,30 +1357,29 @@ input::placeholder, textarea::placeholder { color: var(--m3-on-surface-variant);
 .ptl-playhead::before { content: ""; position: absolute; top: 0; left: -5px; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 8px solid #ff4b5c; }
 .ptl-marker { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed rgba(255, 207, 59, 0.7); z-index: 7; pointer-events: none; }
 
-/* ── Auth / login modal — M3 dialog: 28px, surface-high, level-3, 32% scrim ── */
-.auth-modal { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; }
-.auth-modal[hidden] { display: none; }
-.auth-backdrop { position: absolute; inset: 0; background: var(--m3-scrim); backdrop-filter: blur(2px); }
-.auth-dialog {
+/* ── Local settings dialog shell ──────────────────────────────────────── */
+.dialog-modal { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; }
+.dialog-modal[hidden] { display: none; }
+.dialog-shell {
   position: relative;
   width: min(92vw, 380px);
   background: var(--m3-surface-high);
   border-radius: var(--shape-xl);
   padding: 30px 30px 26px;
   box-shadow: var(--elev-3);
-  animation: auth-pop 0.25s var(--md-emph-decel);
+  animation: dialog-pop 0.25s var(--md-emph-decel);
 }
-@keyframes auth-pop { from { opacity: 0; transform: translateY(8px) scale(0.95); } to { opacity: 1; transform: none; } }
-.auth-x {
+@keyframes dialog-pop { from { opacity: 0; transform: translateY(8px) scale(0.95); } to { opacity: 1; transform: none; } }
+.dialog-close {
   position: absolute; top: 10px; right: 10px;
   width: 40px; height: 40px; padding: 0;
   display: grid; place-items: center;
   font-size: 20px; line-height: 1; color: var(--m3-on-surface-variant);
   background: transparent; border: none; border-radius: 50%;
 }
-.auth-x:hover { background: color-mix(in srgb, var(--m3-on-surface-variant) 8%, transparent); color: var(--m3-on-surface); box-shadow: none; }
+.dialog-close:hover { background: color-mix(in srgb, var(--m3-on-surface-variant) 8%, transparent); color: var(--m3-on-surface); box-shadow: none; }
 
-/* /model picker — reuses .auth-modal / .auth-dialog shell */
+/* /model picker */
 .model-backdrop { position: absolute; inset: 0; background: var(--m3-scrim); backdrop-filter: blur(2px); }
 .model-dialog { width: min(94vw, 460px); }
 .model-dialog h2 { margin: 0; font-size: 20px; font-weight: 400; color: var(--m3-on-surface); }
@@ -1422,7 +1409,7 @@ input::placeholder, textarea::placeholder { color: var(--m3-on-surface-variant);
 .model-chip:hover { background: color-mix(in srgb, var(--m3-on-surface-variant) 8%, transparent); color: var(--m3-on-surface); box-shadow: none; }
 .model-chip.active { border-color: transparent; color: var(--m3-on-secondary-container); background: var(--m3-secondary-container); }
 
-/* /setup — AI 供应商配置面板（复用 auth-modal 壳） */
+/* /setup — local AI provider settings */
 .setup-dialog { width: min(94vw, 520px); max-height: 88vh; overflow-y: auto; }
 .setup-dialog h2 { margin: 0; font-size: 20px; font-weight: 400; color: var(--m3-on-surface); }
 .setup-sub { margin: 6px 0 16px; font-size: 12.5px; color: var(--m3-on-surface-variant); line-height: 1.5; }
@@ -1494,77 +1481,8 @@ input::placeholder, textarea::placeholder { color: var(--m3-on-surface-variant);
 .setup-result.ok { color: var(--m3-primary); }
 .setup-result.bad { color: var(--m3-error, #e5484d); }
 
-.auth-brand { text-align: center; margin-bottom: 22px; }
-.auth-brand img { display: block; margin: 0 auto 12px; }
-.auth-brand h2 { margin: 0; font-size: 20px; font-weight: 400; color: var(--m3-on-surface); }
-.auth-sub { margin: 6px 0 0; font-size: 12.5px; color: var(--m3-on-surface-variant); line-height: 1.5; word-break: break-all; }
-
-/* Google 官方深色规范变体（深底描边）；白底款在暗色 UI 抢过主 CTA */
-.auth-google {
-  display: flex; align-items: center; justify-content: center; gap: 10px;
-  width: 100%; padding: 12px; margin-bottom: 4px;
-  background: #131314; color: #e3e3e3;
-  border: 1px solid #8e918f; border-radius: var(--shape-full);
-  font-size: 14px; font-weight: 500;
-}
-.auth-google:hover { background: color-mix(in srgb, #e3e3e3 8%, #131314); color: #e3e3e3; box-shadow: none; }
-
-.auth-divider { display: flex; align-items: center; gap: 12px; margin: 18px 0 14px; color: var(--m3-outline); font-size: 11.5px; }
-.auth-divider::before, .auth-divider::after { content: ""; flex: 1; height: 1px; background: var(--m3-outline-variant); }
-
-.auth-step { display: flex; flex-direction: column; gap: 12px; }
-.auth-field { display: flex; flex-direction: column; gap: 6px; }
-/* M3 filled text field: surface-highest, 4px top corners, activity line below */
-.auth-field input {
-  width: 100%; box-sizing: border-box;
-  padding: 13px 16px; font: inherit; font-size: 14px;
-  background: var(--m3-surface-highest); color: var(--m3-on-surface);
-  border: none; border-radius: var(--shape-xs) var(--shape-xs) 0 0;
-  box-shadow: inset 0 -1px 0 0 var(--m3-on-surface-variant);
-  transition: box-shadow 0.15s var(--md-standard), background 0.15s var(--md-standard);
-}
-.auth-field input:focus {
-  outline: none;
-  background: color-mix(in srgb, var(--m3-on-surface) 4%, var(--m3-surface-highest));
-  box-shadow: inset 0 -2px 0 0 var(--m3-primary);
-}
-#auth-code { letter-spacing: 6px; font-variant-numeric: tabular-nums; text-align: center; font-size: 18px; }
-
-.auth-primary {
-  width: 100%; padding: 13px; margin-top: 2px;
-  background: var(--m3-primary); color: var(--m3-on-primary); border: none;
-  border-radius: var(--shape-full); font-weight: 500; font-size: 14px;
-}
-.auth-primary:hover { background: color-mix(in srgb, var(--m3-on-primary) 8%, var(--m3-primary)); box-shadow: var(--elev-1); }
-.auth-primary:disabled {
-  background: color-mix(in srgb, var(--m3-on-surface) 12%, transparent);
-  color: color-mix(in srgb, var(--m3-on-surface) 38%, transparent);
-  cursor: not-allowed;
-}
-/* Logout = M3 outlined button, error-colored label */
-.auth-secondary {
-  width: 100%; padding: 12px;
-  background: transparent; color: var(--m3-error);
-  border: 1px solid var(--m3-outline-variant); border-radius: var(--shape-full);
-}
-.auth-secondary:hover { background: var(--err-tint); box-shadow: none; }
-
-.auth-code-hint { margin: 0 0 2px; font-size: 12.5px; color: var(--m3-on-surface-variant); text-align: center; }
-.auth-code-hint strong { color: var(--m3-on-surface); }
-.auth-code-actions { display: flex; justify-content: space-between; margin-top: 4px; }
-.auth-link { background: none; border: none; padding: 4px 2px; color: var(--m3-primary); font-size: 12.5px; font-weight: 500; }
-.auth-link:hover { background: none; box-shadow: none; text-decoration: underline; }
-.auth-link:disabled { color: color-mix(in srgb, var(--m3-on-surface) 38%, transparent); background: none; text-decoration: none; }
-
-.auth-error { margin: 14px 0 0; padding: 10px 16px; font-size: 12.5px; color: var(--m3-on-error-container); background: var(--m3-error-container); border-radius: var(--shape-md); text-align: center; }
-.auth-error[hidden] { display: none; }
-
-.auth-avatar {
-  width: 56px; height: 56px; margin: 0 auto 12px; border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 22px; font-weight: 500; color: var(--m3-on-primary);
-  background: var(--m3-primary);
-}
+.dialog-error { margin: 14px 0 0; padding: 10px 16px; font-size: 12.5px; color: var(--m3-on-error-container); background: var(--m3-error-container); border-radius: var(--shape-md); text-align: center; }
+.dialog-error[hidden] { display: none; }
 
 /* ── Accessibility (manual 05-界面UI gates) ──────────────────────────── */
 /* M3 focus indicator: 3px primary ring, offset so shapes keep their radius.

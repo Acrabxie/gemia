@@ -23,6 +23,8 @@ import pytest
 
 from gemia.project_model import empty_project, normalize_project
 from lumerai.otio_adapter import (
+    _external_target_url,
+    _source_path_from_target_url,
     available_formats,
     format_extension,
     read_project_from_file,
@@ -69,6 +71,16 @@ def _single_video_project(media: Path) -> dict[str, Any]:
 
 
 # ── M8-C: media bundles (otioz / otiod) ─────────────────────────────────────
+
+
+def test_existing_media_uses_file_url_and_roundtrips(tmp_path: Path) -> None:
+    media = tmp_path / "clip with spaces.mp4"
+    media.write_bytes(b"media")
+
+    target_url = _external_target_url(str(media))
+
+    assert target_url.startswith("file:")
+    assert Path(_source_path_from_target_url(target_url)) == media.resolve()
 
 
 def test_otioz_bundles_referenced_media(tmp_path: Path) -> None:
@@ -251,5 +263,4 @@ def test_export_import_otio_verbs_roundtrip(tmp_path: Path) -> None:
     assert imp["clip_count"] == 1
     clips = dst.project.load()["timeline"]["clips"]
     assert len(clips) == 1 and clips[0]["media_kind"] == "video"
-
 

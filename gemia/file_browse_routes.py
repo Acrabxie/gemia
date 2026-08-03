@@ -23,7 +23,6 @@ escape the root).
 """
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 from typing import Any, Callable
@@ -86,8 +85,9 @@ def _roots_payload() -> list[dict[str, Any]]:
 
 
 def _workdirs_root() -> Path:
-    base = os.environ.get("LUMERI_V3_OUTPUT_ROOT") or "/tmp/lumeri-v3"
-    return Path(base) / "workdirs"
+    from gemia.runtime_paths import output_root
+
+    return output_root() / "workdirs"
 
 
 def _resolve_root(root: str, session: str) -> Path | None:

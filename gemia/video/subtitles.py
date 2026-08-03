@@ -390,9 +390,11 @@ def auto_subtitle(input_path: str, output_path: str, *, language: str = "en") ->
 
     import uuid
 
+    from gemia.runtime_paths import temp_file
+
     uid = uuid.uuid4().hex
-    wav_path = f"/tmp/gemia_whisper_{uid}.wav"
-    srt_path = f"/tmp/gemia_whisper_{uid}.srt"
+    wav_path = str(temp_file(f"lumeri_whisper_{uid}.wav"))
+    srt_path = str(temp_file(f"lumeri_whisper_{uid}.srt"))
 
     try:
         # Step 1: extract mono 16 kHz WAV

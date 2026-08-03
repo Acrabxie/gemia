@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import glob
+import os
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,9 @@ def _font_file() -> str:
     if _FONT_CACHE:
         return _FONT_CACHE[0]
     candidates = (
-        glob.glob("/System/Library/Fonts/Supplemental/Arial.ttf")
+        glob.glob(os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts", "arial.ttf"))
+        + glob.glob(os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts", "*.ttf"))
+        + glob.glob("/System/Library/Fonts/Supplemental/Arial.ttf")
         + glob.glob("/System/Library/Fonts/**/*.ttf", recursive=True)
         + glob.glob("/Library/Fonts/*.ttf")
         + glob.glob("/usr/share/fonts/**/*.ttf", recursive=True)
