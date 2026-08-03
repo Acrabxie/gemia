@@ -28,21 +28,21 @@ jobs:
       - name: Install FFmpeg
         shell: pwsh
         run: choco install ffmpeg --yes --no-progress
-      - name: Install Lumeri and tests
+      - name: Run the documented Windows setup
         shell: pwsh
         run: |
-          python -m pip install --upgrade pip setuptools wheel
-          python -m pip install -e ".[dev]"
+          .\scripts\windows\setup.ps1
+          .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
       - name: Check Python syntax
-        run: python -m compileall -q gemia lumerai lumenframe server.py
+        run: .\.venv\Scripts\python.exe -m compileall -q gemia lumerai lumenframe server.py
       - name: Run full test suite on Windows
-        run: python -m pytest tests/ -q
+        run: .\.venv\Scripts\python.exe -m pytest tests/ -q -rs
       - name: Start and probe port 7788
         shell: pwsh
         run: |
           $stdout = Join-Path $env:RUNNER_TEMP "lumeri-stdout.log"
           $stderr = Join-Path $env:RUNNER_TEMP "lumeri-stderr.log"
-          $proc = Start-Process python -ArgumentList @("-m", "gemia", "serve", "--host", "127.0.0.1", "--port", "7788") -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          $proc = Start-Process pwsh -ArgumentList @("-NoLogo", "-NoProfile", "-File", ".\scripts\windows\start.ps1", "-NoBrowser", "-Port", "7788") -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
           try {
             $ready = $false
             for ($attempt = 0; $attempt -lt 60; $attempt++) {
@@ -75,6 +75,41 @@ jobs:
             }
             if ($accountStatus -ne 404) {
               throw "The removed account endpoint returned HTTP $accountStatus instead of 404."
+            }
+
+            $sandbox = Invoke-RestMethod -Uri "http://127.0.0.1:7788/settings/sandbox" -TimeoutSec 5
+            if ($sandbox.host_platform -ne "windows" -or $sandbox.sandbox_available -ne $false -or $sandbox.code_execution_available -ne $false) {
+              throw "Windows must report model-generated code execution as locked while its native sandbox is unavailable."
+            }
+
+            $edgeCandidates = @(
+              (Join-Path $env:ProgramFiles "Microsoft\Edge\Application\msedge.exe"),
+              (Join-Path ${env:ProgramFiles(x86)} "Microsoft\Edge\Application\msedge.exe"),
+              (Get-Command msedge.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue)
+            ) | Where-Object { $_ -and (Test-Path $_) }
+            $edge = $edgeCandidates | Select-Object -First 1
+            if (-not $edge) { throw "Microsoft Edge was not found on the Windows runner." }
+
+            $edgeProfile = Join-Path $env:RUNNER_TEMP "lumeri-edge-profile"
+            $edgeDom = Join-Path $env:RUNNER_TEMP "lumeri-edge-dom.html"
+            $edgeStderr = Join-Path $env:RUNNER_TEMP "lumeri-edge-stderr.log"
+            $edgeArgs = @(
+              "--headless",
+              "--disable-gpu",
+              "--no-first-run",
+              "--disable-features=OptimizationGuideModelDownloading,OptimizationHints",
+              "--user-data-dir=$edgeProfile",
+              "--virtual-time-budget=5000",
+              "--dump-dom",
+              "http://127.0.0.1:7788/"
+            )
+            $edgeProc = Start-Process -FilePath $edge -ArgumentList $edgeArgs -Wait -PassThru -RedirectStandardOutput $edgeDom -RedirectStandardError $edgeStderr
+            $renderedText = Get-Content $edgeDom -Raw -ErrorAction SilentlyContinue
+            if ($renderedText -notmatch "代码执行锁定" -or $renderedText -notmatch "Ctrl\+U") {
+              throw "The rendered Windows workspace did not expose its locked execution state and Windows shortcut labels."
+            }
+            if ($renderedText -match "登录|注册|退出账号|账户中心") {
+              throw "The rendered public workspace still exposes an account surface."
             }
           } finally {
             if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }

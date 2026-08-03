@@ -218,16 +218,12 @@ def _render_preview(
             overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
             draw = ImageDraw.Draw(overlay)
             resolved_size = max(12, int(font_size * scale))
-            try:
-                from gemia.video.fonts import resolve_font_path
-                _font_cfg = {"family": "Hiragino Sans GB", "path": "/System/Library/Fonts/Hiragino Sans GB.ttc", "weight": 600}
-                _resolved = resolve_font_path(_font_cfg)
-                font = ImageFont.truetype(_resolved or "/System/Library/Fonts/Helvetica.ttc", resolved_size)
-            except Exception:
-                try:
-                    font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", resolved_size)
-                except Exception:
-                    font = ImageFont.load_default()
+            from gemia.video.fonts import load_pillow_font
+            font = load_pillow_font(
+                resolved_size,
+                font_config={"family": "Microsoft YaHei", "weight": 600},
+                bold=True,
+            )
             text = str(active["word"])
             bbox = draw.textbbox((0, 0), text, font=font, stroke_width=3)
             text_w = bbox[2] - bbox[0]

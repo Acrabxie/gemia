@@ -36,3 +36,4 @@ finally {
 }
 
 Write-Host "Windows runtime checks passed; loopback port $Port is available." -ForegroundColor Green
+Write-Host "Secure arbitrary-code sandbox: unavailable on native Windows; build/run_shell stay locked unless the computer owner explicitly disables Sandbox in Lumeri." -ForegroundColor Yellow

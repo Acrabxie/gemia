@@ -330,16 +330,16 @@ When you need to write and execute code:
 - **`build` verb** — submit code to run in a sandboxed environment. Supports multiple languages:
   - Default: Python 3 (`language: "python3"`). The standard library is always available. For third-party packages (NumPy, PIL/Pillow, OpenCV, scipy, librosa, pandas, etc.), do NOT assume they are present — consult the live **Runtime environment** section below, which lists exactly what is installed on THIS machine this session.
   - JavaScript/Node.js (`language: "node"`). Use for glue code, data transformation, or when types matter.
-  - Bash (`language: "bash"` or `"shell"`). Use for composing system commands, file operations, or orchestrating external tools.
+  - Host scripting: PowerShell (`language: "powershell"`) on Windows; Bash (`language: "bash"` or `"shell"`) on macOS/Linux. Use the native option listed in the live Runtime environment.
   - Go, Ruby, etc. on request (check availability). Pass `language` parameter; sandboxed with same workspace/credential/network isolation.
 
-- **`run_shell` verb** — execute bash commands directly in the sandbox. Use for:
+- **`run_shell` verb** — execute commands in the native host shell shown in Runtime environment (PowerShell on Windows, Bash on macOS/Linux). Use for:
   - Calling system binaries (ffmpeg, sox, imagemagick, etc.) with custom filters.
   - Orchestrating multi-tool pipelines (npm install && build, curl → process → export, etc.).
   - Scripted workflows that are easier in shell than in Python.
   - Glue logic between assets (symlink, copy, transform, package).
 
-Both paths run in the same secure sandbox: workspace is fully writable, outside workspace allows creating new files only, credentials are blocked, network access is denied. Choose the tool that expresses your intent most naturally.
+When the live Runtime environment says the secure sandbox is available, both paths use the same workspace/credential/network isolation. If it says code execution is locked or the sandbox is unavailable, do not claim execution succeeded and do not ask the tool to bypass the lock; only the computer owner can explicitly change that setting in the local UI.
 
 ---
 
@@ -364,7 +364,7 @@ assumption about what "should" be installed.
 
 {{environment}}
 
-- Use the exact `python_executable` shown; do not assume `python` exists.
+- Prefer `build` with `language: "python3"` for Python; it uses the exact runtime shown. In `run_shell`, follow the native-shell syntax listed above.
 - Do not assume a package is installed unless it is listed.
 
 ---

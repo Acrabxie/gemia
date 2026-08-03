@@ -21,6 +21,8 @@
   "use strict";
 
   const $ = (sel) => document.querySelector(sel);
+  const isApplePlatform = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || "");
+  const shortcutPrefix = isApplePlatform ? "⌘" : "Ctrl+";
 
   // Inline the icon sprite once so every <use href="#i-*"> resolves, including
   // ones rendered before the fetch lands (SVG <use> re-resolves on DOM insert).
@@ -47,6 +49,7 @@
     libraryAnnotateBtn: $("#library-annotate-btn"),
     uploadInput: $("#upload-input"),
     uploadBtn: $("#upload-btn"),
+    uploadShortcutLabel: $("#upload-shortcut-label"),
     promptInput: $("#prompt-input"),
     sendBtn: $("#send-btn"),
     sandboxBtn: $("#sandbox-toggle-btn"),
@@ -55,6 +58,7 @@
     askDock: $("#ask-dock"),
     slashMenu: $("#slash-menu"),
   };
+  if (els.uploadShortcutLabel) els.uploadShortcutLabel.textContent = `${shortcutPrefix}U`;
 
   /** @typedef {{ asset_id: string, kind: string, summary: string, source: "user"|"tool", final?: boolean }} AssetEntry */
 
@@ -1311,7 +1315,7 @@
     panel.innerHTML = `
       <div class="ptl-toolbar">
         <div class="ptl-tgroup">
-          <button class="ptl-btn ptl-ico-btn pt-edit-btn" id="ptl-undo" title="撤销 (⌘Z)"><svg viewBox="0 0 16 16"><path d="M6.5 4 3.5 7l3 3"/><path d="M3.5 7H10a3.5 3.5 0 0 1 0 7H7.5"/></svg></button>
+          <button class="ptl-btn ptl-ico-btn pt-edit-btn" id="ptl-undo" title="撤销 (${shortcutPrefix}Z)"><svg viewBox="0 0 16 16"><path d="M6.5 4 3.5 7l3 3"/><path d="M3.5 7H10a3.5 3.5 0 0 1 0 7H7.5"/></svg></button>
           <button class="ptl-btn ptl-ico-btn pt-edit-btn" id="ptl-redo" title="重做"><svg viewBox="0 0 16 16"><path d="M9.5 4l3 3-3 3"/><path d="M12.5 7H6a3.5 3.5 0 0 0 0 7h2.5"/></svg></button>
         </div>
         <div class="ptl-sep"></div>
@@ -2143,6 +2147,12 @@
   });
 
   els.uploadBtn.addEventListener("click", () => els.uploadInput.click());
+  document.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && (e.key === "u" || e.key === "U")) {
+      e.preventDefault();
+      if (!els.uploadBtn.disabled) els.uploadBtn.click();
+    }
+  });
   els.uploadInput.addEventListener("change", () => {
     const file = els.uploadInput.files?.[0];
     if (!file) return;
@@ -3184,26 +3194,37 @@
   });
 
   // ── sandbox toggle ──────────────────────────────────────────────────
-  function renderSandbox(disabled) {
+  let sandboxStatus = { sandbox_disabled: false, sandbox_available: true, code_execution_available: true };
+  function renderSandbox(status) {
+    sandboxStatus = { ...sandboxStatus, ...(status || {}) };
+    const disabled = !!sandboxStatus.sandbox_disabled;
+    const unavailable = !sandboxStatus.sandbox_available && !disabled;
     els.sandboxBtn.classList.toggle("off", disabled);
-    els.sandboxBtn.textContent = disabled ? "沙盒关闭" : "沙盒";
-    els.sandboxBtn.title = disabled ? "沙盒已关闭，代码可访问完整系统（点击重新开启）" : "沙盒已开启（点击关闭）";
+    els.sandboxBtn.textContent = disabled ? "沙盒关闭" : (unavailable ? "代码执行锁定" : "沙盒");
+    els.sandboxBtn.title = disabled
+      ? "沙盒已关闭，模型代码可访问完整电脑（点击重新开启）"
+      : (unavailable
+        ? "此系统没有可用的原生代码沙盒；代码执行默认锁定。点击后可明确允许无沙盒执行。"
+        : "沙盒已开启（点击关闭）");
   }
   async function syncSandbox() {
     try {
       const r = await fetch("/settings/sandbox");
-      if (r.ok) renderSandbox(!!(await r.json()).sandbox_disabled);
+      if (r.ok) renderSandbox(await r.json());
     } catch {}
   }
   els.sandboxBtn.addEventListener("click", async () => {
     const next = !els.sandboxBtn.classList.contains("off");
+    if (next && !window.confirm("关闭沙盒会允许模型生成的代码访问完整电脑。只应在你信任当前任务时继续。确定关闭吗？")) {
+      return;
+    }
     try {
       const r = await fetch("/settings/sandbox", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ disabled: next }),
       });
-      if (r.ok) renderSandbox(!!(await r.json()).sandbox_disabled);
+      if (r.ok) renderSandbox(await r.json());
     } catch (err) {
       state.errors.push(`sandbox toggle failed: ${err.message}`);
       render();

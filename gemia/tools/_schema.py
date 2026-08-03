@@ -857,11 +857,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _tool(
         "run_shell",
-        "Execute a bash command in an isolated sandbox. Workspace directory is fully readable/writable. Outside workspace: files can only be created, not modified/deleted. Credentials (~/.ssh, ~/.config/gcloud, ~/.gemia/config.json) are not readable. Network access denied. Wraps command with sandbox-exec for M1 isolation. Returns exit_code, stdout_tail, stderr_tail, timed_out, sandbox_enforced, workspace_dir.",
+        "Execute a command in the native host shell (PowerShell on Windows, Bash on macOS/Linux). Uses the native secure sandbox when available and otherwise fails closed unless the computer owner explicitly disabled Sandbox. Returns exit_code, stdout_tail, stderr_tail, timed_out, sandbox_enforced, shell, workspace_dir.",
         {
             "command": {
                 "type": "string",
-                "description": "Bash command string to execute.",
+                "description": "Native host-shell command: PowerShell syntax on Windows, Bash syntax on macOS/Linux.",
             },
             "timeout_sec": {
                 "type": "number",
@@ -946,7 +946,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _tool(
         "build",
-        "Async submit code to a sandboxed subprocess. Supports Python (default), Node.js, Bash, Go, Ruby, Rust. Executes immediately in a new process group with workspace full r/w and network denied. Returns job_id immediately; use check_job or wait_for_job to poll status. Perfect for long-running code, iteration loops (see→modify→rerun), and skill development.",
+        "Async submit code to a local subprocess. Supports Python (default), Node.js, PowerShell, Bash, Go, Ruby, Rust. Uses the native secure sandbox when available and otherwise fails closed unless the computer owner explicitly disabled Sandbox. Returns job_id immediately; use check_job or wait_for_job to poll status.",
         {
             "code": {
                 "type": "string",
@@ -954,8 +954,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
             "language": {
                 "type": "string",
-                "enum": ["python3", "node", "bash", "go", "ruby", "rust"],
-                "description": "Programming language (default 'python3'). Choose based on your intent: python3 for data/media work, node for glue code with types, bash for system commands and pipelines.",
+                "enum": ["python3", "node", "powershell", "bash", "go", "ruby", "rust"],
+                "description": "Programming language (default 'python3'). Use powershell for Windows system scripting and bash for macOS/Linux system scripting.",
             },
             "filename": {
                 "type": "string",

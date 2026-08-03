@@ -1197,16 +1197,13 @@ def image_watermark_text(
         font_size: Font size in pixels. Default 24.
         color: RGB text color. Default white.
     """
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw
+    from gemia.video.fonts import load_pillow_font
     import os
     img = Image.open(input_path).convert("RGBA")
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    # Try to use a default font
-    try:
-        font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", font_size)
-    except Exception:
-        font = ImageFont.load_default()
+    font = load_pillow_font(font_size)
     bbox = draw.textbbox((0, 0), text, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     w, h = img.size
@@ -1930,14 +1927,12 @@ def image_text_overlay(
         font_size: Font size in points. Default 20.
         color: RGB color tuple. Default white.
     """
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw
+    from gemia.video.fonts import load_pillow_font
 
     img = Image.open(input_path).convert("RGB")
     draw = ImageDraw.Draw(img)
-    try:
-        font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", font_size)
-    except Exception:
-        font = ImageFont.load_default()
+    font = load_pillow_font(font_size)
     draw.text((x, y), text, fill=color, font=font)
     img.save(output_path)
 
