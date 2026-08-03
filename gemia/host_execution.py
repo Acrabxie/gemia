@@ -134,7 +134,7 @@ def terminate_process_tree(proc: subprocess.Popen[Any]) -> None:
 def sandbox_unavailable_message() -> str:
     if IS_WINDOWS:
         return (
-            "secure command sandbox unavailable on native Windows; refusing to run code. "
+            "secure command sandbox enforcement unavailable on native Windows; refusing to run code. "
             "The computer owner can explicitly disable Sandbox in the local Lumeri menu "
             "to allow unsandboxed PowerShell execution."
         )

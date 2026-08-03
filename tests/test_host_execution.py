@@ -52,6 +52,14 @@ def test_python_interpreter_uses_current_runtime(tmp_path: Path) -> None:
     assert runtime == "python"
 
 
+def test_sandbox_unavailable_message_keeps_enforcement_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(host_execution, "IS_WINDOWS", True)
+
+    assert "sandbox enforcement" in host_execution.sandbox_unavailable_message()
+
+
 def test_raw_shell_executes_on_current_host(tmp_path: Path, raw_execution) -> None:
     command = 'Write-Output "windows-shell-ok"' if os.name == "nt" else "printf 'posix-shell-ok\\n'"
 
