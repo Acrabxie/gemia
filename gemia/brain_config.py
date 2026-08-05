@@ -15,6 +15,15 @@ from typing import Any
 # 常见供应商目录：前端据此渲染卡片；custom = OpenAI 兼容自定义 base_url。
 PROVIDERS: list[dict[str, Any]] = [
     {
+        "id": "codex_subscription",
+        "label": "OpenAI 订阅（本机 Codex）",
+        "hint": "使用这台电脑自己的 ChatGPT/Codex 登录态；无需 API Key，不共享账号",
+        "fields": ["model"],
+        "key_field": None,
+        "recommended_model": "",
+        "model_presets": ["gpt-5.6-terra", "gpt-5.6-sol"],
+    },
+    {
         "id": "vertex",
         "label": "Google Vertex AI",
         "hint": "用 GCP ADC 鉴权（gcloud auth）+ 项目/区域；Gemini 与 Vertex 版 Claude 均走此路",
@@ -114,6 +123,8 @@ def model_matches_provider(provider: str, model: str) -> bool:
         return value.startswith("claude-")
     if provider == "openai":
         return "/" not in value and not value.startswith(("gemini-", "claude-"))
+    if provider == "codex_subscription":
+        return "/" not in value
     if provider == "openrouter":
         return "/" in value
     return True
@@ -209,6 +220,11 @@ def list_models(provider: str, config: dict, proxy: str | None = None) -> dict[s
         transport_kw["proxy"] = proxy
 
     try:
+        if provider == "codex_subscription":
+            p = provider_spec(provider)
+            presets = p["model_presets"] if p else []
+            return {"ok": True, "models": [{"id": m} for m in presets], "from_presets": True}
+
         if provider in ("openai", "custom"):
             key = config.get("openai_api_key") or os.environ.get("OPENAI_API_KEY") or ""
             base = config.get("lumeri_openai_base_url") or os.environ.get("LUMERI_OPENAI_BASE_URL") or "https://api.openai.com/v1/chat/completions"

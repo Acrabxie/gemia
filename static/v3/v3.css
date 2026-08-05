@@ -2774,6 +2774,15 @@ input::placeholder, textarea::placeholder { color: var(--m3-on-surface-variant);
 .setup-dialog h2 { margin: 0; font-size: 20px; font-weight: 400; color: var(--m3-on-surface); }
 .setup-sub { margin: 6px 0 16px; font-size: 13px; color: var(--m3-on-surface-variant); line-height: 1.5; }
 .setup-providers { display: flex; flex-direction: column; gap: 4px; margin: 16px 0; }
+.codex-subscription-box { margin: 2px 0 14px; padding: 14px; border: 1px solid var(--line, #303238); border-radius: 12px; background: rgba(255,255,255,.025); }
+.codex-subscription-title { font-weight: 650; margin-bottom: 6px; }
+.codex-subscription-box p { margin: 0 0 10px; color: var(--muted, #999); line-height: 1.45; }
+.codex-subscription-status { padding: 9px 10px; border-radius: 8px; background: rgba(255,255,255,.04); }
+.codex-subscription-status.ok { color: #72d7a2; background: rgba(62,180,119,.1); }
+.codex-subscription-status.bad { color: #f0a0a0; background: rgba(210,76,76,.1); }
+.codex-subscription-actions { display: flex; gap: 8px; margin-top: 10px; }
+.codex-subscription-install { margin-top: 10px; color: var(--muted, #999); }
+.codex-subscription-install code { display: block; margin-top: 8px; padding: 9px 10px; border-radius: 8px; user-select: text; background: rgba(0,0,0,.24); line-height: 1.6; }
 .setup-pcard {
   display: flex; align-items: center; gap: 10px; text-align: left;
   padding: 10px 13px; background: var(--m3-surface-highest); color: var(--m3-on-surface);

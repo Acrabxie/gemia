@@ -460,6 +460,16 @@ class GeminiClientV3:
             self.api_url = "https://api.anthropic.com/v1/messages"
             self.model = model_override or _DEFAULT_CLAUDE_MODEL
 
+        elif self.provider == "codex_subscription":
+            self.api_key = ""
+            self.api_url = "local://codex"
+            persisted_codex_model = (
+                _read_config_key("lumeri_v3_model")
+                if _read_config_key("lumeri_v3_provider") == "codex_subscription"
+                else ""
+            )
+            self.model = model or os.environ.get("LUMERI_V3_MODEL") or persisted_codex_model or ""
+
         elif self.provider == "openai":
             self.api_key = (
                 os.environ.get("OPENAI_API_KEY") or _read_config_key("openai_api_key")
@@ -537,6 +547,18 @@ class GeminiClientV3:
         - ``{"kind": "finish", "reason": str}``
         - ``{"kind": "error", "error": str}``
         """
+        if self.provider == "codex_subscription":
+            from gemia.codex_subscription import CodexSubscriptionClient
+
+            client = CodexSubscriptionClient(
+                model=self.model,
+                reasoning_effort=self.reasoning_effort or "medium",
+                timeout=self.timeout,
+            )
+            async for event in client.stream_turn(messages, tools=tools, temperature=temperature):
+                yield event
+            return
+
         # None (the loop's default path) -> low orchestration temperature;
         # an explicit value (a future creative-generation caller) overrides.
         temp = (

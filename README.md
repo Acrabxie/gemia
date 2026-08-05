@@ -89,9 +89,29 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 
 The public build has no account system: no registration, login, account
-switching, hosted email, billing, or subscriptions. It always opens one local
-workspace stored on the current computer. Model-provider configuration remains
-local to that computer and is never committed to Git.
+switching, hosted email, or Lumeri billing. It always opens one local workspace
+stored on the current computer. Model-provider configuration remains local to
+that computer and is never committed to Git.
+
+To use an existing ChatGPT plan instead of an API key, choose **OpenAI 订阅
+（本机 Codex）** in `/setup`. This option invokes the Codex CLI on the same
+computer and only accepts a local **Sign in with ChatGPT** session. Lumeri never
+reads, copies, or stores Codex login credentials, and every person must sign in
+with their own OpenAI account.
+
+On Windows, install and authenticate the Codex CLI before selecting that option:
+
+```powershell
+winget install OpenJS.NodeJS.LTS
+npm install -g @openai/codex
+codex login
+codex login status
+```
+
+If Node.js was just installed, reopen PowerShell before running `npm`. The
+provider setup panel can open the `codex login` window and refresh the local
+status. API-key authentication shown by `codex login status` does not count as
+subscription access; complete **Sign in with ChatGPT** instead.
 
 Media editing, rendering, export, local voiceover, Windows fonts, Blender
 discovery, and OpenTimelineIO bundles run natively on Windows. Arbitrary

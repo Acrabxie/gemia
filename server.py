@@ -302,6 +302,12 @@ class _Handler(BaseHTTPRequestHandler):
             _json_response(self, 200, {"has_key": _has_valid_key(), "brain": status})
             return
 
+        if path == "/config/codex-subscription":
+            from gemia.codex_subscription import subscription_status
+
+            _json_response(self, 200, subscription_status())
+            return
+
         # ── Model selection ──
         # The v3 command palette fetches this route directly.  It is local-only
         # state and contains no provider secrets.
@@ -587,6 +593,13 @@ class _Handler(BaseHTTPRequestHandler):
                 _json_response(self, 200, res)
             except Exception as exc:
                 _json_response(self, 400, {"error": str(exc)})
+            return
+
+        if path == "/config/codex-subscription/login":
+            from gemia.codex_subscription import launch_login
+
+            result = launch_login()
+            _json_response(self, 200 if result.get("ok") else 400, result)
             return
 
         # ── Model selection ──

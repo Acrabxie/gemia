@@ -5289,6 +5289,60 @@
       box.innerHTML = "";
       st.scannedModels = [];
 
+      if (providerId === "codex_subscription") {
+        const subscription = document.createElement("div");
+        subscription.className = "codex-subscription-box";
+        subscription.innerHTML = `
+          <div class="codex-subscription-title">使用这台电脑的 ChatGPT 订阅</div>
+          <p>每位使用者登录自己的 Codex；Lumeri 不读取或保存 OpenAI 登录凭证。</p>
+          <div class="codex-subscription-status" id="codex-subscription-status">正在检测本机 Codex…</div>
+          <div class="codex-subscription-actions">
+            <button type="button" class="setup-test" id="codex-subscription-login">打开登录窗口</button>
+            <button type="button" class="setup-test" id="codex-subscription-refresh">刷新状态</button>
+          </div>
+          <details class="codex-subscription-install">
+            <summary>没有 Codex？查看 Windows 安装命令</summary>
+            <code>winget install OpenJS.NodeJS.LTS<br>npm install -g @openai/codex<br>codex login</code>
+          </details>`;
+        box.appendChild(subscription);
+
+        const statusEl = subscription.querySelector("#codex-subscription-status");
+        const loginBtn = subscription.querySelector("#codex-subscription-login");
+        async function refreshCodexStatus() {
+          statusEl.textContent = "正在检测本机 Codex…";
+          statusEl.className = "codex-subscription-status";
+          try {
+            const r = await apiFetch("/config/codex-subscription");
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+            statusEl.textContent = d.message || "无法识别 Codex 状态";
+            statusEl.classList.toggle("ok", Boolean(d.authenticated));
+            statusEl.classList.toggle("bad", !d.authenticated);
+            loginBtn.hidden = !d.installed || Boolean(d.authenticated);
+          } catch (e) {
+            statusEl.textContent = `状态检测失败：${e.message}`;
+            statusEl.classList.add("bad");
+          }
+        }
+        loginBtn.addEventListener("click", async () => {
+          loginBtn.disabled = true;
+          try {
+            const r = await apiFetch("/config/codex-subscription/login", { method: "POST" });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+            statusEl.textContent = "登录窗口已打开；完成浏览器登录后点击“刷新状态”";
+            statusEl.className = "codex-subscription-status";
+          } catch (e) {
+            statusEl.textContent = `无法打开登录窗口：${e.message}`;
+            statusEl.className = "codex-subscription-status bad";
+          } finally {
+            loginBtn.disabled = false;
+          }
+        });
+        subscription.querySelector("#codex-subscription-refresh").addEventListener("click", refreshCodexStatus);
+        refreshCodexStatus();
+      }
+
       if (providerId === "custom") {
         const meta = FIELD_META.profile_name;
         const label = document.createElement("label");
@@ -5373,6 +5427,7 @@
       const body = { provider: providerId, profile_id: st.sel };
       if (providerId === "custom") body.profile_name = st.vals.profile_name || "自定义";
       if (st.vals.model) body.model = st.vals.model;
+      else if (providerId === "codex_subscription") body.model = "";
       if (st.vals.effort) body.effort = st.vals.effort;
       if (p && p.fields.includes("base_url")) body.base_url = st.vals.base_url || "";
       if (st.vals.vertex_project) body.vertex_project = st.vals.vertex_project;
