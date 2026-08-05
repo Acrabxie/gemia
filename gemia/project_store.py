@@ -14,8 +14,8 @@ and ``lumerai.patches``.
 from __future__ import annotations
 
 import copy
-import fcntl
 import json
+import os
 import re
 import threading
 from contextlib import contextmanager
@@ -25,6 +25,11 @@ from typing import Any, Callable, Iterator
 
 from gemia.project_model import empty_project, normalize_project
 from lumerai.patches import apply_timeline_patches
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
 _PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-]{0,63}$")
@@ -69,11 +74,23 @@ class ProjectStore:
             lock_path = self._process_lock_path(project_id)
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             with lock_path.open("a+b") as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                if os.name == "nt":
+                    lock_file.seek(0, 2)
+                    if lock_file.tell() == 0:
+                        lock_file.write(b"\0")
+                        lock_file.flush()
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
                 try:
                     yield
                 finally:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                    if os.name == "nt":
+                        lock_file.seek(0)
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     # ── path helpers ────────────────────────────────────────────────
     def project_dir(self, project_id: str) -> Path:
