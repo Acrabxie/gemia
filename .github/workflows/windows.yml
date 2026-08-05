@@ -125,8 +125,11 @@ jobs:
               throw "Microsoft Edge failed while rendering the Windows workspace."
             }
             $renderedText = Get-Content $edgeDom -Raw -ErrorAction SilentlyContinue
-            if ($renderedText -notmatch "代码执行锁定" -or $renderedText -notmatch "Ctrl\+U") {
-              throw "The rendered Windows workspace did not expose its locked execution state and Windows shortcut labels."
+            $workspaceMarkers = @("预览", "大纲", "后台任务", "时间线", "Projects", "Ctrl\+Z")
+            foreach ($marker in $workspaceMarkers) {
+              if ($renderedText -notmatch $marker) {
+                throw "The rendered Windows workspace is missing its current '$marker' surface."
+              }
             }
             if ($renderedText -match "登录|注册|退出账号|账户中心") {
               throw "The rendered public workspace still exposes an account surface."
