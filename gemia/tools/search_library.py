@@ -2,7 +2,7 @@
 
 This is intentionally a real, non-throwing tool. The model may call it as a
 cheap preflight; an empty library should return an empty result set, not abort a
-turn. Results from the local media library are registered into the session
+turn. Results from the account media library are registered into the session
 AssetRegistry so follow-up creative tools can use the returned session asset_id.
 """
 from __future__ import annotations
@@ -13,8 +13,8 @@ from typing import Any
 
 from gemia.tools._context import ToolContext
 from gemia.tools._library_session import (
+    account_id_for as _account_id,
     ensure_session_asset as _session_id_for_library_asset,
-    workspace_id_for as _workspace_id,
 )
 
 _VALID_KINDS = {"video", "image", "audio", "any"}
@@ -89,15 +89,15 @@ def _library_matches(
     kind: str,
     limit: int,
 ) -> list[dict[str, Any]]:
-    workspace_id = _workspace_id(ctx)
-    if not workspace_id:
+    account_id = _account_id(ctx)
+    if not account_id:
         return []
 
     try:
         from gemia.media_library import list_assets
 
         assets = list_assets(
-            workspace_id,
+            account_id,
             kind=None if kind == "any" else kind,
             q=query,
             limit=limit,

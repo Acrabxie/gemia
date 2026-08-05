@@ -66,6 +66,24 @@ def _timeline_duration(project_state: dict[str, Any], render_result: dict[str, A
 
 
 def _sample_times(args: dict[str, Any], *, fps: float, duration: float) -> list[float]:
+    explicit_times = args.get("times_sec")
+    if explicit_times is not None:
+        if not isinstance(explicit_times, list) or not explicit_times:
+            raise ValueError("times_sec must be a non-empty array of seconds")
+        if len(explicit_times) > _MAX_FRAMES:
+            raise ValueError(f"times_sec accepts at most {_MAX_FRAMES} entries")
+        times = [
+            _float_arg({"value": value}, "value")
+            for value in explicit_times
+        ]
+        if any(value is None or value < 0 for value in times):
+            raise ValueError("times_sec entries must be numbers >= 0")
+        return [
+            _clamp_time(float(value), duration, fps)
+            for value in times
+            if value is not None
+        ]
+
     max_frames = _int_arg(args, "max_frames")
     if max_frames is None:
         max_frames = 1
@@ -75,17 +93,6 @@ def _sample_times(args: dict[str, Any], *, fps: float, duration: float) -> list[
     time_sec = _float_arg(args, "time_sec")
     if time_sec is None:
         time_sec = _float_arg(args, "time")
-    if frame is not None and time_sec is not None:
-        raise ValueError("pass either frame or time_sec/time, not both")
-    if frame is not None:
-        if frame < 0:
-            raise ValueError(f"frame must be >= 0, got {frame}")
-        return [_clamp_time(frame / fps, duration, fps)]
-    if time_sec is not None:
-        if time_sec < 0:
-            raise ValueError(f"time_sec must be >= 0, got {time_sec}")
-        return [_clamp_time(time_sec, duration, fps)]
-
     start_frame = _int_arg(args, "start_frame")
     end_frame = _int_arg(args, "end_frame")
     start_sec = _float_arg(args, "start_sec")
@@ -96,10 +103,20 @@ def _sample_times(args: dict[str, Any], *, fps: float, duration: float) -> list[
         end_sec = _float_arg(args, "end")
     frame_range = start_frame is not None or end_frame is not None
     second_range = start_sec is not None or end_sec is not None
-    if frame_range and second_range:
-        raise ValueError("pass a frame range or a seconds range, not both")
 
-    if frame_range:
+    # Older tool schemas exposed every alias and mutually-exclusive locator at
+    # once. Some model transports materialize all optional fields, so one
+    # semantically coherent request arrives with seconds, frames, and ranges
+    # simultaneously. Prefer the highest-information locator instead of
+    # rendering a proxy and then rejecting harmless redundancy.
+    if second_range:
+        start_sec = float(start_sec or 0.0)
+        end_sec = duration if end_sec is None else float(end_sec)
+        if start_sec < 0 or end_sec < 0:
+            raise ValueError("start_sec/end_sec must be >= 0")
+        if end_sec <= start_sec:
+            raise ValueError("end_sec/end must be greater than start_sec/start")
+    elif frame_range:
         start_sec = float(start_frame or 0) / fps
         if end_frame is None:
             end_sec = duration
@@ -107,13 +124,14 @@ def _sample_times(args: dict[str, Any], *, fps: float, duration: float) -> list[
             if end_frame <= (start_frame or 0):
                 raise ValueError("end_frame must be greater than start_frame")
             end_sec = float(end_frame) / fps
-    elif second_range:
-        start_sec = float(start_sec or 0.0)
-        end_sec = duration if end_sec is None else float(end_sec)
-        if start_sec < 0 or end_sec < 0:
-            raise ValueError("start_sec/end_sec must be >= 0")
-        if end_sec <= start_sec:
-            raise ValueError("end_sec/end must be greater than start_sec/start")
+    elif time_sec is not None:
+        if time_sec < 0:
+            raise ValueError(f"time_sec must be >= 0, got {time_sec}")
+        return [_clamp_time(time_sec, duration, fps)]
+    elif frame is not None:
+        if frame < 0:
+            raise ValueError(f"frame must be >= 0, got {frame}")
+        return [_clamp_time(frame / fps, duration, fps)]
     else:
         return [_clamp_time(0.0, duration, fps)]
 
@@ -184,7 +202,20 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         output_root=ctx.output_dir,
         quality="draft",
         label=label,
+        verify_decode=False,
     )
+    store = ctx.extra.get("production_store")
+    durable_project_id = str(ctx.extra.get("project_id") or "")
+    if store is not None and durable_project_id:
+        from gemia.render_receipt import bind_render_receipt_revision
+
+        bind_render_receipt_revision(
+            render_result["render_receipt"],
+            project_revision=int(
+                store.load_project(durable_project_id).get("revision") or 0
+            ),
+            receipt_path=render_result.get("receipt_path"),
+        )
     preview_path_raw = render_result.get("export_path")
     if not preview_path_raw:
         raise RuntimeError("timeline inspection render did not return an export_path")
@@ -198,6 +229,13 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         kind="video",
         path=preview_path,
         summary=f"timeline inspection composited draft ({label}, seq={render_result.get('patch_seq')})",
+        source={
+            "kind": "derived_inspection_preview",
+            "project_revision": (render_result.get("render_receipt") or {}).get("project_revision"),
+            "graph_hash": render_result.get("graph_hash"),
+            "render_receipt": render_result.get("render_receipt"),
+        },
+        license={"basis": "derived_from_project_assets"},
     )
 
     frame_asset_ids: list[str] = []
@@ -214,6 +252,13 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
             path=frame_path,
             summary=f"composited timeline frame {frame_no} at {at_sec:.3f}s",
             lineage=[preview_asset_id],
+            source={
+                "kind": "derived_inspection_frame",
+                "project_revision": (render_result.get("render_receipt") or {}).get("project_revision"),
+                "graph_hash": render_result.get("graph_hash"),
+                "sample_time_sec": round(at_sec, 6),
+            },
+            license={"basis": "derived_from_project_assets"},
         )
         frame_asset_ids.append(frame_asset_id)
         frame_paths.append(frame_path)
@@ -231,6 +276,12 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
                 path=contact_sheet_path,
                 summary=f"contact sheet for {len(frame_paths)} composited timeline frames",
                 lineage=frame_asset_ids,
+                source={
+                    "kind": "derived_inspection_contact_sheet",
+                    "project_revision": (render_result.get("render_receipt") or {}).get("project_revision"),
+                    "graph_hash": render_result.get("graph_hash"),
+                },
+                license={"basis": "derived_from_project_assets"},
             )
             thumbnail_path = contact_sheet_path
         else:
@@ -249,6 +300,12 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         "height": resolution.get("height"),
         "thumbnail_for_next_message": bool(thumbnail_path),
         "thumbnail_path": str(thumbnail_path) if thumbnail_path else None,
+        "graph_hash": render_result.get("graph_hash"),
+        "source_manifest_hash": render_result.get("source_manifest_hash"),
+        "render_receipt": render_result.get("render_receipt"),
+        "machine_status": render_result.get("machine_status"),
+        "machine_blockers": render_result.get("machine_blockers") or [],
+        "dropped_fields": render_result.get("dropped_fields") or [],
         "note": "composited timeline frames from an overlay-aware draft render; inspect these before further visual timeline edits",
     }
 

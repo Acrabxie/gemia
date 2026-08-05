@@ -93,7 +93,7 @@
   }
   .activity.on { display: flex; }
   .activity .spinner { width: 15px; height: 15px; border-radius: 50%; border: 2px solid var(--brand-dim); border-top-color: var(--brand); animation: spin .8s linear infinite; flex: 0 0 auto; }
-  .activity .verb { color: var(--brand); font-weight: 600; }
+  .activity .verb { color: var(--muted); font-weight: 500; }
   .activity .msg { color: var(--muted); }
   .activity .bar { flex: 1; height: 5px; border-radius: 3px; background: var(--panel-2); overflow: hidden; min-width: 60px; }
   .activity .bar > i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--brand-dim), var(--brand)); transition: width .2s ease; }
@@ -192,9 +192,11 @@
 
   <div class="toasts" id="toasts"></div>
 
+<script src="/v3/api-client.js"></script>
 <script>
 (() => {
   "use strict";
+  const apiFetch = (...args) => window.LumeriApi["fetch"](...args);
   const $ = (id) => document.getElementById(id);
   const params = new URLSearchParams(location.search);
   const sessionId = params.get("session") || params.get("s") || "";
@@ -206,7 +208,7 @@
     lastEventId: null,
     es: null,
     reconnectTimer: null,
-    running: new Map(),  // call_id -> verb
+    running: new Map(),  // call_id -> safe, model-authored activity text
     pendingAsk: null,    // {question_id, question} while elicit awaits
   };
 
@@ -308,6 +310,17 @@
   }
 
   // ── activity overlay ───────────────────────────────────────────────
+  const ACTIVITY_TEXT_MAX_CHARS = 72;
+  const ACTIVITY_TEXT_UNSAFE_RE = /[`{}[\]<>\\]|[=;]|(?:https?|file):\/\/|(?:^|\s)(?:\/|~\/|[A-Za-z]:[\\/])|\b[\w.-]+\.(?:py|js|jsx|ts|tsx|json|md|yaml|yml|sh|bash|zsh|html|css|sql)\b|\b[a-z][a-z0-9]*_[a-z0-9_]+\b|\b(?:api[_-]?key|token|password|secret|system[_ -]?prompt|reasoning|thought[_ -]?signature|asset[_ -]?id)\b|(?:代码|路径|工具名?|参数|命令|思维链|推理|内部)/i;
+  function safeActivityText(value) {
+    const text = String(value || "").trim().replace(/\s+/g, " ");
+    if (!text || text.length > ACTIVITY_TEXT_MAX_CHARS || ACTIVITY_TEXT_UNSAFE_RE.test(text)) return "";
+    return text;
+  }
+  function runningActivity() {
+    const activityText = state.running.values().next().value;
+    return activityText || "正在执行";
+  }
   function setActivity(on, verb, msg, percent) {
     const a = $("activity");
     a.classList.toggle("on", !!on);
@@ -332,36 +345,50 @@
 
   // ── SSE handlers (mirror static/v3/v3.js) ──────────────────────────
   const handlers = {
-    turn_start: () => { setActivity(true, "thinking", "", null); },
-    model_text_delta: () => {},
-    model_tool_call_start: (ev) => {
-      state.running.set(ev.call_id, ev.tool_name || "tool");
-      setActivity(true, ev.tool_name || "working", "", null);
+    turn_start: () => {
+      state.running.clear();
+      setActivity(true, "正在理解你的请求", "", null);
     },
-    model_tool_call_ready: () => {},
+    model_text_delta: () => {},
+    model_stream_reset: () => {},
+    model_tool_call_start: (ev) => {
+      state.running.set(ev.call_id, "正在执行");
+      setActivity(true, "正在执行", "", null);
+    },
+    model_tool_call_ready: (ev) => {
+      if (!state.running.has(ev.call_id)) return;
+      const activityText = safeActivityText(ev.activity_text) || "正在执行";
+      state.running.set(ev.call_id, activityText);
+      setActivity(true, activityText, "", null);
+    },
     tool_exec_start: (ev) => {
-      setActivity(true, state.running.get(ev.call_id) || "working", "running…", null);
+      if (ev.agent_id) return;
+      setActivity(true, state.running.get(ev.call_id) || "正在执行", "", null);
     },
     tool_exec_progress: (ev) => {
-      setActivity(true, state.running.get(ev.call_id) || "working", ev.message || "", typeof ev.percent === "number" ? ev.percent : null);
+      if (ev.agent_id) return;
+      setActivity(true, state.running.get(ev.call_id) || "正在执行", "", typeof ev.percent === "number" ? ev.percent : null);
     },
     tool_exec_result: (ev) => {
+      if (ev.agent_id) return;
       const r = ev.result || {};
       if (r.asset_id) addAsset(r.asset_id, r.kind, r.summary);
       state.running.delete(ev.call_id);
-      setActivity(state.running.size > 0, "working", "", null);
+      setActivity(state.running.size > 0, runningActivity(), "", null);
     },
     tool_exec_error: (ev) => {
+      if (ev.agent_id) return;
       state.running.delete(ev.call_id);
-      toast((ev.tool_name ? ev.tool_name + ": " : "") + (ev.error || "tool failed"), "err");
-      setActivity(state.running.size > 0, "working", "", null);
+      toast("未能完成", "err");
+      setActivity(state.running.size > 0, runningActivity(), "", null);
     },
     budget_gate: (ev) => {
-      toast("budget gate: " + (ev.reason || "blocked"), "warn");
+      toast("当前步骤暂时无法继续", "warn");
     },
     ask_question: (ev) => {
       const q = ev.question || {};
       state.pendingAsk = { question_id: q.question_id, question: q };
+      setActivity(true, "等待你的选择", "", null);
       _renderPreviewAsk();
     },
     timeline_op: () => {},
@@ -381,7 +408,8 @@
     },
     turn_error: (ev) => {
       _dismissPreviewAsk();
-      toast("turn error: " + (ev.error || "unknown"), "err");
+      const errorReason = String(ev.error || ev.message || "未知错误");
+      toast(`Error: ${errorReason}`, "err");
       setActivity(false);
       idleEmptyIfBlank();
     },
@@ -472,7 +500,7 @@
       btn.disabled = true;
       dock.querySelectorAll(".ask-field-error").forEach(e => { e.textContent = ""; });
       try {
-        const res = await fetch("/sessions/" + encodeURIComponent(sessionId) + "/ask_response", {
+        const res = await apiFetch("/sessions/" + encodeURIComponent(sessionId) + "/ask_response", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ question_id: state.pendingAsk.question_id, answers }),
         });
@@ -499,7 +527,7 @@
   // ── REST + SSE ─────────────────────────────────────────────────────
   async function loadInitial() {
     try {
-      const info = await fetch(`/sessions/${encodeURIComponent(sessionId)}`).then((r) => r.ok ? r.json() : null);
+      const info = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}`).then((r) => r.ok ? r.json() : null);
       if (info && info.latest_event_id != null) state.lastEventId = info.latest_event_id;
       const list = info && Array.isArray(info.assets) ? info.assets : [];
       for (const a of list) {
@@ -534,7 +562,7 @@
 
   async function resync() {
     try {
-      const info = await fetch(`/sessions/${encodeURIComponent(sessionId)}`).then((r) => r.ok ? r.json() : null);
+      const info = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}`).then((r) => r.ok ? r.json() : null);
       if (info && info.latest_event_id != null) state.lastEventId = info.latest_event_id;
       if (info && Array.isArray(info.assets)) {
         for (const a of info.assets) {

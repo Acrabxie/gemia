@@ -3,48 +3,82 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Lumeri</title>
+<title>Lumeri Video</title>
 <link rel="icon" type="image/svg+xml" href="/v3/lumeri-favicon.svg" />
 <link rel="stylesheet" href="/v3/v3.css" />
 </head>
 <body>
-<header class="app-header">
+<header class="app-header" id="app-header">
   <span class="brand">
     <img class="brand-logo" src="/v3/lumeri-mark.svg" alt="Lumeri" width="26" height="19" />
-    <h1>Lumeri</h1>
+    <h1>Lumeri Video</h1>
   </span>
 </header>
 
-<main class="app-main">
-  <!-- LEFT · preview stage: browser-style tab strip, then the active tab's content -->
-  <section class="preview-stage" id="preview-stage" data-tab="preview">
+<main class="app-main" id="app-main">
+  <!-- LEFT · modular editing desk: preview + side modules + shared timeline -->
+  <section class="preview-stage" id="preview-stage">
     <div class="stage-tabbar" id="stage-tabs" role="tablist" aria-label="工作区视图">
       <div class="stage-tab-list" id="stage-tab-list"></div>
       <button type="button" id="stage-add-btn" class="stage-add-btn" title="添加视图" aria-label="添加视图" aria-haspopup="menu" aria-expanded="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-plus"/></svg>
       </button>
       <span class="stage-tabbar-spacer"></span>
-      <button type="button" id="panel-refresh-btn" class="library-small-btn icon-btn" title="刷新" aria-label="刷新" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-refresh"/></svg></button>
+      <button type="button" id="stage-overflow-btn" class="stage-add-btn" title="更多" aria-label="更多操作" aria-haspopup="menu" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-more"/></svg>
+      </button>
       <div id="stage-add-menu" class="stage-add-menu" hidden role="menu" aria-label="添加视图"></div>
+      <div id="stage-overflow-menu" class="stage-add-menu stage-overflow-menu" hidden role="menu" aria-label="更多操作"></div>
     </div>
 
-    <!-- full-area workspace view (outline / tasks / files) shown instead of the preview -->
-    <div class="stage-panel" id="stage-panel" hidden>
-      <div class="panel-tray-body" id="panel-tray-body"></div>
-    </div>
+    <div class="workspace-board" id="workspace-board">
+      <section class="workspace-module workspace-preview-module" data-workspace-module="preview" aria-labelledby="preview-module-title">
+        <div class="workspace-module-head" data-module-drag="preview" draggable="true">
+          <svg class="module-drag-grip" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-grip"/></svg>
+          <span class="workspace-module-title" id="preview-module-title">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="12" rx="2.5"/><path d="M10.4 8.6l3.8 2.4-3.8 2.4z"/></svg>
+            <span class="label">预览</span>
+          </span>
+          <span class="workspace-module-meta">时间线播放</span>
+        </div>
 
-    <div class="empty-state" id="empty-state">
-      <img class="empty-mark" src="/v3/lumeri-mark.svg" alt="Lumeri" width="92" height="66" />
-      <h2 class="empty-title">开始创作</h2>
-    </div>
+        <div class="empty-state" id="empty-state">
+          <img class="empty-mark" src="/v3/lumeri-mark.svg" alt="Lumeri" width="92" height="66" />
+          <h2 class="empty-title">开始创作</h2>
+          <p class="empty-sub">在右侧描述你想要的视频</p>
+        </div>
 
-    <div class="stage-scroll" id="stage-scroll">
-      <div class="asset-grid" id="asset-grid"></div>
-    </div>
+        <div class="stage-scroll" id="stage-scroll">
+          <section class="delivery-review-master" id="delivery-review-master" aria-label="正式审片母版" hidden>
+            <video id="delivery-review-video" controls preload="metadata" playsinline></video>
+          </section>
+          <p class="timeline-preview-empty" id="timeline-preview-empty">时间线暂无可播放内容</p>
+          <div class="asset-grid" id="asset-grid" hidden></div>
+        </div>
+        <div class="module-resize-edge module-resize-edge-x" data-module-resize="preview" data-resize-axis="x" role="separator" tabindex="0" aria-label="调整预览宽度"></div>
+        <div class="module-resize-edge module-resize-edge-y" data-module-resize="preview" data-resize-axis="y" role="separator" tabindex="0" aria-label="调整预览高度"></div>
+        <div class="module-resize-edge module-resize-corner" data-module-resize="preview" data-resize-axis="both" role="separator" tabindex="0" aria-label="同时调整预览宽度和高度"></div>
+      </section>
 
-    <!-- CapCut-style project timeline: collapsible drawer, auto-opens when a timeline exists -->
-    <div class="timeline-drawer" id="timeline-drawer">
-      <section id="project-timeline-panel" class="ptl"></section>
+      <!-- outline / tasks / files / history are rendered here simultaneously -->
+      <aside class="stage-panel" id="stage-panel" aria-label="工作区模块" hidden></aside>
+
+      <!-- Timeline is a first-class workspace module, packed by the same no-overlap algorithm. -->
+      <section class="workspace-module workspace-timeline-module timeline-drawer" id="timeline-drawer" data-workspace-module="timeline" aria-labelledby="timeline-module-title">
+        <div class="workspace-module-head" data-module-drag="timeline" draggable="true">
+          <svg class="module-drag-grip" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-grip"/></svg>
+          <span class="workspace-module-title" id="timeline-module-title">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 10v4M9 7v10M13 9v6M17 6v12M21 10v4"/></svg>
+            <span class="label">时间线</span>
+          </span>
+          <span class="workspace-module-meta">轨道编辑</span>
+          <button type="button" class="workspace-module-close" data-module-close="timeline" title="隐藏时间线" aria-label="隐藏时间线"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button>
+        </div>
+        <div class="timeline-module-body"><section id="project-timeline-panel" class="ptl"></section></div>
+        <div class="module-resize-edge module-resize-edge-x" data-module-resize="timeline" data-resize-axis="x" role="separator" tabindex="0" aria-label="调整时间线宽度"></div>
+        <div class="module-resize-edge module-resize-edge-y" data-module-resize="timeline" data-resize-axis="y" role="separator" tabindex="0" aria-label="调整时间线高度"></div>
+        <div class="module-resize-edge module-resize-corner" data-module-resize="timeline" data-resize-axis="both" role="separator" tabindex="0" aria-label="同时调整时间线宽度和高度"></div>
+      </section>
     </div>
   </section>
 
@@ -54,12 +88,63 @@
       <!-- connection dot + session id kept for JS wiring but no longer shown (user request) -->
       <span class="status-pill" id="connection-pill" role="status" title="offline" aria-label="offline" hidden></span>
       <span class="session-id" id="session-id-label" hidden>—</span>
+      <button type="button" id="project-btn" class="project-btn" title="收起 Projects 与会话" aria-label="收起 Projects 与会话" aria-controls="project-sidebar" aria-expanded="true">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-folder"/></svg>
+        <span id="project-name-label">Project</span>
+      </button>
       <span class="rail-head-spacer"></span>
-      <button type="button" id="new-session-btn" class="rail-btn icon-btn" title="新会话" aria-label="新会话"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-new-chat"/></svg></button>
+      <button type="button" class="rail-btn icon-btn" id="setup-btn" title="AI 供应商设置" aria-label="AI 供应商设置"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-sliders"/></svg></button>
     </div>
 
-    <div class="rail-history" id="rail-history">
-      <div class="timeline" id="timeline" hidden></div>
+    <!-- Durable production truth. Hidden for legacy/chat-only sessions only
+         when there is genuinely no production run to report. -->
+    <section class="production-strip" id="production-strip" aria-live="polite" hidden>
+      <div class="production-summary">
+        <span class="production-state" id="production-state-label">尚未开始生产</span>
+        <span class="production-revision" id="production-revision-label">r0</span>
+        <span class="production-budget" id="production-budget-label">$0.00 / $15.00</span>
+      </div>
+      <div class="production-mix" id="production-mix-label" hidden></div>
+      <div class="production-blockers" id="production-blockers" hidden></div>
+      <div class="production-review" id="production-review" hidden>
+        <div class="production-review-range">
+          <label>从 <input id="review-start-sec" type="number" min="0" step="0.1" inputmode="decimal" placeholder="秒" /></label>
+          <label>到 <input id="review-end-sec" type="number" min="0" step="0.1" inputmode="decimal" placeholder="秒" /></label>
+        </div>
+        <textarea id="review-note" rows="2" placeholder="写下要修改的内容；填写时间可只返修这一段"></textarea>
+        <fieldset class="production-approval-checks" id="production-approval-checks">
+          <legend>只有完整观看后才能确认发布</legend>
+          <label class="review-watch-confirm"><input id="review-watched-full-video" type="checkbox" /> 已按正常速度完整观看 120 秒</label>
+          <div class="review-creative-checks" aria-label="人工创作验收">
+            <label><input type="checkbox" data-review-dimension="story" />叙事</label>
+            <label><input type="checkbox" data-review-dimension="pacing" />节奏</label>
+            <label><input type="checkbox" data-review-dimension="visual" />视觉</label>
+            <label><input type="checkbox" data-review-dimension="sound" />声音</label>
+            <label><input type="checkbox" data-review-dimension="publishable" />可发布</label>
+          </div>
+        </fieldset>
+        <div class="production-review-actions">
+          <button type="button" id="request-changes-btn" class="review-secondary">要求修改</button>
+          <button type="button" id="approve-production-btn" class="review-primary">可以发布</button>
+        </div>
+        <span class="production-review-status" id="production-review-status" role="status"></span>
+      </div>
+    </section>
+
+    <div class="rail-history-shell">
+      <div class="rail-history" id="rail-history">
+        <div class="timeline" id="timeline" hidden></div>
+        <div class="rail-empty" id="rail-empty">
+          <p class="rail-empty-hint">试试这样开始</p>
+          <button type="button" class="suggest-chip" data-suggest="做一支 30 秒的产品宣传片，冰蓝色调，节奏干净利落">30 秒产品宣传片</button>
+          <button type="button" class="suggest-chip" data-suggest="把素材库里的视频剪成 15 秒竖版短片">剪一支 15 秒竖版</button>
+          <button type="button" class="suggest-chip" data-suggest="给当前成片配上中文字幕">给成片配中文字幕</button>
+          <button type="button" class="suggest-chip" data-suggest="从素材里找出最好的三个镜头，拼成一段预览">挑出最好的镜头</button>
+        </div>
+      </div>
+      <button type="button" id="chat-scroll-bottom" class="chat-scroll-bottom" title="滚动到底部" aria-label="滚动到底部" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-d"/></svg>
+      </button>
     </div>
 
     <!-- plan approval bar: filled by v3.js while plan mode is on -->
@@ -76,69 +161,94 @@
       <!-- "+" popover: the single entry point for everything -->
       <div id="plus-menu" class="plus-menu" hidden role="menu" aria-label="添加">
         <button type="button" id="upload-btn" class="plus-item" role="menuitem">
-          <svg class="plus-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 8.5l-9.4 9.4a4 4 0 0 1-5.7-5.7l9-9a2.6 2.6 0 0 1 3.7 3.7l-9 9a1.3 1.3 0 0 1-1.8-1.8l8.3-8.3"/></svg>
+          <svg class="plus-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-attach"/></svg>
           <span class="plus-label">上传</span>
-          <span class="plus-tail" id="upload-shortcut-label">⌘U</span>
+          <span class="plus-tail" id="upload-shortcut-label">Ctrl+U</span>
         </button>
         <button type="button" class="plus-item" data-plus="slash" role="menuitem">
-          <svg class="plus-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 7 5 5-5 5"/><path d="M13 17h6"/></svg>
+          <svg class="plus-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-slash"/></svg>
           <span class="plus-label">快捷指令</span>
           <span class="plus-tail">/</span>
         </button>
 
         <div class="plus-divider" role="separator"></div>
         <div class="plus-item plus-switch" data-plus="plan" role="menuitemcheckbox" aria-checked="false" tabindex="0">
-          <svg class="plus-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4 5.6l1 1 2-2M4 11.6l1 1 2-2M4 17.6l1 1 2-2"/></svg>
+          <svg class="plus-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-list-check"/></svg>
           <span class="plus-label">计划模式</span>
           <button type="button" id="plan-toggle-btn" class="plan-toggle switch" title="计划模式：只查看和规划，批准后才执行改动">计划</button>
         </div>
         <div class="plus-item plus-switch" data-plus="sandbox" role="menuitemcheckbox" aria-checked="true" tabindex="0">
-          <svg class="plus-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.5 3 8 7 9 4-1 7-4.5 7-9V6l-7-3z"/></svg>
+          <svg class="plus-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-shield"/></svg>
           <span class="plus-label">沙盒</span>
           <button type="button" id="sandbox-toggle-btn" class="sandbox-toggle switch" title="沙盒已开启（点击关闭）">沙盒</button>
         </div>
 
         <div class="plus-divider" role="separator"></div>
         <button type="button" class="plus-item" data-plus="assets" role="menuitem">
-          <svg class="plus-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg>
+          <svg class="plus-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-grid"/></svg>
           <span class="plus-label">素材库</span>
           <span class="plus-tail">›</span>
         </button>
       </div>
 
-      <input type="file" id="upload-input" hidden />
+      <input type="file" id="upload-input" multiple hidden />
       <button type="button" id="plus-btn" class="plus-btn" aria-haspopup="menu" aria-expanded="false" title="添加" aria-label="添加">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-plus"/></svg>
       </button>
       <textarea
         id="prompt-input"
         rows="1"
         placeholder="描述你想要的视频，或输入 / 唤起命令…"
       ></textarea>
-      <button type="button" id="send-btn" class="send-btn" disabled aria-label="发送">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
-      </button>
+      <div class="composer-actions">
+        <button type="button" id="send-btn" class="send-btn" disabled aria-label="语音输入" title="语音输入">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-mic"/></svg>
+        </button>
+      </div>
+      <span id="voice-input-status" class="voice-input-status" role="status" aria-live="polite" hidden></span>
     </footer>
   </aside>
+
+  <!-- Persistent right-side Project navigation: projects own their sessions. -->
+  <aside class="project-sidebar" id="project-sidebar" aria-label="Projects 与会话">
+    <div class="project-sidebar-head">
+      <span class="project-sidebar-title">Projects</span>
+      <span class="project-sidebar-spacer"></span>
+      <button type="button" id="new-project-btn" class="project-sidebar-action icon-btn" title="新建 Project" aria-label="新建 Project"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-folder-plus"/></svg></button>
+      <button type="button" id="new-session-btn" class="project-sidebar-action icon-btn" title="新会话" aria-label="新会话"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-new-chat"/></svg></button>
+    </div>
+    <div class="project-sidebar-body" id="project-sidebar-body" aria-live="polite">
+      <p class="project-sidebar-placeholder">正在载入 Projects…</p>
+    </div>
+  </aside>
+
 </main>
 
-<!-- Assets tray: summoned media library (moved here, ids kept) -->
+<!-- Assets tray: media and non-media project assets -->
 <div id="assets-tray" class="assets-tray" hidden>
   <div class="assets-tray-panel">
     <div class="assets-tray-head">
-      <h2 class="pane-heading">媒体库</h2>
+      <h2 class="pane-heading">素材库</h2>
       <div class="assets-tray-actions">
         <button type="button" id="library-refresh-btn" class="library-small-btn icon-btn" title="刷新" aria-label="刷新"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-refresh"/></svg></button>
+        <button type="button" id="library-roughcut-btn" class="library-small-btn icon-btn" title="粗剪准备" aria-label="粗剪准备"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-wand"/></svg></button>
         <button type="button" id="library-annotate-btn" class="library-small-btn icon-btn" title="标注视频" aria-label="标注视频"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-wand"/></svg></button>
         <button type="button" id="assets-tray-close" class="library-small-btn icon-btn" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button>
       </div>
     </div>
+    <div class="library-sections" role="tablist" aria-label="素材类型">
+      <button type="button" class="library-section active" role="tab" aria-selected="true" data-library-section="media">媒体素材</button>
+      <button type="button" class="library-section" role="tab" aria-selected="false" data-library-section="non-media">非媒体素材</button>
+    </div>
+    <div id="roughcut-job-status" class="roughcut-job-status" role="status" aria-live="polite" hidden></div>
     <div class="media-library-grid" id="media-library-grid">
       <p class="placeholder">暂无素材</p>
     </div>
   </div>
 </div>
 
+<script src="/v3/workspace-layout.js" defer></script>
+<script src="/v3/api-client.js" defer></script>
 <script src="/v3/v3.js" defer></script>
 </body>
 </html>

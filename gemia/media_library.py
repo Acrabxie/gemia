@@ -1,4 +1,4 @@
-"""Local-workspace media asset library for Lumeri."""
+"""Single-user local media asset library for Lumeri."""
 from __future__ import annotations
 
 import hashlib
@@ -13,65 +13,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from gemia.local_workspace import workspace_root
+from gemia.asset_identity import asset_identity_for_record, attach_asset_identity
 from gemia.media_ingest import probe_still_metadata
 from gemia.project_model import IMAGE_DURATION
-
-# Inline stubs for deleted modules (asset_identity, video.timeline_assets).
-# These provide minimal functionality for the list_assets path used by v3.
-
-SUPPORTED_MEDIA_EXTENSIONS = {
-    ".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".flv",
-    ".mp3", ".wav", ".aac", ".flac", ".ogg", ".m4a",
-    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp",
-}
-
-
-def media_kind_for_path(path) -> str:
-    """Guess media kind from file extension."""
-    ext = str(path).rsplit(".", 1)[-1].lower() if "." in str(path) else ""
-    if ext in {"mp4", "mov", "avi", "mkv", "webm", "m4v", "flv"}:
-        return "video"
-    if ext in {"mp3", "wav", "aac", "flac", "ogg", "m4a"}:
-        return "audio"
-    return "image"
-
-
-def probe_media(path: str) -> dict:
-    """Minimal media probe using ffprobe if available."""
-    import subprocess
-    try:
-        out = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", path],
-            capture_output=True, text=True, timeout=10,
-        )
-        if out.returncode == 0:
-            import json
-            info = json.loads(out.stdout).get("format", {})
-            return {"duration": float(info.get("duration", 0)), "format": info.get("format_name", "")}
-    except Exception:
-        pass
-    return {}
-
-
-def generate_timeline_thumbnails(path: str, cache_dir, count: int = 8) -> list:
-    return []
-
-
-def extract_waveform_peaks(path: str, samples: int = 512) -> list:
-    return []
-
-
-def asset_identity_for_record(row) -> dict:
-    return {"asset_id": row.get("id", "") if isinstance(row, dict) else ""}
-
-
-def attach_asset_identity(payload: dict) -> dict:
-    if "asset_identity" not in payload:
-        payload["asset_identity"] = asset_identity_for_record(payload)
-    return payload
+from gemia.video.timeline_assets import (
+    SUPPORTED_MEDIA_EXTENSIONS,
+    extract_waveform_peaks,
+    generate_timeline_thumbnails,
+    media_kind_for_path,
+    probe_media,
+)
 
 MEDIA_LIBRARY_SCHEMA_VERSION = 1
+LOCAL_MEDIA_ROOT = Path.home() / ".gemia" / "media"
 
 
 class MediaLibraryError(ValueError):
@@ -79,7 +33,13 @@ class MediaLibraryError(ValueError):
 
 
 def media_root(account_id: str) -> Path:
-    return workspace_root(account_id) / "media"
+    """Return the one local library root.
+
+    ``account_id`` remains in the internal call signature for compatibility
+    with timeline helpers, but the public desktop build has no account
+    namespace or sign-in state.
+    """
+    return LOCAL_MEDIA_ROOT
 
 
 def library_path(account_id: str) -> Path:
@@ -205,14 +165,11 @@ def list_assets(
     params: list[Any] = []
     if not include_deleted:
         clauses.append("deleted_at IS NULL")
-    if kind in {"video", "image", "audio"}:
+    if kind in {"video", "image", "audio", "lottie"}:
         clauses.append("media_kind = ?")
         params.append(kind)
-    if q:
-        clauses.append("(lower(name) LIKE ? OR lower(mime_type) LIKE ?)")
-        needle = f"%{q.lower()}%"
-        params.extend([needle, needle])
-    params.append(max(1, min(int(limit or 200), 1000)))
+    query = str(q or "").strip().lower()
+    params.append(1000 if query else max(1, min(int(limit or 200), 1000)))
     sql = f"""
         SELECT * FROM media_assets
         WHERE {' AND '.join(clauses)}
@@ -220,7 +177,32 @@ def list_assets(
         LIMIT ?
     """
     with _connect(account_id) as conn:
-        return [_public_asset(_dict_from_row(row)) for row in conn.execute(sql, params).fetchall()]
+        assets = [_public_asset(_dict_from_row(row)) for row in conn.execute(sql, params).fetchall()]
+    assets = [_with_annotation_summary(account_id, asset) for asset in assets]
+    if query:
+        filtered: list[dict[str, Any]] = []
+        for asset in assets:
+            annotation_text = ""
+            try:
+                from gemia.media_annotations import search_annotation_text
+
+                annotation_text = search_annotation_text(account_id, str(asset.get("asset_id") or ""))
+            except Exception:
+                annotation_text = ""
+            haystack = " ".join(
+                [
+                    str(asset.get("name") or ""),
+                    str(asset.get("mime_type") or ""),
+                    str(asset.get("media_kind") or ""),
+                    annotation_text,
+                ]
+            ).lower()
+            if query in haystack:
+                filtered.append(asset)
+            if len(filtered) >= max(1, min(int(limit or 200), 1000)):
+                break
+        assets = filtered
+    return assets
 
 
 def get_asset(account_id: str, asset_id: str, *, include_deleted: bool = False) -> dict[str, Any] | None:
@@ -231,7 +213,7 @@ def get_asset(account_id: str, asset_id: str, *, include_deleted: bool = False) 
         payload = _dict_from_row(row)
         if payload.get("deleted_at") and not include_deleted:
             return None
-        return attach_asset_identity(_public_asset(payload))
+        return _with_annotation_summary(account_id, attach_asset_identity(_public_asset(payload)))
 
 
 def soft_delete_asset(account_id: str, asset_id: str) -> dict[str, Any]:
@@ -274,7 +256,7 @@ def default_clip_for_asset(asset: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": f"clip_{uuid.uuid4().hex[:12]}",
         "assetId": str(asset.get("asset_id") or asset.get("id") or ""),
-        "trackId": "A1" if media_kind == "audio" else "V1",
+        "trackId": "A1" if media_kind == "audio" else ("OV1" if media_kind in {"image", "lottie"} else "V1"),
         "mediaKind": media_kind,
         "mimeType": str(asset.get("mime_type") or ""),
         "name": str(asset.get("name") or "media"),
@@ -474,6 +456,16 @@ def _public_asset(row: dict[str, Any]) -> dict[str, Any]:
     })
 
 
+def _with_annotation_summary(account_id: str, asset: dict[str, Any]) -> dict[str, Any]:
+    try:
+        from gemia.media_annotations import annotation_summary
+
+        asset["annotation_summary"] = annotation_summary(account_id, str(asset.get("asset_id") or ""))
+    except Exception:
+        asset["annotation_summary"] = {"count": 0, "labels": [], "tags": [], "categories": []}
+    return asset
+
+
 def _asset_file_url(asset_id: str, area: str, filename: str | None = None) -> str:
     if area == "cache" and filename:
         return f"/media-library/file/{asset_id}/cache/{filename}"
@@ -490,6 +482,15 @@ def _default_summary(media_kind: str, duration: float) -> dict[str, Any] | None:
             "mood": "image",
             "key_frame": "still frame",
             "suggested_use": "可作为 3 秒静态画面、背景或转场素材。",
+            "keep": True,
+        }
+    if media_kind == "lottie":
+        return {
+            "duration": duration,
+            "summary": "Lottie 动画素材，已读取动画时长和首帧缩略图。",
+            "mood": "motion graphics",
+            "key_frame": "animated vector frame",
+            "suggested_use": "可作为动态图标、片头标识、贴纸或 motion graphics overlay。",
             "keep": True,
         }
     return {

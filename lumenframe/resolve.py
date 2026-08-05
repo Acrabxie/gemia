@@ -223,9 +223,6 @@ def _line_advance(font, line, letter_spacing):
 # can pick a heavier face. Names without a directory are resolved by Pillow's
 # own font search (it bundles ``DejaVuSans.ttf``).
 _SYSTEM_FONT_CANDIDATES = [
-    # Windows — standard scalable UI/document faces.
-    ("C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/arialbd.ttf"),
-    ("C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/segoeuib.ttf"),
     # macOS — guaranteed-present scalable faces.
     (
         "/System/Library/Fonts/Supplemental/Arial.ttf",

@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="90" height="44" viewBox="0 0 90 44" role="img" aria-label="Lumeri 正在工作">
+  <defs>
+    <linearGradient id="lw-grad" gradientUnits="userSpaceOnUse" x1="8" y1="22" x2="82" y2="22">
+      <stop offset="0" stop-color="#5FC6DE"/>
+      <stop offset=".7" stop-color="#8BD8EA"/>
+      <stop offset="1" stop-color="#ABE5F1"/>
+    </linearGradient>
+    <filter id="lw-glow" x="-40%" y="-120%" width="180%" height="340%">
+      <feGaussianBlur stdDeviation="2.6"/>
+    </filter>
+    <!-- gooey：σ6.0 + alpha 阈值 14,-6.5，栅格实测液颈 gap0=13.4 / gap3.5=6.2 / gap4.25=断。
+         只产出液颈：若让本体也过滤镜，rx9 圆角会被融圆、左缘从 8 被推到 10.6、
+         本体高 18→17.2，logo 的几何品质全丢。故液颈层在下、未经滤镜的精确 rect 盖在上。 -->
+    <filter id="lw-goo" x="-40%" y="-140%" width="180%" height="380%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="blur"/>
+      <feColorMatrix in="blur" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 14 -6.5"/>
+    </filter>
+  </defs>
+  <style>
+    .segL,.segR{fill:url(#lw-grad)}
+    .glow{opacity:.35}
+    .segL{animation:lw-segL 3.3s cubic-bezier(.65,0,.35,1) infinite}
+    .segR{animation:lw-segR 3.3s cubic-bezier(.65,0,.35,1) infinite}
+    .bobY{animation:lw-bobY 1s ease-in-out infinite alternate}
+    .bobX{animation:lw-bobX 1.3s ease-in-out infinite alternate}
+    .sway{transform-box:view-box;transform-origin:45px 22px;animation:lw-sway 1.7s ease-in-out infinite alternate}
+    .lag{transform-box:view-box;transform-origin:45px 22px;
+         animation:lw-lag 1.3s ease-in-out infinite alternate;animation-delay:-.12s}
+    @keyframes lw-segL{
+    0%{width:46px;animation-timing-function:cubic-bezier(.3,.5,.4,1)}
+    2%{width:37px;animation-timing-function:cubic-bezier(.25,.6,.45,1)}   /* 液颈成形 gap0 */
+    6.5%{width:34.9px;animation-timing-function:cubic-bezier(.55,0,.85,.4)}   /* 液颈将断 gap4.2 */
+    8%{width:31.25px;animation-timing-function:cubic-bezier(.2,.7,.4,1)}   /* 弹断过冲 */
+    10%{width:32.35px;animation-timing-function:ease-in-out}   /* 回弹 */
+    11.5%{width:31.8px;animation-timing-function:ease-in-out}
+    13%{width:32.1px;animation-timing-function:ease-out}
+    14%,16.5%{width:32px;animation-timing-function:cubic-bezier(.5,0,.75,.5)}   /* 中间断开 */
+    18%{width:34.9px;animation-timing-function:cubic-bezier(.25,.6,.45,1)}   /* 液颈重接 gap4.2 */
+    22.5%{width:37px;animation-timing-function:cubic-bezier(.25,.75,.3,1)}   /* 液颈最粗 gap0 */
+    25%{width:36px;animation-timing-function:cubic-bezier(.3,.5,.4,1)}
+    27%{width:27px;animation-timing-function:cubic-bezier(.25,.6,.45,1)}   /* 液颈成形 gap0 */
+    31.5%{width:24.9px;animation-timing-function:cubic-bezier(.55,0,.85,.4)}   /* 液颈将断 gap4.2 */
+    33%{width:21.25px;animation-timing-function:cubic-bezier(.2,.7,.4,1)}   /* 弹断过冲 */
+    35%{width:22.35px;animation-timing-function:ease-in-out}   /* 回弹 */
+    36.5%{width:21.8px;animation-timing-function:ease-in-out}
+    38%{width:22.1px;animation-timing-function:ease-out}
+    39%,41.5%{width:22px;animation-timing-function:cubic-bezier(.5,0,.75,.5)}   /* 左边断开 */
+    43%{width:24.9px;animation-timing-function:cubic-bezier(.25,.6,.45,1)}   /* 液颈重接 gap4.2 */
+    47.5%{width:27px;animation-timing-function:cubic-bezier(.25,.75,.3,1)}   /* 液颈最粗 gap0 */
+    50%{width:46px;animation-timing-function:cubic-bezier(.3,.5,.4,1)}
+    52%{width:37px;animation-timing-function:cubic-bezier(.25,.6,.45,1)}   /* 液颈成形 gap0 */
+    56.5%{width:34.9px;animation-timing-function:cubic-bezier(.55,0,.85,.4)}   /* 液颈将断 gap4.2 */
+    58%{width:31.25px;animation-timing-function:cubic-bezier(.2,.7,.4,1)}   /* 弹断过冲 */
+    60%{width:32.35px;animation-timing-function:ease-in-out}   /* 回弹 */
+    61.5%{width:31.8px;animation-timing-function:ease-in-out}
+    63%{width:32.1px;animation-timing-function:ease-out}
+    64%,66.5%{width:32px;animation-timing-function:cubic-bezier(.5,0,.75,.5)}   /* 中间断开 */
+    68%{width:34.9px;animation-timing-function:cubic-bezier(.25,.6,.45,1)}   /* 液颈重接 gap4.2 */
+    72.5%{width:37px;animation-timing-function:cubic-bezier(.25,.75,.3,1)}   /* 液颈最粗 gap0 */
+    75%{width:56px;animation-timing-function:cubic-bezier(.3,.5,.4,1)}
+    77%{width:47px;animation-timing-function:cubic-bezier(.25,.6,.45,1)}   /* 液颈成形 gap0 */
+    81.5%{width:44.9px;animation-timing-function:cubic-bezier(.55,0,.85,.4)}   /* 液颈将断 gap4.2 */
+    83%{width:41.25px;animation-timing-function:cubic-bezier(.2,.7,.4,1)}   /* 弹断过冲 */
+    85%{width:42.35px;animation-timing-function:ease-in-out}   /* 回弹 */
+    86.5%{width:41.8px;animation-timing-function:ease-in-out}
+    88%{width:42.1px;animation-timing-function:ease-out}
+    89%,91.5%{width:42px;animation-timing-function:cubic-bezier(.5,0,.75,.5)}   /* 右边断开 = logo 上半部分 */
+    93%{width:44.9px;animation-timing-function:cubic-bezier(.25,.6,.45,1)}   /* 液颈重接 gap4.2 */
+    97.5%{width:47px;animation-timing-function:cubic-bezier(.25,.75,.3,1)}   /* 液颈最粗 gap0 */
+    100%{width:46px}
+    }
+    @keyframes lw-segR{
+    0%{x:36px;width:46px;y:13px;height:18px;rx:9px;animation-timing-function:cubic-bezier(.3,.5,.4,1)}
+    2%{x:45px;width:37px;animation-timing-function:cubic-bezier(.25,.6,.45,1)}   /* 液颈成形 gap0 */
+    6.5%{x:47.1px;width:34.9px;animation-timing-function:cubic-bezier(.55,0,.85,.4)}   /* 液颈将断 gap4.2 */
+    8%{x:50.75px;width:31.25px;animation-timing-function:cubic-bezier(.2,.7,.4,1)}   /* 弹断过冲 */
+    10%{x:49.65px;width:32.35px;animation-timing-function:ease-in-out}   /* 回弹 */
+    11.5%{x:50.2px;width:31.8px;animation-timing-function:ease-in-out}
+    13%{x:49.9px;width:32.1px;animation-timing-function:ease-out}
+    14%,16.5%{x:50px;width:32px;animation-timing-function:cubic-bezier(.5,0,.75,.5)}   /* 中间断开 */
+    18%{x:47.1px;width:34.9px;animation-timing-function:cubic-bezier(.25,.6,.45,1)}   /* 液颈重接 gap4.2 */
+    22.5%{x:45px;width:37px;y:13px;height:18px;rx:9px;animation-timing-function:cubic-bezier(.25,.75,.3,1)}   /* 液颈最粗 gap0 */
+    25%{x:26px;width:56px;y:13px;height:18px;rx:9px;animation-timing-function:cubic-bezier(.3,.5,.4,1)}
+    27%{x:35px;width:47px;animation-timing-function:cubic-bezier(.25,.6,.45,1)}   /* 液颈成形 gap0 */
+    31.5%{x:37.1px;width:44.9px;animation-timing-function:cubic-bezier(.55,0,.85,.4)}   /* 液颈将断 gap4.2 */
+    33%{x:40.75px;width:41.25px;animation-timing-function:cubic-bezier(.2,.7,.4,1)}   /* 弹断过冲 */
+    35%{x:39.65px;width:42.35px;animation-timing-function:ease-in-out}   /* 回弹 */
+    36.5%{x:40.2px;width:41.8px;animation-timing-function:ease-in-out}
+    38%{x:39.9px;width:42.1px;animation-timing-function:ease-out}
+    39%,41.5%{x:40px;width:42px;animation-timing-function:cubic-bezier(.5,0,.75,.5)}   /* 左边断开 */
+    43%{x:37.1px;width:44.9px;animation-timing-function:cubic-bezier(.25,.6,.45,1)}   /* 液颈重接 gap4.2 */
+    47.5%{x:35px;width:47px;y:13px;height:18px;rx:9px;animation-timing-function:cubic-bezier(.25,.75,.3,1)}   /* 液颈最粗 gap0 */
+    50%{x:36px;width:46px;y:13px;height:18px;rx:9px;animation-timing-function:cubic-bezier(.3,.5,.4,1)}
+    52%{x:45px;width:37px;animation-timing-function:cubic-bezier(.25,.6,.45,1)}   /* 液颈成形 gap0 */
+    56.5%{x:47.1px;width:34.9px;animation-timing-function:cubic-bezier(.55,0,.85,.4)}   /* 液颈将断 gap4.2 */
+    58%{x:50.75px;width:31.25px;animation-timing-function:cubic-bezier(.2,.7,.4,1)}   /* 弹断过冲 */
+    60%{x:49.65px;width:32.35px;animation-timing-function:ease-in-out}   /* 回弹 */
+    61.5%{x:50.2px;width:31.8px;animation-timing-function:ease-in-out}
+    63%{x:49.9px;width:32.1px;animation-timing-function:ease-out}
+    64%,66.5%{x:50px;width:32px;animation-timing-function:cubic-bezier(.5,0,.75,.5)}   /* 中间断开 */
+    68%{x:47.1px;width:34.9px;animation-timing-function:cubic-bezier(.25,.6,.45,1)}   /* 液颈重接 gap4.2 */
+    72.5%{x:45px;width:37px;y:13px;height:18px;rx:9px;animation-timing-function:cubic-bezier(.25,.75,.3,1)}   /* 液颈最粗 gap0 */
+    75%{x:46px;width:36px;y:13px;height:18px;rx:9px;animation-timing-function:cubic-bezier(.3,.5,.4,1)}
+    77%{x:55px;width:27px;y:13px;height:18px;rx:9px;animation-timing-function:cubic-bezier(.25,.6,.45,1)}   /* 液颈成形 gap0 */
+    81.5%{x:57.1px;width:24.9px;y:12.2px;height:19.6px;rx:9.8px;animation-timing-function:cubic-bezier(.55,0,.85,.4)}   /* 液颈将断 gap4.2 */
+    83%{x:60.75px;width:21.25px;y:9.9px;height:24.2px;rx:12.1px;animation-timing-function:cubic-bezier(.2,.7,.4,1)}   /* 弹断过冲 */
+    85%{x:59.65px;width:22.35px;y:11.3px;height:21.4px;rx:10.7px;animation-timing-function:ease-in-out}   /* 回弹 */
+    86.5%{x:60.2px;width:21.8px;y:10.6px;height:22.8px;rx:11.4px;animation-timing-function:ease-in-out}
+    88%{x:59.9px;width:22.1px;y:11.1px;height:21.8px;rx:10.9px;animation-timing-function:ease-out}
+    89%,91.5%{x:60px;width:22px;y:11px;height:22px;rx:11px;animation-timing-function:cubic-bezier(.5,0,.75,.5)}   /* 右边断开 = logo 上半部分 */
+    93%{x:57.1px;width:24.9px;y:11.6px;height:20.8px;rx:10.4px;animation-timing-function:cubic-bezier(.25,.6,.45,1)}   /* 液颈重接 gap4.2 */
+    97.5%{x:55px;width:27px;y:12.7px;height:18.6px;rx:9px;animation-timing-function:cubic-bezier(.25,.75,.3,1)}   /* 液颈最粗 gap0 */
+    100%{x:36px;width:46px;y:13px;height:18px;rx:9px}
+    }
+    @keyframes lw-bobY{from{transform:translateY(-1.5px)}to{transform:translateY(1.5px)}}
+    @keyframes lw-bobX{from{transform:translateX(-.9px)}to{transform:translateX(.9px)}}
+    @keyframes lw-sway{from{transform:rotate(-1.4deg)}to{transform:rotate(1.4deg)}}
+    @keyframes lw-lag{from{transform:translate(-.55px,.35px)}to{transform:translate(.55px,-.35px)}}
+    @keyframes lw-breathe{from{opacity:1}to{opacity:.5}}
+    @media (prefers-reduced-motion:reduce){
+      .segL,.segR,.bobY,.bobX,.sway,.lag{animation:none}
+      .breathe{animation:lw-breathe 1.4s ease-in-out infinite alternate}
+    }
+  </style>
+  <g class="breathe"><g class="bobY"><g class="bobX"><g class="sway">
+    <rect class="segL glow" x="8" y="13" width="42" height="18" rx="9" filter="url(#lw-glow)"/>
+    <g class="lag"><rect class="segR glow" x="60" y="11" width="22" height="22" rx="11" filter="url(#lw-glow)"/></g>
+    <g class="gooLayer" filter="url(#lw-goo)">
+      <rect class="segL" x="8" y="13" width="42" height="18" rx="9"/>
+      <g class="lag"><rect class="segR" x="60" y="11" width="22" height="22" rx="11"/></g>
+    </g>
+    <rect class="segL" x="8" y="13" width="42" height="18" rx="9"/>
+    <g class="lag"><rect class="segR" x="60" y="11" width="22" height="22" rx="11"/></g>
+  </g></g></g></g>
+</svg>

@@ -1,4 +1,4 @@
-"""Persistent account-scoped annotations for media-library assets."""
+"""Persistent annotations for the local media library."""
 from __future__ import annotations
 
 import json
@@ -13,7 +13,7 @@ from gemia.media_library import MediaLibraryError, get_asset, library_path, medi
 from gemia.media_search import fts_normalize
 
 _VALID_SCOPE = {"asset", "time_range", "frame"}
-_VALID_SOURCE = {"gemini", "user", "import", "system", "gemini_vision", "heuristic"}
+_VALID_SOURCE = {"gemini", "user", "import", "system", "gemini_vision", "heuristic", "roughcut"}
 
 
 class MediaAnnotationError(ValueError):
@@ -79,20 +79,7 @@ def create_annotation(account_id: str, asset_id: str, payload: dict[str, Any]) -
     row["created_at"] = now
     row["updated_at"] = now
     with _connect(account_id) as conn:
-        conn.execute(
-            """
-            INSERT INTO media_annotations (
-              annotation_id, asset_id, account_id, scope, start_sec, end_sec,
-              frame, label, note, tags_json, category, confidence, source,
-              language, metadata_json, search_text, created_at, updated_at
-            ) VALUES (
-              :annotation_id, :asset_id, :account_id, :scope, :start_sec, :end_sec,
-              :frame, :label, :note, :tags_json, :category, :confidence, :source,
-              :language, :metadata_json, :search_text, :created_at, :updated_at
-            )
-            """,
-            row,
-        )
+        _insert_annotation(conn, row)
     return get_annotation(account_id, asset_id, row["annotation_id"])
 
 
@@ -103,11 +90,30 @@ def upsert_annotations(
     *,
     replace_source: str | None = None,
 ) -> list[dict[str, Any]]:
-    _require_asset(account_id, asset_id)
-    if replace_source:
-        delete_source_annotations(account_id, asset_id, replace_source)
-    created = [create_annotation(account_id, asset_id, item) for item in annotations]
-    return created
+    asset = _require_asset(account_id, asset_id)
+    clean_replace_source = _source(replace_source) if replace_source is not None else None
+
+    # Normalize every replacement row before opening the mutation transaction.
+    # A bad model response must never delete the last known-good index first.
+    now = _utc_now()
+    rows: list[dict[str, Any]] = []
+    for item in annotations:
+        row = _normalize_payload(account_id, asset, item, existing=None)
+        row["annotation_id"] = _annotation_id()
+        row["created_at"] = now
+        row["updated_at"] = now
+        rows.append(row)
+
+    with _connect(account_id) as conn:
+        conn.execute("BEGIN")
+        if clean_replace_source is not None:
+            conn.execute(
+                "DELETE FROM media_annotations WHERE asset_id = ? AND source = ?",
+                (_safe_asset_id(asset_id), clean_replace_source),
+            )
+        for row in rows:
+            _insert_annotation(conn, row)
+    return [_public_annotation(row) for row in rows]
 
 
 def get_annotation(account_id: str, asset_id: str, annotation_id: str) -> dict[str, Any]:
@@ -450,6 +456,9 @@ def _normalize_payload(
     note = str(payload.get("note") or "")[:5000]
     category = str(payload.get("category") or "")[:80]
     label = label[:200]
+    source_value = payload.get("source") if "source" in payload else None
+    if source_value in (None, ""):
+        source_value = existing.get("source") if existing else "user"
     return {
         "asset_id": asset_id,
         "account_id": account_id,
@@ -462,7 +471,7 @@ def _normalize_payload(
         "tags_json": json.dumps(tags, ensure_ascii=False),
         "category": category,
         "confidence": confidence,
-        "source": _source(str(payload.get("source") or "user")),
+        "source": _source(str(source_value)),
         "language": str(payload.get("language") or "auto")[:32],
         "metadata_json": json.dumps(_json_dict(payload.get("metadata")), ensure_ascii=False, sort_keys=True),
         "search_text": fts_normalize(" ".join([label, note, category, *tags])),
@@ -521,7 +530,26 @@ def _label(zh: str, en: str, language: str) -> str:
 
 def _source(value: str) -> str:
     source = str(value or "user").strip().lower()
-    return source if source in _VALID_SOURCE else "user"
+    if source not in _VALID_SOURCE:
+        raise MediaAnnotationError(f"invalid annotation source: {source or '<empty>'}")
+    return source
+
+
+def _insert_annotation(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
+    conn.execute(
+        """
+        INSERT INTO media_annotations (
+          annotation_id, asset_id, account_id, scope, start_sec, end_sec,
+          frame, label, note, tags_json, category, confidence, source,
+          language, metadata_json, search_text, created_at, updated_at
+        ) VALUES (
+          :annotation_id, :asset_id, :account_id, :scope, :start_sec, :end_sec,
+          :frame, :label, :note, :tags_json, :category, :confidence, :source,
+          :language, :metadata_json, :search_text, :created_at, :updated_at
+        )
+        """,
+        row,
+    )
 
 
 def _dedupe_tags(value: Any) -> list[str]:

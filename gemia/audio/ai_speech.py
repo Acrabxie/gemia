@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from gemia.errors import AIServiceError
+from gemia.model_strength import strongest_media_model
 
 # Placeholder for Lyria/Gemini API integration
 # In a real scenario, this would interact with GeminiAdapter or a dedicated LyriaAdapter.
@@ -81,6 +82,7 @@ def generate_ai_speech(
     out_path = Path(output_path).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    model = strongest_media_model("audio", "gemini", (model,))
     request = SpeechGenerationRequest(
         text=text,
         voice_id=voice_id,

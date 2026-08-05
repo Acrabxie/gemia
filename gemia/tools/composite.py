@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from gemia.tools._context import ToolContext
-from gemia.tools._ffmpeg import ffprobe_duration, run_ffmpeg_with_progress
+from gemia.tools._ffmpeg import ffprobe_duration, get_video_encoder_args, run_ffmpeg_with_progress
 
 
 _BLEND_MODES: dict[str, str] = {
@@ -101,7 +101,7 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
             "-filter_complex", filter_complex,
             "-map", "[out]",
             "-map", "0:a?",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            *get_video_encoder_args("h264"),
             "-c:a", "copy",
             "-movflags", "+faststart",
             str(out_path),

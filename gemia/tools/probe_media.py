@@ -44,6 +44,18 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         "has_audio": bool(audio),
         "stream_count": len(meta.get("streams") or []),
     }
+    if record.kind == "video" and bool(args.get("verify_motion", False)):
+        from gemia.production_media_checks import inspect_video_motion
+
+        result["motion_evidence"] = inspect_video_motion(record.path)
+        motion = result["motion_evidence"]
+        ctx.registry.update_record(
+            asset_id,
+            source_patch={
+                "real_motion_verified": bool(motion.get("real_motion_verified")),
+                "motion_evidence": motion,
+            },
+        )
     return result
 
 

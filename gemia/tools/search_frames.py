@@ -7,7 +7,7 @@ the query. Use it to fill a shot's footage from existing material before
 falling back to ``generate_video``.
 
 Candidates come from (in order): the session AssetRegistry (registered video
-assets), the local media library, and any explicit ``paths``. Top matches are
+assets), the account media library, and any explicit ``paths``. Top matches are
 registered into the session registry so a shot can reference the returned
 ``asset_id`` directly. Non-throwing: no candidates → empty results (the model
 should then generate), never an aborted turn.
@@ -38,10 +38,8 @@ def _clamp_limit(value: Any) -> int:
     return max(1, min(_MAX_LIMIT, parsed))
 
 
-def _workspace_id(ctx: ToolContext) -> str:
-    from gemia.tools._library_session import workspace_id_for
-
-    return workspace_id_for(ctx)
+def _account_id(ctx: ToolContext) -> str:
+    return "local"
 
 
 def _candidate_paths(ctx: ToolContext, extra_paths: list[str], kind: str) -> list[Path]:
@@ -67,13 +65,13 @@ def _candidate_paths(ctx: ToolContext, extra_paths: list[str], kind: str) -> lis
         if kind == "any" or record.kind == kind or record.kind in _VIDEO_LIKE:
             _add(record.path)
 
-    workspace_id = _workspace_id(ctx)
-    if workspace_id:
+    account_id = _account_id(ctx)
+    if account_id:
         try:
             from gemia.media_library import list_assets
 
             for asset in list_assets(
-                workspace_id, kind=None if kind == "any" else kind, limit=_MAX_CANDIDATES
+                account_id, kind=None if kind == "any" else kind, limit=_MAX_CANDIDATES
             ):
                 _add(asset.get("source_path") or asset.get("storage_path") or asset.get("original_path"))
         except Exception:

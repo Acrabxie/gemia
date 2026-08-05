@@ -20,6 +20,7 @@ PROVIDERS: list[dict[str, Any]] = [
         "hint": "用 GCP ADC 鉴权（gcloud auth）+ 项目/区域；Gemini 与 Vertex 版 Claude 均走此路",
         "fields": ["vertex_project", "vertex_location", "model"],
         "key_field": None,  # Vertex 用 ADC，不需明文 key
+        "recommended_model": "google/gemini-3.5-flash",
         "model_presets": [
             "google/gemini-2.5-pro",
             "google/gemini-3.5-flash",
@@ -32,6 +33,7 @@ PROVIDERS: list[dict[str, Any]] = [
         "hint": "AI Studio 的 GEMINI_API_KEY（generativelanguage 端点）",
         "fields": ["model"],
         "key_field": "gemini_api_key",
+        "recommended_model": "gemini-2.5-pro",
         "model_presets": ["gemini-2.5-pro", "gemini-2.5-flash"],
     },
     {
@@ -40,6 +42,7 @@ PROVIDERS: list[dict[str, Any]] = [
         "hint": "OPENAI_API_KEY（可选自定义 base_url，指向兼容网关）",
         "fields": ["model", "base_url"],
         "key_field": "openai_api_key",
+        "recommended_model": "gpt-5.6-sol",
         "model_presets": ["gpt-5.5", "gpt-5.6-sol"],
     },
     {
@@ -48,6 +51,7 @@ PROVIDERS: list[dict[str, Any]] = [
         "hint": "ANTHROPIC_API_KEY（api.anthropic.com）",
         "fields": ["model"],
         "key_field": "anthropic_api_key",
+        "recommended_model": "claude-opus-4-8",
         "model_presets": ["claude-opus-4-8", "claude-sonnet-5", "claude-fable-5"],
     },
     {
@@ -56,6 +60,7 @@ PROVIDERS: list[dict[str, Any]] = [
         "hint": "OPENROUTER_API_KEY（聚合网关，一个 key 通多家）",
         "fields": ["model"],
         "key_field": "openrouter_api_key",
+        "recommended_model": "anthropic/claude-opus-4.8",
         "model_presets": [
             "anthropic/claude-fable-5",
             "anthropic/claude-opus-4.8",
@@ -69,11 +74,49 @@ PROVIDERS: list[dict[str, Any]] = [
         "hint": "任意 OpenAI 兼容端点：填 base_url + key + 模型名（走 openai 通道）",
         "fields": ["base_url", "model"],
         "key_field": "openai_api_key",
+        "recommended_model": "",
         "model_presets": [],
     },
 ]
 
 EFFORTS = ["none", "low", "medium", "high", "xhigh"]
+
+
+def provider_spec(provider: str) -> dict[str, Any] | None:
+    return next((item for item in PROVIDERS if item["id"] == provider), None)
+
+
+def recommended_model(provider: str, models: list[dict[str, Any]] | None = None) -> str:
+    """Return a recommendation that belongs to the selected provider."""
+    spec = provider_spec(provider)
+    preferred = str((spec or {}).get("recommended_model") or "").strip()
+    if models is None:
+        return preferred
+    ids = [str(item.get("id") or "").strip() for item in models if isinstance(item, dict)]
+    ids = [model_id for model_id in ids if model_id]
+    if preferred and preferred in ids:
+        return preferred
+    for preset in (spec or {}).get("model_presets") or []:
+        if preset in ids:
+            return preset
+    return ids[0] if ids else preferred
+
+
+def model_matches_provider(provider: str, model: str) -> bool:
+    value = str(model or "").strip().lower()
+    if not value:
+        return False
+    if provider == "vertex":
+        return value.startswith(("google/gemini-", "anthropic/claude-"))
+    if provider == "gemini":
+        return value.startswith("gemini-")
+    if provider == "claude":
+        return value.startswith("claude-")
+    if provider == "openai":
+        return "/" not in value and not value.startswith(("gemini-", "claude-"))
+    if provider == "openrouter":
+        return "/" in value
+    return True
 
 # body 字段 → (config.json 键, 环境变量名)。仅这些字段会被写入。
 _STR_FIELDS = {

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from gemia.tools._context import ToolContext
-from gemia.tools._ffmpeg import audio_stream, ffprobe_duration, ffprobe_metadata, run_ffmpeg_with_progress
+from gemia.tools._ffmpeg import audio_stream, ffprobe_duration, ffprobe_metadata, get_video_encoder_args, run_ffmpeg_with_progress
 
 
 _XFADE_KINDS: dict[str, str] = {
@@ -90,7 +90,7 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0",
             "-i", str(list_file),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            *get_video_encoder_args("h264"),
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
             str(out_path),
@@ -205,7 +205,7 @@ def _build_xfade_command(
     if a_label is not None:
         cmd += ["-map", f"[{a_label}]", "-c:a", "aac", "-b:a", "192k"]
     cmd += [
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        *get_video_encoder_args("h264"),
         "-movflags", "+faststart",
         str(out_path),
     ]

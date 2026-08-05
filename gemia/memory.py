@@ -63,9 +63,13 @@ DEFAULT_MODEL_PROFILE: dict[str, Any] = {
             "description": "Primary planning model through OpenRouter. Legacy Gemini model names are mapped where possible.",
         },
         "image": {
-            "default": "google/gemini-2.5-flash-image",
+            "default": "google/gemini-3.1-flash-image-preview",
             "provider": "openrouter/nano-banana",
-            "aliases": ["Nano Banana", "Gemini 2.5 Flash Image"],
+            "aliases": ["Nano Banana Pro", "Gemini 3.1 Flash Image"],
+            "priority": [
+                {"id": "google/gemini-3.1-flash-image-preview", "label": "Gemini 3.1 Flash Image", "provider": "openrouter"},
+                {"id": "google/gemini-2.5-flash-image", "label": "Gemini 2.5 Flash Image", "provider": "openrouter"},
+            ],
             "tiers": {
                 "flash": "google/gemini-2.5-flash-image",
                 "pro": "google/gemini-3.1-flash-image-preview",
@@ -85,6 +89,10 @@ DEFAULT_MODEL_PROFILE: dict[str, Any] = {
         "video": {
             "default": "veo-3.1-generate-preview",
             "aliases": ["veo3.1quality", "Veo 3.1 quality"],
+            "priority": [
+                {"id": "veo-3.1-generate-preview", "label": "Veo 3.1 Quality", "provider": "vertex"},
+                {"id": "veo-3.1-fast-generate-preview", "label": "Veo 3.1 Fast", "provider": "vertex"},
+            ],
             "variants": {"fast": "veo-3.1-fast-generate-preview"},
             "env": ["GEMIA_VIDEO_MODEL", "GEMIA_GEMINI_VIDEO_MODEL", "VEO_MODEL"],
             "config": ["video_model", "veo_model", "gemini_video_model"],
@@ -93,6 +101,11 @@ DEFAULT_MODEL_PROFILE: dict[str, Any] = {
         "audio": {
             "default": "lyria-3-pro-preview",
             "aliases": ["lyric2pro", "Lyria 3 Pro"],
+            "priority": [
+                {"id": "lyria-3-pro-preview", "label": "Lyria 3 Pro", "provider": "vertex"},
+                {"id": "lyria-002", "label": "Lyria 2", "provider": "vertex"},
+                {"id": "lyria-3-clip-preview", "label": "Lyria 3 Clip", "provider": "vertex"},
+            ],
             "variants": {"clip": "lyria-3-clip-preview"},
             "env": ["GEMIA_AUDIO_MODEL", "LYRIA_MODEL"],
             "config": ["audio_model", "lyria_model"],
@@ -277,7 +290,7 @@ def bootstrap_memory(day: str | date | None = None) -> dict[str, str]:
         "# Gemia Memory Roles\n\n"
         "## Model Defaults\n\n"
         "- Primary planner: `google/gemini-3.1-pro-preview` through OpenRouter (`LumeriPlanner`)\n"
-        "- Image generation: `google/gemini-2.5-flash-image` through OpenRouter (`Nano Banana`)\n"
+        "- Image generation: `google/gemini-3.1-flash-image-preview` through OpenRouter (`Nano Banana Pro`)\n"
         "- Video generation: `veo-3.1-generate-preview` (`veo3.1quality`)\n"
         "- Audio generation: `lyria-3-pro-preview` (`lyric2pro`)\n",
     )
@@ -530,6 +543,17 @@ def _migrate_model_profile(profile: dict[str, Any]) -> None:
         image_provider = _clean_string(image.get("provider")).lower()
         if image_default in {"gpt-image-2", "gpt_image2", "gpt image2"} or image_provider == "sisyphus":
             models["image"] = copy.deepcopy(defaults["models"]["image"])
+    # Media generation strength is code-owned, not a user preference. Keep
+    # descriptive/provider fields, but force every stale local profile to the
+    # reviewed strongest-first defaults and priority tables.
+    for slot in ("image", "video", "audio"):
+        slot_defaults = defaults["models"][slot]
+        slot_info = models.setdefault(slot, {})
+        if not isinstance(slot_info, dict):
+            slot_info = {}
+            models[slot] = slot_info
+        slot_info["default"] = slot_defaults["default"]
+        slot_info["priority"] = copy.deepcopy(slot_defaults["priority"])
 
 
 def _slot_default(slot: str, profile: dict[str, Any], tier: str | None = None) -> str:
@@ -660,6 +684,37 @@ def model_catalog(slot: str = "planner") -> list[dict[str, str]]:
     return items
 
 
+def _selection_catalog(slot: str = "planner") -> list[dict[str, str]]:
+    """Return the models selectable inside the active provider configuration."""
+    if slot != "planner":
+        return model_catalog(slot)
+    from gemia import brain_config
+
+    config = read_user_config()
+    status = brain_config.read_status(config)
+    provider = str(status.get("provider") or "").strip()
+    spec = brain_config.provider_spec(provider)
+    if not spec:
+        return model_catalog(slot)
+
+    labels = {item["id"]: item["label"] for item in model_catalog(slot)}
+    model_ids = list(spec.get("model_presets") or [])
+    current = (
+        _clean_string(config.get(_MODEL_OVERRIDE_CONFIG))
+        or _clean_string(os.environ.get(_MODEL_OVERRIDE_ENV))
+    )
+    if current and brain_config.model_matches_provider(provider, current) and current not in model_ids:
+        model_ids.append(current)
+    recommended = brain_config.recommended_model(provider)
+    if recommended in model_ids:
+        model_ids.remove(recommended)
+        model_ids.insert(0, recommended)
+    return [
+        {"id": model_id, "label": labels.get(model_id, model_id), "provider": provider}
+        for model_id in model_ids
+    ]
+
+
 def effort_options(slot: str = "planner") -> list[str]:
     info = _slot_info(slot)
     efforts = info.get("efforts")
@@ -675,19 +730,22 @@ def default_effort(slot: str = "planner") -> str:
 def active_model_selection(slot: str = "planner") -> dict[str, Any]:
     """Resolve the currently-active model + effort for ``slot``.
 
-    Reflects the same override precedence the orchestrator uses (env → config →
+    Reflects the same override precedence the orchestrator uses (config → env →
     backend default) so the UI shows exactly what a turn will run with.
     """
-    catalog = model_catalog(slot)
+    catalog = _selection_catalog(slot)
     default_model = catalog[0]["id"] if catalog else _slot_default(slot, load_model_profile())
+    config = read_user_config()
+    from gemia import brain_config
 
+    provider = str(brain_config.read_status(config).get("provider") or "")
     model_override = (
-        _clean_string(os.environ.get(_MODEL_OVERRIDE_ENV))
-        or _clean_string(read_user_config().get(_MODEL_OVERRIDE_CONFIG))
+        _clean_string(config.get(_MODEL_OVERRIDE_CONFIG))
+        or _clean_string(os.environ.get(_MODEL_OVERRIDE_ENV))
     )
     effort_override = (
-        _clean_string(os.environ.get(_EFFORT_OVERRIDE_ENV)).lower()
-        or _clean_string(read_user_config().get(_EFFORT_OVERRIDE_CONFIG)).lower()
+        _clean_string(config.get(_EFFORT_OVERRIDE_CONFIG)).lower()
+        or _clean_string(os.environ.get(_EFFORT_OVERRIDE_ENV)).lower()
     )
 
     model = model_override or default_model
@@ -701,6 +759,7 @@ def active_model_selection(slot: str = "planner") -> dict[str, Any]:
         "is_default_effort": not effort_override,
         "default_model": default_model,
         "default_effort": default_effort(slot),
+        "provider": provider,
     }
 
 
@@ -739,7 +798,7 @@ def set_model_selection(
     ``None`` / ``""`` / ``"default"`` = reset to the backend default; any other
     value = set it (model accepts id, index, or fuzzy match).
     """
-    catalog = model_catalog(slot)
+    catalog = _selection_catalog(slot)
     patch: dict[str, Any] = {}
 
     if model is not _UNSET:
@@ -782,12 +841,69 @@ def apply_model_selection(payload: dict[str, Any], slot: str = "planner") -> dic
 
 def model_selection_payload(slot: str = "planner") -> dict[str, Any]:
     """Full ``/model`` GET payload: catalog + effort options + active selection."""
+    from gemia.model_strength import MEDIA_MODEL_PRIORITY
+
     return {
         "slot": slot,
-        "priority": model_catalog(slot),
+        "priority": _selection_catalog(slot),
         "efforts": effort_options(slot),
         "active": active_model_selection(slot),
+        "media_strength_policy": {
+            media_slot: {
+                backend: {
+                    "active": models[0],
+                    "priority": list(models),
+                    "locked": True,
+                    "unavailable_policy": "silent_next_strongest",
+                }
+                for backend, models in backends.items()
+            }
+            for media_slot, backends in MEDIA_MODEL_PRIORITY.items()
+        },
     }
+
+
+def _save_priority_list(slot: str, items: list[dict[str, str]]) -> None:
+    """Persist the priority catalog back to MODEL_PROFILE.json."""
+    profile = load_model_profile(bootstrap=False)
+    models = profile.setdefault("models", {})
+    slot_data = models.setdefault(slot, {})
+    slot_data["priority"] = items
+    if items:
+        slot_data["default"] = items[0]["id"]
+    write_memory_json(model_profile_path(), profile)
+
+
+def add_model_to_catalog(
+    model_id: str,
+    label: str = "",
+    provider: str = "",
+    slot: str = "planner",
+) -> list[dict[str, str]]:
+    """Append a model to the priority catalog if not already present."""
+    catalog = model_catalog(slot)
+    if any(item["id"] == model_id for item in catalog):
+        return catalog
+    catalog.append({
+        "id": model_id,
+        "label": label or model_id,
+        "provider": provider,
+    })
+    _save_priority_list(slot, catalog)
+    return catalog
+
+
+def remove_model_from_catalog(model_id: str, slot: str = "planner") -> list[dict[str, str]]:
+    """Remove a model from the priority catalog by id."""
+    catalog = model_catalog(slot)
+    catalog = [item for item in catalog if item["id"] != model_id]
+    if not catalog:
+        raise ValueError("cannot remove the last model")
+    _save_priority_list(slot, catalog)
+    active = active_model_selection(slot)
+    if active.get("model") == model_id:
+        set_model_selection(model=None, slot=slot)
+    return catalog
 
 
 def public_model_profile() -> dict[str, Any]:

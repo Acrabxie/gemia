@@ -37,6 +37,8 @@ def _shot_line(scene: dict[str, Any], shot: dict[str, Any]) -> str:
     source = str(shot.get("source") or "unset")
     if shot.get("asset_id"):
         bits.append(f"{source}→{shot['asset_id']}")
+        if shot.get("source_in") is not None and shot.get("source_out") is not None:
+            bits.append(f"@{float(shot['source_in']):.2f}-{float(shot['source_out']):.2f}s")
     elif source == "search" and shot.get("search_query"):
         bits.append(f'search "{shot["search_query"]}"')
     else:
@@ -56,6 +58,8 @@ def _shot_line(scene: dict[str, Any], shot: dict[str, Any]) -> str:
     if shot.get("transition_after"):
         t = shot["transition_after"]
         line += f"  ⇥{t.get('kind')}"
+    if isinstance(shot.get("evidence"), dict) and shot["evidence"].get("label"):
+        line += f'  evidence:"{shot["evidence"]["label"]}"'
     return line
 
 
@@ -107,10 +111,15 @@ async def dispatch_set(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]
             "set_shotlist requires a 'shotlist' object with scenes[].shots[]"
         )
     project = _project(ctx)
+    evidence_fit = None
+    if bool(args.get("fit_media", False)):
+        from gemia.tools._shotlist_media_fit import fit_media_for_context
+
+        shotlist, evidence_fit = fit_media_for_context(ctx, shotlist)
     result = project.apply_ops(
         [{"op": "set_shotlist", "shotlist": shotlist}], label="set_shotlist"
     )
-    return _summary(ctx, result)
+    return _summary(ctx, result, evidence_fit=evidence_fit)
 
 
 async def dispatch_update_shot(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:

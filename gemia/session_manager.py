@@ -21,6 +21,7 @@ import asyncio
 import dataclasses
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -87,6 +88,7 @@ class SessionRunner:
         self._ready = threading.Event()
         self._state_lock = threading.Lock()
         self._turn_in_progress = False
+        self._turn_future = None
         now = time.time()
         self.created_at = now
         self.last_used_at = now
@@ -210,8 +212,23 @@ class SessionRunner:
                     self._turn_in_progress = False
                     self.last_used_at = time.time()
 
-        asyncio.run_coroutine_threadsafe(_run(), self._loop)
+        self._turn_future = asyncio.run_coroutine_threadsafe(_run(), self._loop)
         return True
+
+    def cancel_turn(self) -> bool:
+        with self._state_lock:
+            future = self._turn_future
+            active = self._turn_in_progress
+        if not active or future is None:
+            return False
+        cancelled = future.cancel()
+        if cancelled:
+            self._emit({
+                "kind": "turn_wrapup",
+                "reason": "user_stop",
+                "message": "已按你的要求停止；当前进度已经保留。",
+            })
+        return cancelled
 
     def run_project_edit(self, fn, *, timeout: float = 30.0) -> Any:
         """Run a project mutation on the session's event loop and return its
@@ -644,9 +661,11 @@ class SessionManager:
             )
             self._sweeper.start()
 
-    def create_session(self) -> SessionRunner:
+    def create_session(self, session_id: str | None = None) -> SessionRunner:
         self.cleanup_idle()
-        session_id = f"v3-{uuid.uuid4().hex[:12]}"
+        session_id = session_id or f"v3-{uuid.uuid4().hex[:12]}"
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+            raise ValueError("invalid session id")
         with self._lock:
             active_or_creating = len(self._runners) + self._creating_sessions
             if active_or_creating >= self._max_sessions:

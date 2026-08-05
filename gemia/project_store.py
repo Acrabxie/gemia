@@ -14,11 +14,14 @@ and ``lumerai.patches``.
 from __future__ import annotations
 
 import copy
+import fcntl
 import json
 import re
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from gemia.project_model import empty_project, normalize_project
 from lumerai.patches import apply_timeline_patches
@@ -35,6 +38,42 @@ class ProjectStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        # Writers are read-modify-write cycles (load state+meta → apply →
+        # write patch files+state+meta). /timeline/op and undo run on HTTP
+        # threads (ThreadingHTTPServer) while agent verbs run on the session
+        # loop thread, so without a lock two writers can both read patch_seq
+        # N and clobber patches/000(N+1).json — one history entry silently
+        # lost, last state.json wins. Individual files stay uncorrupted
+        # (_write_json is atomic), so readers need no lock.
+        self._locks_guard = threading.Lock()
+        self._project_locks: dict[str, threading.RLock] = {}
+
+    def _project_lock(self, project_id: str) -> threading.RLock:
+        with self._locks_guard:
+            lock = self._project_locks.get(project_id)
+            if lock is None:
+                lock = self._project_locks[project_id] = threading.RLock()
+            return lock
+
+    def _process_lock_path(self, project_id: str) -> Path:
+        self._validate_id(project_id)
+        return self.root / ".locks" / f"{project_id}.lock"
+
+    @contextmanager
+    def _project_write_lock(self, project_id: str) -> Iterator[None]:
+        """Serialize one project's read-modify-write cycle across processes."""
+        # Every writer acquires locks in this order and none re-enters this
+        # helper, so the existing thread lock and the process lock cannot form
+        # a lock-order inversion.
+        with self._project_lock(project_id):
+            lock_path = self._process_lock_path(project_id)
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with lock_path.open("a+b") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     # ── path helpers ────────────────────────────────────────────────
     def project_dir(self, project_id: str) -> Path:
@@ -70,26 +109,32 @@ class ProjectStore:
 
     # ── create / load ───────────────────────────────────────────────
     def create(self, project_id: str, *, seed: dict[str, Any] | None = None) -> dict[str, Any]:
-        pdir = self.project_dir(project_id)
-        if (pdir / "state.json").exists():
-            raise ProjectStoreError(f"project already exists: {project_id}")
-        pdir.mkdir(parents=True, exist_ok=True)
-        self.patches_dir(project_id).mkdir(parents=True, exist_ok=True)
-        state = normalize_project(seed) if seed else empty_project()
-        now = datetime.now(timezone.utc).isoformat()
-        self._write_json(self.state_path(project_id), state)
-        self._write_json(self.seed_path(project_id), state)
-        self._write_json(
-            self.meta_path(project_id),
-            {
-                "project_id": project_id,
-                "created_at": now,
-                "updated_at": now,
-                "patch_seq": 0,
-                "undo_log": [],
-            },
-        )
-        return copy.deepcopy(state)
+        with self._project_write_lock(project_id):
+            pdir = self.project_dir(project_id)
+            if (pdir / "state.json").exists():
+                raise ProjectStoreError(f"project already exists: {project_id}")
+            pdir.mkdir(parents=True, exist_ok=True)
+            self.patches_dir(project_id).mkdir(parents=True, exist_ok=True)
+            state = normalize_project(seed) if seed else empty_project()
+            # The storage key is authoritative.  ``empty_project()`` creates a
+            # random document id, which previously left every newly created
+            # durable project with two identities and made migrated history
+            # reopen under an "Untitled" inner project.
+            state["project_id"] = project_id
+            now = datetime.now(timezone.utc).isoformat()
+            self._write_json(self.state_path(project_id), state)
+            self._write_json(self.seed_path(project_id), state)
+            self._write_json(
+                self.meta_path(project_id),
+                {
+                    "project_id": project_id,
+                    "created_at": now,
+                    "updated_at": now,
+                    "patch_seq": 0,
+                    "undo_log": [],
+                },
+            )
+            return copy.deepcopy(state)
 
     def load(self, project_id: str) -> dict[str, Any]:
         path = self.state_path(project_id)
@@ -124,44 +169,46 @@ class ProjectStore:
                 "patch_files": [str, ...],
             }
         """
-        current = self.load(project_id)
-        meta = self.load_meta(project_id)
-        last_seq = int(meta.get("patch_seq") or 0)
-        if not patches:
+        with self._project_write_lock(project_id):
+            current = self.load(project_id)
+            meta = self.load_meta(project_id)
+            last_seq = int(meta.get("patch_seq") or 0)
+            if not patches:
+                return {
+                    "project_state": current,
+                    "patch_seq_start": 0,
+                    "patch_seq_end": 0,
+                    "patch_files": [],
+                }
+            updated = apply_timeline_patches(current, patches)
+            updated["project_id"] = project_id
+            patches_dir = self.patches_dir(project_id)
+            patches_dir.mkdir(parents=True, exist_ok=True)
+            now = datetime.now(timezone.utc).isoformat()
+            written: list[str] = []
+            for patch in patches:
+                last_seq += 1
+                entry = {
+                    "seq": last_seq,
+                    "applied_at": now,
+                    "session_id": session_id,
+                    "script_hash": script_hash,
+                    "patch": patch,
+                }
+                path = patches_dir / f"{last_seq:04d}.json"
+                self._write_json(path, entry)
+                written.append(str(path))
+            self._write_json(self.state_path(project_id), updated)
+            meta["updated_at"] = now
+            meta["patch_seq"] = last_seq
+            self._write_json(self.meta_path(project_id), meta)
+            start = last_seq - len(patches) + 1
             return {
-                "project_state": current,
-                "patch_seq_start": 0,
-                "patch_seq_end": 0,
-                "patch_files": [],
+                "project_state": updated,
+                "patch_seq_start": start,
+                "patch_seq_end": last_seq,
+                "patch_files": written,
             }
-        updated = apply_timeline_patches(current, patches)
-        patches_dir = self.patches_dir(project_id)
-        patches_dir.mkdir(parents=True, exist_ok=True)
-        now = datetime.now(timezone.utc).isoformat()
-        written: list[str] = []
-        for patch in patches:
-            last_seq += 1
-            entry = {
-                "seq": last_seq,
-                "applied_at": now,
-                "session_id": session_id,
-                "script_hash": script_hash,
-                "patch": patch,
-            }
-            path = patches_dir / f"{last_seq:04d}.json"
-            self._write_json(path, entry)
-            written.append(str(path))
-        self._write_json(self.state_path(project_id), updated)
-        meta["updated_at"] = now
-        meta["patch_seq"] = last_seq
-        self._write_json(self.meta_path(project_id), meta)
-        start = last_seq - len(patches) + 1
-        return {
-            "project_state": updated,
-            "patch_seq_start": start,
-            "patch_seq_end": last_seq,
-            "patch_files": written,
-        }
 
     def load_seed(self, project_id: str) -> dict[str, Any]:
         path = self.seed_path(project_id)
@@ -176,6 +223,10 @@ class ProjectStore:
         are moved (not deleted) into ``patches_discarded/`` for audit.
         Returns ``{project_state, from_seq, to_seq, discarded: [seq, ...]}``.
         """
+        with self._project_write_lock(project_id):
+            return self._undo_to_seq_locked(project_id, target_seq)
+
+    def _undo_to_seq_locked(self, project_id: str, target_seq: int) -> dict[str, Any]:
         if not isinstance(target_seq, int) or target_seq < 0:
             raise ProjectStoreError(f"target_seq must be a non-negative int, got {target_seq!r}")
         meta = self.load_meta(project_id)
@@ -198,6 +249,7 @@ class ProjectStore:
         state = self.load_seed(project_id)
         if keep:
             state = apply_timeline_patches(state, [e["patch"] for e in keep])
+        state["project_id"] = project_id
         # Move discarded patch files aside.
         discarded_dir = self.discarded_dir(project_id)
         discarded_dir.mkdir(parents=True, exist_ok=True)
@@ -239,6 +291,8 @@ class ProjectStore:
             return []
         entries: list[dict[str, Any]] = []
         for path in sorted(pdir.glob("*.json")):
+            if path.name.startswith("._"):
+                continue
             try:
                 entries.append(json.loads(path.read_text(encoding="utf-8")))
             except (OSError, json.JSONDecodeError):
@@ -260,6 +314,33 @@ class ProjectStore:
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         tmp.replace(path)
+
+
+_QUANTA_PATCH_OPS = frozenset({
+    "set_quanta",
+    "patch_quantum",
+    "insert_quantum",
+    "remove_quantum",
+    "move_quantum",
+})
+_SHOTLIST_PATCH_OPS = frozenset({"set_shotlist", "update_shot"})
+_PROJECT_PATCH_OPS = frozenset({"set_project_title"})
+
+
+def _patch_state_scope(ops: list[dict[str, Any]]) -> str:
+    """Classify an applied patch for additive ``timeline_op`` consumers."""
+    scopes: set[str] = set()
+    for op in ops:
+        name = str(op.get("op") or "") if isinstance(op, dict) else ""
+        if name in _QUANTA_PATCH_OPS:
+            scopes.add("quanta")
+        elif name in _SHOTLIST_PATCH_OPS:
+            scopes.add("shotlist")
+        elif name in _PROJECT_PATCH_OPS:
+            scopes.add("project")
+        else:
+            scopes.add("timeline")
+    return next(iter(scopes)) if len(scopes) == 1 else "project"
 
 
 class ProjectHandle:
@@ -323,6 +404,7 @@ class ProjectHandle:
                 "seq": result.get("patch_seq_end"),
                 "ops": [str(op.get("op") or "") for op in ops if isinstance(op, dict)],
                 "label": label,
+                "state_scope": _patch_state_scope(ops),
                 "duration": timeline.get("duration"),
                 "clip_count": len(timeline.get("clips") or []),
             }

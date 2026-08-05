@@ -2,13 +2,12 @@
 from __future__ import annotations
 
 import glob
-import os
 from pathlib import Path
 from typing import Any
 
 from gemia.errors import RECOVERY_FIX_ARGS, RECOVERY_SWITCH_TOOL, ToolError
 from gemia.tools._context import ToolContext
-from gemia.tools._ffmpeg import ffprobe_duration, run_ffmpeg_with_progress
+from gemia.tools._ffmpeg import ffprobe_duration, get_video_encoder_args, run_ffmpeg_with_progress
 
 
 _FONT_CACHE: list[str] = []
@@ -18,9 +17,7 @@ def _font_file() -> str:
     if _FONT_CACHE:
         return _FONT_CACHE[0]
     candidates = (
-        glob.glob(os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts", "arial.ttf"))
-        + glob.glob(os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts", "*.ttf"))
-        + glob.glob("/System/Library/Fonts/Supplemental/Arial.ttf")
+        glob.glob("/System/Library/Fonts/Supplemental/Arial.ttf")
         + glob.glob("/System/Library/Fonts/**/*.ttf", recursive=True)
         + glob.glob("/Library/Fonts/*.ttf")
         + glob.glob("/usr/share/fonts/**/*.ttf", recursive=True)
@@ -166,7 +163,7 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         "-i", str(src.path),
         *cmd_input_extra,
         *vf_arg,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        *get_video_encoder_args("h264"),
         "-c:a", "copy",
         "-movflags", "+faststart",
         str(out_path),
