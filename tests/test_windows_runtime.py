@@ -44,3 +44,24 @@ def test_workspace_uses_platform_specific_shortcut_labels() -> None:
     assert "`${shortcutPrefix}U`" in javascript
     assert "撤销 (${shortcutPrefix}Z)" in javascript
     assert '(e.metaKey || e.ctrlKey) && (e.key === "u" || e.key === "U")' in javascript
+
+
+def test_windows_doctor_preserves_ffmpeg_exit_code_and_repo_root() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script = (repo_root / "scripts/windows/doctor.ps1").read_text(encoding="utf-8")
+
+    assert "Push-Location $RepoRoot" in script
+    assert "$VersionOutput = & $Command.Source -version" in script
+    assert "$ExitCode = $LASTEXITCODE" in script
+    assert "if ($ExitCode -ne 0)" in script
+    assert "& $Command.Source -version | Select-Object -First 1" not in script
+
+
+def test_v3_setup_and_model_routes_are_served_by_public_runtime() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    server_source = (repo_root / "server.py").read_text(encoding="utf-8")
+
+    assert '{"has_key": _has_valid_key(), "brain": status}' in server_source
+    assert 'if path == "/model":' in server_source
+    assert 'model_selection_payload("planner")' in server_source
+    assert 'apply_model_selection(payload, "planner")' in server_source
