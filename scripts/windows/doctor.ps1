@@ -41,6 +41,20 @@ finally {
 
 Write-Host "Windows runtime checks passed; loopback port $Port is available." -ForegroundColor Green
 Write-Host "Secure arbitrary-code sandbox: unavailable on native Windows; build/run_shell stay locked unless the computer owner explicitly disables Sandbox in Lumeri." -ForegroundColor Yellow
+
+$Codex = Get-Command codex -ErrorAction SilentlyContinue
+if ($null -eq $Codex) {
+    Write-Host "Optional OpenAI subscription: Codex CLI not found. Install Node.js, run 'npm install -g @openai/codex', then 'codex login'." -ForegroundColor Yellow
+}
+else {
+    $CodexStatus = & $Codex.Source login status 2>&1
+    if ($LASTEXITCODE -eq 0 -and ($CodexStatus -join " ") -match "ChatGPT") {
+        Write-Host "Optional OpenAI subscription: local Codex is signed in with ChatGPT." -ForegroundColor Green
+    }
+    else {
+        Write-Host "Optional OpenAI subscription: Codex is installed but needs 'codex login' with ChatGPT." -ForegroundColor Yellow
+    }
+}
 }
 finally {
     Pop-Location
