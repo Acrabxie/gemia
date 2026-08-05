@@ -223,9 +223,11 @@ def _line_advance(font, line, letter_spacing):
 # can pick a heavier face. Names without a directory are resolved by Pillow's
 # own font search (it bundles ``DejaVuSans.ttf``).
 _SYSTEM_FONT_CANDIDATES = [
-    # Windows — standard scalable UI/document faces.
-    ("C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/arialbd.ttf"),
+    # Windows — Segoe UI ships with supported Windows editions; Arial is the
+    # standard document fallback. Use absolute system paths so a clean Python
+    # environment does not depend on Pillow bundling DejaVu.
     ("C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/segoeuib.ttf"),
+    ("C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/arialbd.ttf"),
     # macOS — guaranteed-present scalable faces.
     (
         "/System/Library/Fonts/Supplemental/Arial.ttf",
@@ -273,7 +275,7 @@ def _resolve_font(font_path, font_size: int, weight: Any = None):
     Order of preference:
       1. Explicit ``font_path`` prop (a real path or a Pillow-resolvable name),
          trying a bold sibling first when ``weight`` is bold.
-      2. Common system fonts (macOS / Linux), weight-aware.
+      2. Common system fonts (Windows / macOS / Linux), weight-aware.
       3. A bundled font under ``lumenframe/assets/`` (if the operator added one).
       4. Pillow's bundled ``DejaVuSans.ttf`` by name.
       5. Legacy ``ImageFont.load_default()`` — fixed ~9px bitmap, size ignored.

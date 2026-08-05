@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from gemia.model_strength import strongest_media_model
+
 # Import at module level so tests can patch "gemia.video.generative.VeoClient"
 try:
     from gemia.ai.veo_client import VeoClient
@@ -311,7 +313,7 @@ def _write_veo_fallback_sidecar(
         "kind": "veo_fallback_preview",
         "status": "fallback",
         "provider": "openrouter/veo",
-        "model": os.environ.get("VEO_MODEL", "google/veo-3.1"),
+        "model": strongest_media_model("video", "openrouter", (os.environ.get("VEO_MODEL"),)),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "input_path": str(Path(input_path).expanduser()) if input_path else "",
         "output_path": str(output.resolve()),

@@ -11,17 +11,9 @@ from typing import Any
 from gemia.tools._context import ToolContext
 
 
-def workspace_id_for(ctx: ToolContext) -> str:
-    """Resolve the one local workspace used by the public runtime."""
-    explicit = str(ctx.extra.get("workspace_id") or "").strip()
-    if explicit:
-        return explicit
-    try:
-        from gemia.local_workspace import current_workspace_id
-
-        return current_workspace_id()
-    except Exception:
-        return ""
+def account_id_for(ctx: ToolContext) -> str:
+    """Return the fixed local-workspace namespace used by the public build."""
+    return "local"
 
 
 def ensure_session_asset(ctx: ToolContext, asset: dict[str, Any]) -> str | None:
@@ -60,4 +52,4 @@ def ensure_session_asset(ctx: ToolContext, asset: dict[str, Any]) -> str | None:
     return record.asset_id
 
 
-__all__ = ["ensure_session_asset", "workspace_id_for"]
+__all__ = ["account_id_for", "ensure_session_asset"]

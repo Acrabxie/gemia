@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import copy
+import math
 import re
 import uuid
 from typing import Any, Callable
 
 from gemia.project_model import (
     IMAGE_DURATION,
+    _quanta_leaf_block_ids,
     _normalize_shot,
     _normalize_timeline_clip,
+    empty_quanta,
     empty_shotlist,
+    normalize_quanta,
     normalize_project,
     normalize_shotlist,
 )
@@ -49,14 +53,23 @@ def apply_timeline_patches(project_state: dict[str, Any] | None, patches: list[d
     # the whole patch list applies atomically or the original state stays valid.
     project = copy.deepcopy(normalize_project(project_state or {}))
     needs_validation = False
+    needs_quanta_validation = False
     for patch in patches:
         if not isinstance(patch, dict) or patch.get("version") != 1:
             raise ValueError("Unsupported TimelinePatch")
         for op in patch.get("ops") or []:
             needs_validation = _apply_op(project, op) or needs_validation
+            if isinstance(op, dict) and str(op.get("op") or "") in QUANTA_OPS:
+                needs_quanta_validation = True
     _recompute_duration(project)
     if needs_validation:
         validate_project(project)
+    if needs_quanta_validation:
+        # Reference integrity is validated once per BATCH, not per op, so a
+        # remove + link-retarget pair is atomic regardless of op order
+        # (quanta-kernel-plan §4). The whole patch list already applies
+        # all-or-nothing on a deep copy.
+        _validate_quanta(project.get("quanta") or {})
     return project
 
 
@@ -309,6 +322,27 @@ def _ripple_shift(
             clip["start"] = round(max(_as_float(clip.get("start")) + delta, 0.0), 6)
 
 
+def _clear_stale_transitions(project: dict[str, Any], track_ids: set[str]) -> None:
+    """Positional re-validation of ``transition_after`` after move/delete.
+
+    A stored transition means "blend into the NEXT butt-joined clip on this
+    track". When a move/delete breaks that adjacency the stored field is stale:
+    export already degrades it at render time (runtime re-checks in
+    ``_plan_transitions``), but clearing at write time keeps the stored state
+    honest (timeline-canonical-plan §5.2 Phase 2 cleanup). A clip that ends up
+    butt-joined to a NEW neighbour keeps its transition — same positional
+    semantics the export renders.
+    """
+    for track_id in track_ids:
+        clips = _track_clips(project, str(track_id))
+        for index, clip in enumerate(clips):
+            if not isinstance(clip.get("transition_after"), dict):
+                continue
+            nxt = clips[index + 1] if index + 1 < len(clips) else None
+            if nxt is None or abs(_clip_end(clip) - _as_float(nxt.get("start"))) > EPSILON:
+                clip["transition_after"] = None
+
+
 def _stamp_provenance(op: dict[str, Any], *clips: dict[str, Any]) -> None:
     provenance = op.get("provenance") if isinstance(op.get("provenance"), dict) else None
     if provenance is None:
@@ -428,6 +462,7 @@ def _op_delete_clip(project: dict[str, Any], op: dict[str, Any]) -> None:
             _as_float(clip.get("start")),
             -_as_float(clip.get("duration")),
         )
+    _clear_stale_transitions(project, {str(clip.get("track_id") or "")})
 
 
 def _op_move_clip(project: dict[str, Any], op: dict[str, Any]) -> None:
@@ -453,6 +488,7 @@ def _op_move_clip(project: dict[str, Any], op: dict[str, Any]) -> None:
     _ensure_no_overlap(project, new_track_id, new_start, duration, exclude=clip)
     clip["track_id"] = new_track_id
     clip["start"] = round(new_start, 6)
+    _clear_stale_transitions(project, {old_track_id, new_track_id})
     _stamp_provenance(op, clip)
 
 
@@ -846,6 +882,24 @@ def _op_set_shotlist(project: dict[str, Any], op: dict[str, Any]) -> None:
     project["shotlist"] = normalize_shotlist(raw)
 
 
+def _op_set_project_title(project: dict[str, Any], op: dict[str, Any]) -> None:
+    """Set the human-facing project title without replacing the document.
+
+    Production migrations can recover a valid timeline whose legacy title is
+    still ``Untitled Project``.  Treating the rename as a normal patch keeps it
+    revisioned and undoable instead of rewriting ``state.json`` out of band.
+    """
+
+    title = str(op.get("title") or "").strip()
+    if not title:
+        raise TimelinePatchError("E_BAD_ARG", "set_project_title requires title")
+    if len(title) > 120:
+        raise TimelinePatchError(
+            "E_BAD_ARG", "set_project_title title must be at most 120 characters"
+        )
+    project["title"] = title
+
+
 def _op_update_shot(project: dict[str, Any], op: dict[str, Any]) -> None:
     """Merge ``fields`` into a single shot located by ``shot_id``.
 
@@ -878,9 +932,422 @@ def _op_update_shot(project: dict[str, Any], op: dict[str, Any]) -> None:
     raise TimelinePatchError("E_NOT_FOUND", f"update_shot: no shot with id {shot_id}")
 
 
+# ── quanta ops ─────────────────────────────────────────────────────────
+# Validation semantics deliberately diverge from the shotlist precedent
+# (quanta-kernel-plan §2.2): normalize_quanta stays never-raises (structural
+# gaps are backfilled), but the quanta state tree has REFERENCE-integrity
+# constraints the shotlist does not have, and those reject strictly here —
+# once per batch, so multi-op edits (remove + retarget) stay atomic.
+
+QUANTA_OPS = frozenset({
+    "set_quanta",
+    "patch_quantum",
+    "insert_quantum",
+    "remove_quantum",
+    "move_quantum",
+})
+
+_QUANTUM_STATE_FIELDS = {"visible_block_ids", "dwell_sec", "advance"}
+
+
+def _quanta_root(quanta: dict[str, Any]) -> dict[str, Any]:
+    root = quanta.get("root")
+    return root if isinstance(root, dict) else {"id": "root", "children": []}
+
+
+def _walk_quanta_nodes(
+    node: dict[str, Any],
+    *,
+    parent: dict[str, Any] | None = None,
+    parent_is_content: bool = False,
+):
+    """Yield ``(node, parent, is_content, is_state)`` in DFS pre-order."""
+    is_content = isinstance(node.get("blocks"), list) and not parent_is_content
+    is_state = parent_is_content
+    yield node, parent, is_content, is_state
+    for child in node.get("children") or []:
+        if isinstance(child, dict):
+            yield from _walk_quanta_nodes(
+                child, parent=node, parent_is_content=is_content
+            )
+
+
+def _find_quantum(
+    quanta: dict[str, Any], node_id: str
+) -> tuple[dict[str, Any], dict[str, Any] | None] | None:
+    """→ (node, parent) for a document-unique id, or None."""
+    for node, parent, _content, _state in _walk_quanta_nodes(_quanta_root(quanta)):
+        if str(node.get("id") or "") == node_id:
+            return node, parent
+    return None
+
+
+def _validate_quanta(quanta: dict[str, Any]) -> None:
+    """Reject reference-integrity violations with TimelinePatchError E_BAD_ARG.
+
+    Runs on the post-normalize state tree (quanta-kernel-plan §2.2): ids must
+    be document-unique; content scopes must not nest; state visibility is a
+    monotonic sequence of full leaf-block snapshots whose last state exactly
+    covers the scope; links mount only on content/state nodes, resolve to
+    live quantum ids (EVERY dangling edge is enumerated in one error), and
+    hotspot blocks must exist in the mount's scope; every dwell must be
+    positive; a non-empty tree must keep at least one visible state.
+    """
+    root = _quanta_root(quanta)
+    seen_ids: set[str] = set()
+    content_nodes: list[dict[str, Any]] = []
+    link_mounts: list[tuple[dict[str, Any], dict[str, Any] | None, bool, bool]] = []
+    visible_state_exists = False
+
+    for node, parent, is_content, is_state in _walk_quanta_nodes(root):
+        node_id = str(node.get("id") or "")
+        if node is not root:
+            if not node_id:
+                raise TimelinePatchError("E_BAD_ARG", "every quantum id must be non-empty")
+            if node_id in seen_ids:
+                raise TimelinePatchError("E_BAD_ARG", f"duplicate quantum id: {node_id}")
+            seen_ids.add(node_id)
+        if is_state and isinstance(node.get("blocks"), list):
+            raise TimelinePatchError(
+                "E_BAD_ARG",
+                f"quantum {node_id} nests a content scope inside a content scope; "
+                "content children must be states",
+            )
+        if is_content:
+            content_nodes.append(node)
+        if node.get("links"):
+            link_mounts.append((node, parent, is_content, is_state))
+
+    hidden_scope_ids: set[str] = set()
+
+    def _mark_hidden(node: dict[str, Any], inherited: bool) -> None:
+        hidden = inherited or bool(node.get("hidden"))
+        if hidden and isinstance(node.get("blocks"), list):
+            hidden_scope_ids.add(str(node.get("id") or ""))
+        for child in node.get("children") or []:
+            if isinstance(child, dict):
+                _mark_hidden(child, hidden)
+
+    _mark_hidden(root, False)
+
+    for scope in content_nodes:
+        scope_id = str(scope.get("id"))
+        block_ids: set[str] = set()
+
+        def visit_blocks(blocks: Any) -> None:
+            for block in blocks if isinstance(blocks, list) else []:
+                if not isinstance(block, dict):
+                    continue
+                block_id = str(block.get("id") or "")
+                if not block_id:
+                    raise TimelinePatchError(
+                        "E_BAD_ARG", f"quantum {scope_id} block id must be non-empty"
+                    )
+                if block_id in block_ids:
+                    raise TimelinePatchError(
+                        "E_BAD_ARG", f"quantum {scope_id} duplicate block id: {block_id}"
+                    )
+                block_ids.add(block_id)
+                if block.get("kind") == "group":
+                    visit_blocks(block.get("children"))
+
+        visit_blocks(scope.get("blocks"))
+        leaf_ids = _quanta_leaf_block_ids(scope.get("blocks"))
+        leaf_id_set = set(leaf_ids)
+        previous_visible: set[str] = set()
+        final_visible: set[str] | None = None
+        states = [s for s in scope.get("children") or [] if isinstance(s, dict)]
+        for state in states:
+            state_id = str(state.get("id") or "")
+            dwell = _as_float(state.get("dwell_sec"))
+            if not math.isfinite(dwell) or dwell <= 0:
+                raise TimelinePatchError(
+                    "E_BAD_ARG",
+                    f"quantum {scope_id} state {state_id} dwell_sec must be > 0, got {dwell}",
+                )
+            visible = state.get("visible_block_ids")
+            visible = visible if isinstance(visible, list) else []
+            visible_seen: set[str] = set()
+            for raw_ref in visible:
+                ref = str(raw_ref or "")
+                if not ref:
+                    raise TimelinePatchError(
+                        "E_BAD_ARG",
+                        f"quantum {scope_id} state {state_id} visible block id must be non-empty",
+                    )
+                if ref in visible_seen:
+                    raise TimelinePatchError(
+                        "E_BAD_ARG",
+                        f"quantum {scope_id} state {state_id} duplicate visible block id: {ref}",
+                    )
+                if ref not in leaf_id_set:
+                    raise TimelinePatchError(
+                        "E_BAD_ARG",
+                        f"quantum {scope_id} state {state_id} references missing leaf block: {ref}",
+                    )
+                visible_seen.add(ref)
+            if not previous_visible.issubset(visible_seen):
+                hidden_again = sorted(previous_visible - visible_seen)
+                raise TimelinePatchError(
+                    "E_BAD_ARG",
+                    f"quantum {scope_id} state {state_id} visibility must be monotonic; "
+                    f"blocks hidden again: {hidden_again}",
+                )
+            previous_visible = visible_seen
+            final_visible = visible_seen
+            if not state.get("hidden") and scope_id not in hidden_scope_ids:
+                visible_state_exists = True
+        if final_visible != leaf_id_set:
+            missing = sorted(leaf_id_set - (final_visible or set()))
+            extra = sorted((final_visible or set()) - leaf_id_set)
+            raise TimelinePatchError(
+                "E_BAD_ARG",
+                f"quantum {scope_id} final state must exactly cover every leaf block; "
+                f"missing={missing} extra={extra}",
+            )
+
+    if content_nodes and not visible_state_exists:
+        raise TimelinePatchError(
+            "E_BAD_ARG", "quanta has content but every state is hidden"
+        )
+
+    # Interaction edges: mounts, targets (ALL dangling edges enumerated in one
+    # error so a remove_quantum caller sees every in-edge to fix), hotspots.
+    dangling: list[str] = []
+    for node, parent, is_content, is_state in link_mounts:
+        node_id = str(node.get("id") or "")
+        if not (is_content or is_state):
+            raise TimelinePatchError(
+                "E_BAD_ARG",
+                f"quantum {node_id} is a group; interaction links mount only on "
+                "content or state quanta in v1",
+            )
+        scope = node if is_content else (parent or {})
+        scope_leaf_ids = set(_quanta_leaf_block_ids(scope.get("blocks")))
+        for link_idx, link in enumerate(node.get("links") or []):
+            if not isinstance(link, dict):
+                continue
+            trigger = str(link.get("trigger") or "")
+            target = str(link.get("target") or "")
+            if trigger.startswith("hotspot:"):
+                block_ref = trigger[len("hotspot:"):]
+                if block_ref not in scope_leaf_ids:
+                    raise TimelinePatchError(
+                        "E_BAD_ARG",
+                        f"quantum {node_id} links[{link_idx}] hotspot references a "
+                        f"block outside its scope: {block_ref!r}",
+                    )
+            if target == "next" or target.startswith("url:"):
+                continue
+            ref = target[len("quantum:"):] if target.startswith("quantum:") else target
+            if ref not in seen_ids:
+                dangling.append(f"{node_id}.links[{link_idx}] → {target}")
+    if dangling:
+        raise TimelinePatchError(
+            "E_BAD_ARG",
+            "dangling link target(s): " + "; ".join(dangling) +
+            " — retarget or drop these links (same batch is fine) before removing",
+        )
+
+
+def _op_set_quanta(project: dict[str, Any], op: dict[str, Any]) -> None:
+    """Replace the whole quanta state tree (tree shape or v1 flat sugar)."""
+    raw = op.get("quanta")
+    if not isinstance(raw, dict):
+        raise TimelinePatchError("E_BAD_ARG", "set_quanta requires a 'quanta' object")
+    project["quanta"] = normalize_quanta(raw)
+
+
+def _renormalize_quanta(project: dict[str, Any]) -> None:
+    project["quanta"] = normalize_quanta(project.get("quanta"))
+
+
+def _require_quanta(project: dict[str, Any]) -> dict[str, Any]:
+    quanta = project.get("quanta")
+    if not isinstance(quanta, dict):
+        quanta = empty_quanta()
+        project["quanta"] = quanta
+    return quanta
+
+
+def _op_patch_quantum(project: dict[str, Any], op: dict[str, Any]) -> None:
+    """Merge ``fields`` into ONE node located by document-unique ``quantum_id``.
+
+    Structure never changes here: ``id`` and ``children`` are rejected —
+    structural edits go through insert/remove/move. Content nodes accept the
+    v1 ``builds`` sugar (replaces the state children wholesale).
+    """
+    quantum_id = str(op.get("quantum_id") or "")
+    if not quantum_id:
+        raise TimelinePatchError("E_BAD_ARG", "patch_quantum requires a 'quantum_id'")
+    fields = op.get("fields") if isinstance(op.get("fields"), dict) else None
+    if fields is None:
+        raise TimelinePatchError("E_BAD_ARG", "patch_quantum requires a 'fields' object")
+    for forbidden in ("id", "children"):
+        if forbidden in fields:
+            raise TimelinePatchError(
+                "E_BAD_ARG",
+                f"patch_quantum cannot change {forbidden!r}; use insert/remove/move for structure",
+            )
+    quanta = _require_quanta(project)
+    found = _find_quantum(quanta, quantum_id)
+    if found is None:
+        raise TimelinePatchError("E_NOT_FOUND", f"patch_quantum: no quantum with id {quantum_id}")
+    node, _parent = found
+    if "builds" in fields:
+        node.pop("children", None)  # explicit v1 sugar replaces the states
+    node.update({key: value for key, value in fields.items()})
+    node["id"] = quantum_id
+    _renormalize_quanta(project)
+
+
+def _op_insert_quantum(project: dict[str, Any], op: dict[str, Any]) -> None:
+    """Insert a whole subtree under ``parent_id`` at ``index`` (default: end)."""
+    parent_id = str(op.get("parent_id") or "root")
+    quantum = op.get("quantum")
+    if not isinstance(quantum, dict):
+        raise TimelinePatchError("E_BAD_ARG", "insert_quantum requires a 'quantum' object")
+    quanta = _require_quanta(project)
+    if parent_id == "root":
+        parent, parent_is_state = _quanta_root(quanta), False
+        parent_is_content = False
+    else:
+        found = _find_quantum(quanta, parent_id)
+        if found is None:
+            raise TimelinePatchError(
+                "E_NOT_FOUND", f"insert_quantum: no quantum with id {parent_id}"
+            )
+        parent, grand = found
+        parent_is_content = isinstance(parent.get("blocks"), list)
+        parent_is_state = grand is not None and isinstance(grand.get("blocks"), list)
+    if parent_is_state:
+        raise TimelinePatchError(
+            "E_BAD_ARG", "insert_quantum: states are leaves and cannot take children"
+        )
+    if parent_is_content and isinstance(quantum.get("blocks"), list):
+        raise TimelinePatchError(
+            "E_BAD_ARG",
+            "insert_quantum: content scopes cannot nest; insert states under content",
+        )
+    if not parent_is_content and _looks_like_state(quantum):
+        raise TimelinePatchError(
+            "E_BAD_ARG",
+            "insert_quantum: a state (visible_block_ids/dwell_sec/advance) can only "
+            "insert under a content quantum",
+        )
+    children = parent.setdefault("children", [])
+    index = op.get("index")
+    if index is None:
+        index = len(children)
+    if not isinstance(index, int) or isinstance(index, bool) or not (0 <= index <= len(children)):
+        raise TimelinePatchError(
+            "E_BAD_ARG",
+            f"insert_quantum index out of range: {index!r} (parent has {len(children)} children)",
+        )
+    children.insert(index, copy.deepcopy(quantum))
+    _renormalize_quanta(project)
+
+
+def _looks_like_state(node: dict[str, Any]) -> bool:
+    if isinstance(node.get("blocks"), list) or isinstance(node.get("children"), list):
+        return False
+    return bool(_QUANTUM_STATE_FIELDS.intersection(node))
+
+
+def _op_remove_quantum(project: dict[str, Any], op: dict[str, Any]) -> None:
+    """Detach a whole subtree. Dangling in-edges are caught by the batch-end
+    validation with every edge location enumerated — retarget them in the
+    SAME batch (op order does not matter)."""
+    quantum_id = str(op.get("quantum_id") or "")
+    if not quantum_id:
+        raise TimelinePatchError("E_BAD_ARG", "remove_quantum requires a 'quantum_id'")
+    if quantum_id == "root":
+        raise TimelinePatchError("E_BAD_ARG", "remove_quantum cannot remove the root")
+    quanta = _require_quanta(project)
+    found = _find_quantum(quanta, quantum_id)
+    if found is None:
+        raise TimelinePatchError("E_NOT_FOUND", f"remove_quantum: no quantum with id {quantum_id}")
+    node, parent = found
+    siblings = (parent or _quanta_root(quanta)).get("children") or []
+    siblings.remove(node)
+    _renormalize_quanta(project)
+
+
+def _op_move_quantum(project: dict[str, Any], op: dict[str, Any]) -> None:
+    """Reorder/reparent a subtree — the v2 replacement for default_path edits."""
+    quantum_id = str(op.get("quantum_id") or "")
+    if not quantum_id:
+        raise TimelinePatchError("E_BAD_ARG", "move_quantum requires a 'quantum_id'")
+    if quantum_id == "root":
+        raise TimelinePatchError("E_BAD_ARG", "move_quantum cannot move the root")
+    quanta = _require_quanta(project)
+    found = _find_quantum(quanta, quantum_id)
+    if found is None:
+        raise TimelinePatchError("E_NOT_FOUND", f"move_quantum: no quantum with id {quantum_id}")
+    node, old_parent = found
+    old_parent = old_parent or _quanta_root(quanta)
+
+    parent_id = str(op.get("parent_id") or "root")
+    subtree_ids = {
+        str(item.get("id") or "")
+        for item, _p, _c, _s in _walk_quanta_nodes(node)
+    }
+    if parent_id in subtree_ids:
+        raise TimelinePatchError(
+            "E_BAD_ARG", f"move_quantum would create a cycle through {parent_id}"
+        )
+    if parent_id == "root":
+        new_parent: dict[str, Any] = _quanta_root(quanta)
+        parent_is_content = False
+        parent_is_state = False
+    else:
+        found_parent = _find_quantum(quanta, parent_id)
+        if found_parent is None:
+            raise TimelinePatchError(
+                "E_NOT_FOUND", f"move_quantum: no quantum with id {parent_id}"
+            )
+        new_parent, grand = found_parent
+        parent_is_content = isinstance(new_parent.get("blocks"), list)
+        parent_is_state = grand is not None and isinstance(grand.get("blocks"), list)
+    if parent_is_state:
+        raise TimelinePatchError(
+            "E_BAD_ARG", "move_quantum: states are leaves and cannot take children"
+        )
+    node_is_state = old_parent is not None and isinstance(old_parent.get("blocks"), list)
+    if node_is_state and not parent_is_content:
+        raise TimelinePatchError(
+            "E_BAD_ARG", "move_quantum: a state can only live under a content quantum"
+        )
+    if not node_is_state and parent_is_content:
+        raise TimelinePatchError(
+            "E_BAD_ARG", "move_quantum: only states can live under a content quantum"
+        )
+
+    old_children = old_parent.get("children") or []
+    old_children.remove(node)
+    new_children = new_parent.setdefault("children", [])
+    index = op.get("index")
+    if index is None:
+        index = len(new_children)
+    if not isinstance(index, int) or isinstance(index, bool) or not (0 <= index <= len(new_children)):
+        old_children.append(node)  # restore before rejecting
+        raise TimelinePatchError(
+            "E_BAD_ARG",
+            f"move_quantum index out of range: {index!r} (parent has {len(new_children)} children)",
+        )
+    new_children.insert(index, node)
+    _renormalize_quanta(project)
+
+
 _OP_HANDLERS: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {
+    "set_project_title": _op_set_project_title,
     "set_shotlist": _op_set_shotlist,
     "update_shot": _op_update_shot,
+    "set_quanta": _op_set_quanta,
+    "patch_quantum": _op_patch_quantum,
+    "insert_quantum": _op_insert_quantum,
+    "remove_quantum": _op_remove_quantum,
+    "move_quantum": _op_move_quantum,
     "insert_clip": _op_insert_clip,
     "delete_clip": _op_delete_clip,
     "move_clip": _op_move_clip,

@@ -20,6 +20,7 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 from gemia.errors import RECOVERY_FIX_ARGS, RECOVERY_SWITCH_TOOL, ToolError
 from gemia.tools._context import ToolContext
+from gemia.tools._ffmpeg import cpu_video_encoder_args, get_video_encoder_args
 
 
 _OVERLAY_SHAPES = {"stroke", "rect", "rectangle", "ellipse", "circle", "arrow", "highlight", "text"}
@@ -570,23 +571,33 @@ def _adjust_rgb(rgb: np.ndarray, params: dict[str, Any]) -> np.ndarray:
 
 
 def _mux_optional_audio(video_only: Path, source: Path, out: Path) -> None:
-    cmd = [
+    head = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(video_only),
         "-i", str(source),
         "-map", "0:v:0",
         "-map", "1:a?",
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "20",
+    ]
+    tail = [
         "-c:a", "aac",
         "-shortest",
         "-movflags", "+faststart",
         str(out),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-    if proc.returncode != 0:
-        shutil.copyfile(video_only, out)
+    # This mux re-encodes the video track, so it goes through the same GPU
+    # encoder as the rest of the pipeline. This runs outside
+    # run_ffmpeg_with_progress (raw subprocess), so we carry the double-try
+    # here: hardware encoder first, then software, then keep the video and
+    # drop the audio mux as a last resort.
+    candidates = [get_video_encoder_args("h264")]
+    cpu = cpu_video_encoder_args("h264")
+    if cpu != candidates[0]:
+        candidates.append(cpu)
+    for encoder_args in candidates:
+        proc = subprocess.run(head + encoder_args + tail, capture_output=True, text=True, timeout=180)
+        if proc.returncode == 0:
+            return
+    shutil.copyfile(video_only, out)
 
 
 def _image_ext(path: Path) -> str:

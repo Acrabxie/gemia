@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from gemia.tools._context import ToolContext
-from gemia.tools._ffmpeg import audio_stream, ffprobe_duration, ffprobe_metadata, run_ffmpeg_with_progress
+from gemia.tools._ffmpeg import audio_stream, ffprobe_duration, ffprobe_metadata, get_video_encoder_args, run_ffmpeg_with_progress
 
 
 async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
@@ -39,7 +39,7 @@ async def _trim(args, ctx: ToolContext, src_path: Path, src_id: str) -> dict[str
         "-ss", f"{start:.3f}",
         "-to", f"{end:.3f}",
         "-i", str(src_path),
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        *get_video_encoder_args("h264"),
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         str(out_path),
@@ -81,7 +81,7 @@ async def _concat(args, ctx: ToolContext, src_path: Path, src_id: str) -> dict[s
         "ffmpeg", "-y",
         "-f", "concat", "-safe", "0",
         "-i", str(list_file),
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        *get_video_encoder_args("h264"),
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         str(out_path),
@@ -112,7 +112,7 @@ async def _reverse(args, ctx: ToolContext, src_path: Path, src_id: str) -> dict[
             "-i", str(src_path),
             "-vf", "reverse",
             "-af", "areverse",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            *get_video_encoder_args("h264"),
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
             str(out_path),
@@ -123,7 +123,7 @@ async def _reverse(args, ctx: ToolContext, src_path: Path, src_id: str) -> dict[
             "-i", str(src_path),
             "-vf", "reverse",
             "-an",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            *get_video_encoder_args("h264"),
             "-movflags", "+faststart",
             str(out_path),
         ]
@@ -156,7 +156,7 @@ async def _speed(args, ctx: ToolContext, src_path: Path, src_id: str) -> dict[st
             "-filter_complex",
             f"[0:v]setpts=PTS/{factor}[v];[0:a]{atempo_chain}[a]",
             "-map", "[v]", "-map", "[a]",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            *get_video_encoder_args("h264"),
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
             str(out_path),
@@ -167,7 +167,7 @@ async def _speed(args, ctx: ToolContext, src_path: Path, src_id: str) -> dict[st
             "-i", str(src_path),
             "-vf", f"setpts=PTS/{factor}",
             "-an",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            *get_video_encoder_args("h264"),
             "-movflags", "+faststart",
             str(out_path),
         ]

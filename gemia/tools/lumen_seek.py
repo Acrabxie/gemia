@@ -69,11 +69,8 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
             "error_message": "lumen_seek: need one of 'seconds' or 'frame'",
         }
     if seconds is not None and frame is not None:
-        return {
-            "applied": False,
-            "error_code": "E_ARG",
-            "error_message": "lumen_seek: pass only one of 'seconds' or 'frame', not both",
-        }
+        # Models (especially GPT) consistently pass both; prefer seconds.
+        frame = None
 
     try:
         seconds_f = None if seconds is None else float(seconds)

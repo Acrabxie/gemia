@@ -3,9 +3,11 @@
 Implements ``docs/lus-skill-format.md`` (the single normative reference):
 
 * :func:`validate_lus` — full validation with the spec's exact check order,
-  raising :class:`LusValidationError` (15 typed ``E_LUS_*`` codes) on the
-  FIRST failing check and returning ``(meta, body, warnings)`` where
-  ``warnings`` carries the 5 ``W_LUS_*`` codes (spec D7).
+  raising :class:`LusValidationError` (16 typed ``E_LUS_*`` codes; the 16th,
+  ``E_LUS_CRAFT_NUMBERS``, is the charter §14 craft-leak guard added by the
+  spec's §12 addendum) on the FIRST failing check and returning
+  ``(meta, body, warnings)`` where ``warnings`` carries the 5 ``W_LUS_*``
+  codes (spec D7).
 * :func:`parse_lus` — validate and discard warnings.
 * :func:`serialize_lus` — the canonical hand-rolled emitter (spec D5): fixed
   field order, block style, 2-space indent, LF only, fresh checksum. Output
@@ -83,6 +85,96 @@ _ABS_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"[A-Za-z]:\\Users\\"),
     re.compile(r"""(^|[\s"'`(=])~/""", re.MULTILINE),
 )
+
+# Charter §14 S1/S3 — craft-leak guard (E_LUS_CRAFT_NUMBERS).
+# A domain may be listed here ONLY while an installed point-library closes it
+# (its tool verb live in TOOL_NAMES — asserted by tests/test_charter_integrity.py,
+# the charter's build==install rule applied to this registry itself). Patterns
+# match raw-number craft RECIPES that smuggle taste past the library's floor —
+# v2-style RGB triplets (`shadows=[0.02,…]`, 阴影各 +0.02), curve control
+# points, `cubic-bezier(…)`, unit-less stagger/easing decimals. They must NOT
+# match the libraries' own creative language — semantic axes (`warmth: 0.7`,
+# `lift: 0.3`, `stagger_spread: 0.6`), look/archetype names — nor everyday
+# editing prose ("highlights: 3 best moments", timestamps `0:32`), UI styling
+# ("drop shadows: 0.15 opacity"), or placement/timing quantities ("trim to
+# 3s", "fade easing: 0.3s", `x=120`): recipe SHAPE (bracketed lists, signed
+# per-channel offsets, unit-less control-point decimals) is required, not a
+# keyword alone. Deliberately narrow (charter §14.3) — prose paraphrases are
+# the recall-side filter's job, not this regex's.
+_CQ = r"[\"'`*]{0,2}"          # optional quote/backtick/bold wrapping a key
+_CN = r"[-+±]?\s*[0-9０-９.]"  # signed (full-width tolerant) number start
+CRAFT_CLOSED_DOMAINS: tuple[tuple[str, str, tuple[re.Pattern[str], ...]], ...] = (
+    (
+        "grading",
+        "grade",
+        (
+            # bracketed recipe: shadows=[0.02,…] / highlights: (-0.02,…) /
+            # "push the shadows to [0.02,…]"
+            re.compile(
+                r"(?i)\b(shadows|midtones|highlights|tone[_-]?curves?"
+                r"|color[_-]?wheels?)" + _CQ +
+                r"\s*(?:[=:：→]|to\b)\s*[\[(]\s*" + _CN),
+            # lift-gamma-gain: the combined term with any number, or all
+            # three assigned numerically on one line (split-recipe form;
+            # `lift` alone is a legal grade semantic axis and stays exempt)
+            re.compile(r"(?i)\blift[_-]?gamma[_-]?gain" + _CQ +
+                       r"\s*[=:：]\s*[\[(]?\s*" + _CN),
+            re.compile(
+                r"(?i)\blift" + _CQ + r"\s*[=:：]\s*[-+]?[0-9０-９.]+"
+                r"[^\n]{0,40}\bgamma" + _CQ + r"\s*[=:：]\s*[-+]?[0-9０-９.]+"
+                r"[^\n]{0,40}\bgain" + _CQ + r"\s*[=:：]\s*[-+]?[0-9０-９.]"),
+            re.compile(r"(?i)\blut" + _CQ + r"\s*[=:：]\s*[\[(]\s*" + _CN),
+            # 中文配方：阴影/中间调/高光/色轮 + 括号配方 或 "各 ±0.02" 式逐通道偏移
+            re.compile(r"(阴影|中间调|高光|色轮)[^\n。；]{0,10}?[\[(［（]\s*" + _CN),
+            re.compile(r"(阴影|中间调|高光|色轮)[^\n。；]{0,8}?各\s*[-+±]\s*[0-9０-９.]"),
+        ),
+    ),
+    (
+        "motion",
+        "vector_motion",
+        (
+            re.compile(r"(?i)\bcubic[_-]?bezier\s*\(\s*" + _CN),
+            # bracketed control points: easing: [0.42, 0, 0.58, 1]
+            re.compile(r"(?i)\b(stagger|easing)" + _CQ +
+                       r"\s*(?:[=:：→]|to\b)\s*[\[(]\s*" + _CN),
+            # unit-less decimal = control point / per-item choreography
+            # ("stagger=0.08"); a unit suffix ("fade easing: 0.3s") is a
+            # legal duration and must pass
+            re.compile(r"(?i)\b(stagger|easing)" + _CQ +
+                       r"\s*[=:：]\s*[-+]?[0-9０-９]*[.．][0-9０-９]+"
+                       r"(?!\s*(?:s|ms|sec|px|%|秒)\b)"),
+        ),
+    ),
+)
+
+# Installed creative verbs whose domains are NOT yet covered by the guard —
+# a bounded, visible pending list (charter §14.1: no silent gaps). Moving a
+# verb out of here requires guard patterns + reject/reject/pass tests in the
+# same PR; tests/test_charter_integrity.py pins closed ∪ pending == reference
+# set and both ⊆ TOOL_NAMES.
+CRAFT_GUARD_PENDING_VERBS = frozenset({
+    "kinetic_type", "camera", "compose", "edit_grammar", "rhythm_edit",
+})
+
+
+def find_craft_leak(text: str) -> tuple[str, str, int] | None:
+    """Scan text for closed-domain craft recipes, skipping fenced code blocks
+    (quoting an anti-example in Pitfalls is legal). Returns
+    ``(domain, closing verb, 0-based line index)`` for the first hit, else
+    ``None``. Used by check 14b (body only — metadata carries recall signals,
+    not steps) and by the skill store's legacy-JSON quarantine."""
+    in_fence = False
+    for idx, line in enumerate(text.split("\n")):
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        for domain, verb, patterns in CRAFT_CLOSED_DOMAINS:
+            for pattern in patterns:
+                if pattern.search(line):
+                    return domain, verb, idx
+    return None
 
 # §3.2 `parameters` — JSON-Schema subset.
 _SCHEMA_ALLOWED_KEYS = frozenset({
@@ -668,6 +760,19 @@ def validate_lus(
                        "absolute user path — reference assets by asset_id and files "
                        "by workspace-relative paths",
                        line=text[: match.start()].count("\n") + 1)
+    # 14b. E_LUS_CRAFT_NUMBERS — charter §14: craft belongs in the library
+    # that closes its domain, never as raw numbers in a skill. Body only;
+    # fenced blocks and metadata are exempt (see find_craft_leak).
+    leak = find_craft_leak(body)
+    if leak is not None:
+        domain, verb, body_idx = leak
+        raise _err(
+            "E_LUS_CRAFT_NUMBERS",
+            f"raw {domain} craft numbers — this domain is closed by the "
+            f"`{verb}` library; run `{verb}` op:'catalog' for its creative "
+            "vocabulary and re-express the step semantically "
+            "(point-library charter §14)",
+            line=close_line + 1 + body_idx)
     # 15. checksum (E_LUS_CHECKSUM strict / W_LUS_* otherwise)
     if known_tools is not None:
         for tool in meta.tools_used:
@@ -863,6 +968,9 @@ __all__ = [
     "PAID_GENERATION_TOOLS",
     "FIELD_ORDER",
     "KNOWN_HEADINGS",
+    "CRAFT_CLOSED_DOMAINS",
+    "CRAFT_GUARD_PENDING_VERBS",
+    "find_craft_leak",
     "LusMeta",
     "LusWarning",
     "LusValidationError",

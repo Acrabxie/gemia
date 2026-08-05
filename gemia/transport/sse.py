@@ -40,9 +40,9 @@ REPLAY_BUFFER_SIZE = 200
 class _SessionState:
     __slots__ = ("buffer", "next_id", "closed")
 
-    def __init__(self) -> None:
+    def __init__(self, *, last_event_id: int = 0) -> None:
         self.buffer: deque[tuple[int, dict[str, Any]]] = deque(maxlen=REPLAY_BUFFER_SIZE)
-        self.next_id: int = 1
+        self.next_id: int = last_event_id + 1
         self.closed: bool = False
 
 
@@ -52,11 +52,14 @@ class SseSessionRegistry:
         self._cv = threading.Condition(self._lock)
         self._states: dict[str, _SessionState] = {}
 
-    def register(self, session_id: str) -> None:
+    def register(self, session_id: str, *, last_event_id: int = 0) -> None:
+        last_event_id = int(last_event_id)
+        if last_event_id < 0:
+            raise ValueError("last_event_id must be non-negative")
         with self._cv:
             if session_id in self._states:
                 raise ValueError(f"session already registered: {session_id}")
-            self._states[session_id] = _SessionState()
+            self._states[session_id] = _SessionState(last_event_id=last_event_id)
 
     def is_registered(self, session_id: str) -> bool:
         with self._lock:

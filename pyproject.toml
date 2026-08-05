@@ -1,6 +1,6 @@
 [project]
 name = "lumeri"
-version = "0.1.0"
+version = "1.0.0"
 description = "AI-native video/image/audio workbench"
 requires-python = ">=3.12"
 dependencies = [
@@ -15,6 +15,7 @@ dependencies = [
     "soundfile>=0.12",
     "scipy>=1.12",
     "certifi",
+    "httpx>=0.28",
     "PyYAML>=6",
     "opentimelineio>=0.17",
     "regex>=2024.11.6",
@@ -33,6 +34,7 @@ include = ["gemia*", "lumerai*", "lumenframe*"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
+    "ruff>=0.11.0",
 ]
 # Optional NLE interchange adapters (OTIO spun these out of core). Opt in with
 # `pip install lumeri[interop]` to enable EDL / FCP7 XML / FCPX export+import.
@@ -47,6 +49,33 @@ interop = [
 # stays light; gemia/mcp/server.py imports the SDK lazily inside its serve
 # entrypoints, so importing gemia without this extra never fails.
 mcp = ["mcp>=1.12,<2"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "C4",   # flake8-comprehensions
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["N802", "N806"]  # test function names
+"gemia/tools/_schema.py" = ["N816"]  # Gemini api field names
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
 
 [build-system]
 requires = ["setuptools>=68"]

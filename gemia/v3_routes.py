@@ -68,6 +68,16 @@ def try_handle(handler, *, method: str) -> bool:
             return _route_post(handler, path, query)
         if method in {"GET", "HEAD"}:
             return _route_get(handler, path, query, body=(method == "GET"))
+        if method == "DELETE":
+            match = re.match(r"^/sessions/([^/]+)$", path)
+            if not match:
+                return False
+            session_id = match.group(1)
+            get_manager().close_session(session_id)
+            from gemia.local_projects import remove_session
+            remove_session(session_id)
+            _json_response(handler, 200, {"session_id": session_id, "deleted": True})
+            return True
     except Exception as exc:
         if os.environ.get("LUMERI_V3_DEBUG_ERRORS") in {"1", "true", "TRUE"}:
             _json_error(handler, 500, f"{type(exc).__name__}: {exc}")
@@ -96,11 +106,13 @@ def _route_post(handler, path: str, query: dict) -> bool:
             return True
         return _session_timeline_op(handler, runner)
 
-    m = re.match(r"^/sessions/([^/]+)/(turn|assets|close|ask_response|plan_mode)$", path)
+    m = re.match(r"^/sessions/([^/]+)/(turn|assets|close|ask_response|plan_mode|resume|auto_title|pin|stop|steer|retract)$", path)
     if not m:
         return False
     session_id, action = m.group(1), m.group(2)
     runner = get_manager().get(session_id)
+    if runner is None and action == "resume":
+        runner = get_manager().create_session(session_id=session_id)
     if runner is None:
         _json_error(handler, 404, f"unknown session: {session_id}")
         return True
@@ -115,6 +127,40 @@ def _route_post(handler, path: str, query: dict) -> bool:
         return _ask_response(handler, runner)
     if action == "plan_mode":
         return _set_plan_mode(handler, runner)
+    if action == "resume":
+        return _session_info(handler, session_id)
+    if action == "auto_title":
+        body = _read_json_body(handler) or {}
+        messages = body.get("messages") if isinstance(body, dict) else []
+        title = "新会话"
+        if isinstance(messages, list):
+            for item in messages:
+                if not isinstance(item, dict) or item.get("role") != "user":
+                    continue
+                content = str(item.get("content") or "").strip()
+                if content:
+                    title = content.replace("\n", " ")[:28]
+                    break
+        from gemia.local_projects import update_session
+        update_session(session_id, title=title)
+        _json_response(handler, 200, {"session_id": session_id, "title": title})
+        return True
+    if action == "pin":
+        body = _read_json_body(handler) or {}
+        pinned = bool(body.get("pinned")) if isinstance(body, dict) else False
+        from gemia.local_projects import update_session
+        update_session(session_id, pinned=pinned)
+        _json_response(handler, 200, {"session_id": session_id, "pinned": pinned})
+        return True
+    if action == "stop":
+        if runner.cancel_turn():
+            _json_response(handler, 200, {"session_id": session_id, "stopped": True})
+        else:
+            _json_error(handler, 409, "当前没有可停止的任务")
+        return True
+    if action in {"steer", "retract"}:
+        _json_error(handler, 409, "当前任务状态不支持这项操作")
+        return True
     return False
 
 
@@ -371,8 +417,12 @@ def _session_info(handler, session_id: str) -> bool:
     if runner is None:
         _json_error(handler, 404, f"unknown session: {session_id}")
         return True
+    from gemia.local_projects import project_for_session
+    project_id = project_for_session(session_id)
     _json_response(handler, 200, {
         "session_id": session_id,
+        "project_id": project_id,
+        "run_id": session_id if project_id else None,
         "assets": runner.list_assets(),
         "latest_event_id": SSE_REGISTRY.latest_event_id(session_id),
         "plan_mode": runner.plan_mode,
@@ -397,6 +447,9 @@ def _list_sessions(handler) -> bool:
         runners = [r for r in (manager.get(sid) for sid in manager.list_sessions()) if r]
     sessions = []
     for runner in runners:
+        from gemia.local_projects import project_for_session
+        session_id = str(getattr(runner, "session_id", ""))
+        project_id = project_for_session(session_id)
         jobs: list[dict[str, Any]] = []
         try:
             registry = runner.agent._tool_ctx.jobs
@@ -404,7 +457,9 @@ def _list_sessions(handler) -> bool:
         except Exception:
             jobs = []
         sessions.append({
-            "session_id": getattr(runner, "session_id", ""),
+            "session_id": session_id,
+            "project_id": project_id,
+            "run_id": session_id if project_id else None,
             "created_at": getattr(runner, "created_at", None),
             "last_used_at": getattr(runner, "last_used_at", None),
             "turn_in_progress": bool(getattr(runner, "turn_in_progress", False)),

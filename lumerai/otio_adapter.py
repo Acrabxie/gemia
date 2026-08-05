@@ -29,7 +29,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
-from urllib.request import url2pathname
 
 import opentimelineio as otio
 from opentimelineio import opentime, schema as otio_schema
@@ -60,8 +59,7 @@ _TEXT_GENERATOR_KIND = "lumeri_text"
 
 
 def _external_target_url(source_path: str) -> str:
-    """Return a bundle-safe URL for an existing local media file."""
-
+    """Return a portable file URL for existing local media."""
     if not source_path:
         return ""
     path = Path(source_path).expanduser()
@@ -71,13 +69,15 @@ def _external_target_url(source_path: str) -> str:
 
 
 def _source_path_from_target_url(target_url: str) -> str:
-    """Convert a local file URL back to the host-native filesystem path."""
-
     parsed = urlparse(target_url)
     if parsed.scheme.lower() != "file":
         return target_url
-    netloc = f"//{parsed.netloc}" if parsed.netloc else ""
-    return url2pathname(unquote(f"{netloc}{parsed.path}"))
+    path = unquote(parsed.path)
+    if parsed.netloc:
+        path = f"//{parsed.netloc}{path}"
+    if len(path) >= 3 and path[0] == "/" and path[2] == ":":
+        path = path[1:]
+    return str(Path(path))
 
 
 # ---------------------------------------------------------------------------
@@ -334,9 +334,7 @@ def otio_to_project(tl: otio_schema.Timeline, *, account_id: str | None = None) 
 
             # Rebuild asset from ExternalReference.
             if isinstance(item.media_reference, otio_schema.ExternalReference):
-                source_path = _source_path_from_target_url(
-                    str(item.media_reference.target_url or "")
-                )
+                source_path = _source_path_from_target_url(str(item.media_reference.target_url or ""))
                 if not asset_id:
                     asset_id = _make_asset_id(source_path or name)
                 if asset_id not in assets_by_key:

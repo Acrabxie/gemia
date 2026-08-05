@@ -60,6 +60,7 @@ def empty_project(*, account_id: str | None = None, title: str = "Untitled Proje
             "generator": "gemia",
         },
         "shotlist": empty_shotlist(),
+        "quanta": empty_quanta(),
     }
 
 
@@ -103,6 +104,28 @@ def _normalize_shot(raw: Any, *, scene_idx: int, shot_idx: int) -> dict[str, Any
     status = str(raw.get("status") or "draft").strip().lower()
     if status not in SHOT_STATUSES:
         status = "draft"
+    asset_id = _optional_str(raw.get("asset_id"))
+    library_asset_id = _optional_str(raw.get("library_asset_id"))
+    raw_evidence = raw.get("evidence")
+    if not library_asset_id and isinstance(raw_evidence, dict):
+        library_asset_id = _optional_str(raw_evidence.get("library_asset_id"))
+    source_in: float | None = None
+    source_out: float | None = None
+    if asset_id or library_asset_id:
+        try:
+            candidate_in = float(raw.get("source_in"))
+            candidate_out = float(raw.get("source_out"))
+            if candidate_in >= 0.0 and candidate_out > candidate_in:
+                source_in = round(candidate_in, 3)
+                source_out = round(candidate_out, 3)
+        except (TypeError, ValueError):
+            pass
+    evidence = (
+        _normalize_shot_evidence(raw_evidence)
+        if (asset_id or library_asset_id)
+        else None
+    )
+    alternatives = _normalize_shot_alternatives(raw.get("alternatives"))
     return {
         "id": str(raw.get("id") or "") or f"s{scene_idx}_shot{shot_idx}",
         "description": str(raw.get("description") or ""),
@@ -112,12 +135,100 @@ def _normalize_shot(raw: Any, *, scene_idx: int, shot_idx: int) -> dict[str, Any
         "mood": _optional_str(raw.get("mood")),
         "source": source,
         "search_query": _optional_str(raw.get("search_query")),
-        "asset_id": _optional_str(raw.get("asset_id")),
+        "asset_id": asset_id,
+        "library_asset_id": library_asset_id,
+        "source_in": source_in,
+        "source_out": source_out,
+        "evidence": evidence,
+        "alternatives": alternatives,
         "clip_id": _optional_str(raw.get("clip_id")),
         "transition_after": _normalize_transition(raw.get("transition_after")),
         "status": status,
         "notes": _optional_str(raw.get("notes")),
     }
+
+
+def _normalize_shot_evidence(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    evidence_id = str(raw.get("evidence_id") or "").strip()
+    annotation_id = str(raw.get("annotation_id") or "").strip()
+    library_asset_id = str(raw.get("library_asset_id") or "").strip()
+    if not evidence_id or not annotation_id or not library_asset_id:
+        return None
+    confidence = raw.get("confidence")
+    score = raw.get("score")
+    evidence: dict[str, Any] = {
+        "evidence_id": evidence_id,
+        "library_asset_id": library_asset_id,
+        "annotation_id": annotation_id,
+        "label": str(raw.get("label") or "")[:200],
+        "note": str(raw.get("note") or "")[:5000],
+        "tags": [str(item)[:60] for item in raw.get("tags") or []][:30],
+        "category": str(raw.get("category") or "")[:80],
+        "source": str(raw.get("source") or "user")[:32],
+        "confidence": (
+            round(max(0.0, min(float(confidence), 1.0)), 3)
+            if isinstance(confidence, (int, float))
+            else None
+        ),
+        "matched_terms": [str(item)[:80] for item in raw.get("matched_terms") or []][:20],
+        "score": round(float(score), 6) if isinstance(score, (int, float)) else 0.0,
+        "score_components": _normalize_json_dict(raw.get("score_components")),
+        "ranking_reasons": [str(item)[:200] for item in raw.get("ranking_reasons") or []][:10],
+        "query": str(raw.get("query") or "")[:500],
+        "decision": str(raw.get("decision") or "observe")[:32],
+        "decision_control_annotation_id": _optional_str(
+            raw.get("decision_control_annotation_id")
+        ),
+        "authority_tier": max(0, min(int(_float_or(raw.get("authority_tier"), 0.0)), 9)),
+        "algorithm_version": str(raw.get("algorithm_version") or "")[:80],
+        "metadata": _normalize_json_dict(raw.get("metadata")),
+        "provenance": _normalize_json_dict(raw.get("provenance")),
+        "created_at": str(raw.get("created_at") or "")[:80],
+        "updated_at": str(raw.get("updated_at") or "")[:80],
+    }
+    for key in ("start_sec", "end_sec", "duration_sec", "match_rank", "raw_score"):
+        value = raw.get(key)
+        if isinstance(value, (int, float)):
+            evidence[key] = round(float(value), 6)
+    return evidence
+
+
+def _normalize_shot_alternatives(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    alternatives: list[dict[str, Any]] = []
+    for item in raw[:3]:
+        normalized = _normalize_shot_evidence(item)
+        if normalized is None:
+            continue
+        normalized["reason_not_selected"] = str(
+            item.get("reason_not_selected") or "lower-ranked candidate"
+        )[:240]
+        alternatives.append(normalized)
+    return alternatives
+
+
+def _normalize_json_dict(raw: Any, *, _depth: int = 0) -> dict[str, Any]:
+    if not isinstance(raw, dict) or _depth >= 4:
+        return {}
+    out: dict[str, Any] = {}
+    for key, value in list(raw.items())[:40]:
+        clean_key = str(key)[:100]
+        if isinstance(value, dict):
+            out[clean_key] = _normalize_json_dict(value, _depth=_depth + 1)
+        elif isinstance(value, list):
+            clean_list: list[Any] = []
+            for item in value[:40]:
+                if isinstance(item, dict):
+                    clean_list.append(_normalize_json_dict(item, _depth=_depth + 1))
+                elif isinstance(item, (str, int, float, bool)) or item is None:
+                    clean_list.append(item if not isinstance(item, str) else item[:500])
+            out[clean_key] = clean_list
+        elif isinstance(value, (str, int, float, bool)) or value is None:
+            out[clean_key] = value if not isinstance(value, str) else value[:1000]
+    return out
 
 
 def _normalize_scene(raw: Any, *, scene_idx: int) -> dict[str, Any]:
@@ -163,6 +274,378 @@ def iter_shots(shotlist: dict[str, Any]):
         for shot in scene.get("shots") or []:
             if isinstance(shot, dict):
                 yield scene, shot
+
+
+# ── quanta IR ───────────────────────────────────────────────────────────────
+# The quanta is a discrete video — one ordered state tree (quanta-kernel-plan
+# §2) living inside project_state next to the shotlist, so every mutation
+# inherits the append-only patch log (undo + audit) for free. Node kinds are
+# DERIVED from structure, never stored: a node declaring ``blocks`` is a
+# content scope (geometry solves once per scope); its children are state
+# leaves (discrete render states); everything above is a group. The v1 flat
+# ``{slides, default_path}`` shape stays accepted forever as authoring sugar
+# and lifts deterministically through ``gemia.quanta.traverse.lift_flat_quanta``.
+#
+# Normalization here is STRUCTURE-tolerant only: missing fields are
+# backfilled, garbage entries are dropped (but never a whole node), ids are
+# auto-filled. REFERENCE integrity (duplicate ids, dangling link targets,
+# hotspot blocks, dwell_sec > 0, nested content scopes, link mounts on
+# groups) is deliberately NOT enforced here — lumerai.patches validates it
+# strictly at patch time so ProjectStore.load() can never raise on stored
+# state. To keep that split honest, normalize deliberately PRESERVES the two
+# shapes validation must reject instead of silently stripping them: a state
+# child that authored ``blocks`` keeps them (nested-content rejection), and a
+# group that authored ``links`` keeps them (link-mount rejection).
+
+QUANTA_VERSION = 2
+QUANTA_BLOCK_KINDS = {"text", "stat", "image", "shape", "group"}
+QUANTA_DEFAULT_DWELL = 3.0
+QUANTA_ADVANCE_MODES = {"wait", "auto"}
+_QUANTA_TRANSITIONS = {"cut", "fade"}  # v1 = cut + single-sided fade (spec §3.4)
+
+
+def empty_quanta() -> dict[str, Any]:
+    return {
+        "version": QUANTA_VERSION,
+        "theme": {"tokens": {}, "mood": "", "aspect": "16:9"},
+        "root": {"id": "root", "children": []},
+    }
+
+
+def _normalize_quanta_block(
+    raw: Any,
+    *,
+    block_path: tuple[int, ...] = (1,),
+    _ancestors: frozenset[int] = frozenset(),
+) -> dict[str, Any] | None:
+    """Normalize one semantic content block, including nested groups.
+
+    Every accepted block receives a stable id. Model-authored ids survive;
+    otherwise the source position becomes ``blk_1``, ``blk_1_2``, and so on.
+    Unknown kinds/keys are dropped and cyclic/depth-hostile Python input is
+    truncated, keeping the public ``normalize_quanta`` contract never-raises for
+    JSON-shaped input.
+    """
+    if not isinstance(raw, dict):
+        return None
+    kind = str(raw.get("kind") or "").strip().lower()
+    if kind not in QUANTA_BLOCK_KINDS:
+        return None
+    fallback_id = "blk_" + "_".join(str(part) for part in block_path)
+    block: dict[str, Any] = {
+        "id": str(raw.get("id") or "").strip() or fallback_id,
+        "kind": kind,
+    }
+    role = _optional_str(raw.get("role"))
+    if role:
+        block["role"] = role
+    if kind == "text":
+        block["text"] = str(raw.get("text") or "")
+        bullets = raw.get("bullets") if isinstance(raw.get("bullets"), list) else []
+        block["bullets"] = [str(item) for item in bullets if str(item or "")]
+        style_token = _optional_str(raw.get("style_token"))
+        if style_token:
+            block["style_token"] = style_token
+    elif kind == "stat":
+        block["value"] = str(raw.get("value") or "")
+        block["label"] = str(raw.get("label") or "")
+    elif kind == "image":
+        block["asset_id"] = _optional_str(raw.get("asset_id"))
+        block["source"] = _optional_str(raw.get("source"))
+        query = _optional_str(raw.get("query"))
+        if query:
+            block["query"] = query
+    elif kind == "shape":
+        block["shape"] = str(raw.get("shape") or "rect")
+        fill_token = _optional_str(raw.get("fill_token"))
+        if fill_token:
+            block["fill_token"] = fill_token
+    elif kind == "group":
+        children_raw = raw.get("children") if isinstance(raw.get("children"), list) else []
+        raw_identity = id(raw)
+        if raw_identity in _ancestors or len(block_path) >= 32:
+            children_raw = []
+        ancestors = _ancestors | {raw_identity}
+        children = [
+            _normalize_quanta_block(
+                child,
+                block_path=(*block_path, child_idx + 1),
+                _ancestors=ancestors,
+            )
+            for child_idx, child in enumerate(children_raw)
+        ]
+        block["children"] = [child for child in children if child is not None]
+    return block
+
+
+def _quanta_leaf_block_ids(blocks: Any) -> list[str]:
+    """Return renderable (non-group) block ids in deterministic paint order."""
+    ids: list[str] = []
+    if not isinstance(blocks, list):
+        return ids
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("kind") == "group":
+            ids.extend(_quanta_leaf_block_ids(block.get("children")))
+        else:
+            block_id = str(block.get("id") or "")
+            if block_id:
+                ids.append(block_id)
+    return ids
+
+
+def _normalize_link(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    trigger = str(raw.get("trigger") or "").strip()
+    target = str(raw.get("target") or "").strip()
+    if not trigger or not target:
+        return None
+    if target.startswith("slide:"):  # v1 grammar lifts to the v2 spelling
+        target = "quantum:" + target[len("slide:"):]
+    return {"trigger": trigger, "target": target}
+
+
+def _normalize_state(
+    raw: Any,
+    *,
+    state_idx: int,
+    scope_id: str,
+    leaf_block_ids: list[str],
+    used_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    """One discrete render state (v1's build). ``advance`` is presentation
+    semantics: wait = hold until interaction, auto = advance after dwell."""
+    raw = raw if isinstance(raw, dict) else {}
+    visible_raw = raw.get("visible_block_ids")
+    # v1 builds authored before visibility existed meant "the whole scope" at
+    # every state. An explicit [] is meaningful and must remain an empty first
+    # state; only a missing/wrong-type value backfills.
+    visible = (
+        [str(item or "").strip() for item in visible_raw]
+        if isinstance(visible_raw, list)
+        else list(leaf_block_ids)
+    )
+    advance = str(raw.get("advance") or "wait").strip().lower()
+    authored = str(raw.get("id") or "")
+    state_id = authored or f"b{state_idx + 1}"
+    # Same rule as the flat lift: state ids are document-unique by scope
+    # prefix, and already-prefixed ids never re-prefix (round-trip stable).
+    if not state_id.startswith(f"{scope_id}_"):
+        state_id = f"{scope_id}_{state_id}"
+    if not authored and used_ids is not None and state_id in used_ids:
+        # Backfilled ids dodge occupied slots (an id-less state inserted
+        # among authored siblings must not collide); AUTHORED duplicates are
+        # kept verbatim so strict validation rejects them loudly.
+        bump = state_idx + 1
+        while f"{scope_id}_b{bump}" in used_ids:
+            bump += 1
+        state_id = f"{scope_id}_b{bump}"
+    state: dict[str, Any] = {
+        "id": state_id,
+        # A missing/garbage dwell backfills to a sane default; an EXPLICIT
+        # numeric value is preserved even when <= 0 so strict validation can
+        # reject it.
+        "dwell_sec": _float_or(raw.get("dwell_sec"), QUANTA_DEFAULT_DWELL),
+        "visible_block_ids": visible,
+        "advance": advance if advance in QUANTA_ADVANCE_MODES else "wait",
+        "hidden": bool(raw.get("hidden")),
+    }
+    if isinstance(raw.get("blocks"), list):
+        # Nested content under a content scope: preserved verbatim so strict
+        # validation can reject it loudly instead of normalize eating it.
+        state["blocks"] = list(raw["blocks"])
+    return state
+
+
+def _normalize_content_node(raw: dict[str, Any], *, fallback_id: str) -> dict[str, Any]:
+    """A content scope (v1's slide): blocks + state children."""
+    blocks_raw = raw.get("blocks") if isinstance(raw.get("blocks"), list) else []
+    blocks = [
+        _normalize_quanta_block(block, block_path=(block_idx + 1,))
+        for block_idx, block in enumerate(blocks_raw)
+    ]
+    blocks = [block for block in blocks if block is not None]
+    leaf_block_ids = _quanta_leaf_block_ids(blocks)
+    node_id = str(raw.get("id") or "") or fallback_id
+    # ``children`` is the tree spelling; ``builds`` stays accepted as v1 sugar.
+    # An op that sets ``builds`` explicitly must pop ``children`` first.
+    states_raw = raw.get("children")
+    if not isinstance(states_raw, list):
+        states_raw = raw.get("builds") if isinstance(raw.get("builds"), list) else []
+    states = []
+    used_state_ids: set[str] = {
+        str(state.get("id") or "")
+        for state in states_raw
+        if isinstance(state, dict) and str(state.get("id") or "")
+    }
+    used_state_ids |= {
+        f"{node_id}_{sid}" for sid in list(used_state_ids)
+        if not sid.startswith(f"{node_id}_")
+    }
+    for i, state in enumerate(states_raw):
+        if not isinstance(state, dict):
+            continue
+        normalized_state = _normalize_state(
+            state, state_idx=i, scope_id=node_id,
+            leaf_block_ids=leaf_block_ids, used_ids=used_state_ids,
+        )
+        used_state_ids.add(normalized_state["id"])
+        states.append(normalized_state)
+    if not states:  # every scope has at least its full render state
+        states = [{
+            "id": f"{node_id}_b1",
+            "dwell_sec": QUANTA_DEFAULT_DWELL,
+            "visible_block_ids": list(leaf_block_ids),
+            "advance": "wait",
+            "hidden": False,
+        }]
+    links_raw = raw.get("links") if isinstance(raw.get("links"), list) else []
+    links = [_normalize_link(link) for link in links_raw]
+    transition_raw = raw.get("transition") if isinstance(raw.get("transition"), dict) else {}
+    kind = str(transition_raw.get("kind") or "cut").strip().lower()
+    if kind not in _QUANTA_TRANSITIONS:
+        kind = "cut"
+    return {
+        "id": node_id,
+        "layout": str(raw.get("layout") or "content"),
+        "title": str(raw.get("title") or ""),
+        "blocks": blocks,
+        "notes": str(raw.get("notes") or ""),
+        "mood_override": _optional_str(raw.get("mood_override")),
+        "links": [link for link in links if link is not None],
+        "transition": {"kind": kind},
+        "hidden": bool(raw.get("hidden")),
+        "children": states,
+    }
+
+
+def _normalize_group_node(
+    raw: dict[str, Any],
+    *,
+    fallback_id: str,
+    node_path: tuple[int, ...],
+    _ancestors: frozenset[int],
+) -> dict[str, Any]:
+    group: dict[str, Any] = {
+        "id": str(raw.get("id") or "") or fallback_id,
+        "title": str(raw.get("title") or ""),
+        "hidden": bool(raw.get("hidden")),
+        "children": _normalize_quanta_children(
+            raw.get("children"), node_path=node_path, _ancestors=_ancestors
+        ),
+    }
+    if isinstance(raw.get("links"), list):
+        # Groups cannot mount interaction edges in v1 — preserved verbatim so
+        # strict validation rejects loudly instead of normalize eating them.
+        group["links"] = [
+            link
+            for link in (_normalize_link(item) for item in raw["links"])
+            if link is not None
+        ]
+    return group
+
+
+def _normalize_quanta_children(
+    raw_children: Any,
+    *,
+    node_path: tuple[int, ...],
+    _ancestors: frozenset[int],
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_children, list):
+        return []
+    if len(node_path) >= 32:
+        return []
+    out: list[dict[str, Any]] = []
+    for child_idx, child in enumerate(raw_children):
+        if not isinstance(child, dict):
+            continue
+        identity = id(child)
+        if identity in _ancestors:
+            continue
+        child_path = (*node_path, child_idx + 1)
+        fallback_id = "q" + "_".join(str(part) for part in child_path)
+        if isinstance(child.get("blocks"), list):
+            out.append(_normalize_content_node(child, fallback_id=fallback_id))
+        else:
+            out.append(_normalize_group_node(
+                child,
+                fallback_id=fallback_id,
+                node_path=child_path,
+                _ancestors=_ancestors | {identity},
+            ))
+    return out
+
+
+def _normalize_slide(raw: Any, *, slide_idx: int) -> dict[str, Any]:
+    """Normalize one v1 flat slide (kept as the lift sugar's front half)."""
+    raw = raw if isinstance(raw, dict) else {}
+    node = _normalize_content_node(dict(raw), fallback_id=f"s{slide_idx + 1}")
+    builds = [
+        {
+            "id": state["id"],
+            "dwell_sec": state["dwell_sec"],
+            "visible_block_ids": state["visible_block_ids"],
+            "advance": state["advance"],
+        }
+        for state in node.pop("children")
+    ]
+    node.pop("hidden", None)
+    hidden = bool(raw.get("hidden")) if isinstance(raw, dict) else False
+    slide = {**node, "builds": builds}
+    if hidden:
+        slide["hidden"] = True
+    return slide
+
+
+def normalize_quanta(raw: Any) -> dict[str, Any]:
+    """Coerce a (possibly partial, model-authored) quanta into the canonical
+    v2 state tree. Never raises — mirror of ``normalize_shotlist``.
+
+    Accepts either the v2 tree (``root``) or the v1 flat authoring sugar
+    (``slides`` [+ ``default_path``], which orders the lifted scopes and is
+    then dropped — DFS leaf order IS the default path in v2).
+    """
+    if not isinstance(raw, dict):
+        return empty_quanta()
+    theme_raw = raw.get("theme") if isinstance(raw.get("theme"), dict) else {}
+    tokens = theme_raw.get("tokens") if isinstance(theme_raw.get("tokens"), dict) else {}
+    theme = {
+        "tokens": dict(tokens),
+        "mood": str(theme_raw.get("mood") or ""),
+        "aspect": str(theme_raw.get("aspect") or "16:9"),
+    }
+    root_raw = raw.get("root")
+    if isinstance(root_raw, dict):
+        return {
+            "version": QUANTA_VERSION,
+            "theme": theme,
+            "root": {
+                "id": "root",
+                "children": _normalize_quanta_children(
+                    root_raw.get("children"),
+                    node_path=(),
+                    _ancestors=frozenset({id(root_raw)}),
+                ),
+            },
+        }
+    # v1 flat sugar: normalize slides first, then lift deterministically.
+    from gemia.quanta.traverse import lift_flat_quanta  # deferred: keeps model import light
+
+    slides_raw = raw.get("slides") if isinstance(raw.get("slides"), list) else []
+    slides = [_normalize_slide(slide, slide_idx=i) for i, slide in enumerate(slides_raw)]
+    path_raw = raw.get("default_path") if isinstance(raw.get("default_path"), list) else []
+    default_path = [str(item) for item in path_raw if str(item or "")]
+    lifted = lift_flat_quanta({
+        "version": 1,
+        "theme": theme,
+        "slides": slides,
+        "default_path": default_path,
+    })
+    # Lift output is canonical except for state-id backfill spelling; one
+    # more tree pass keeps ``normalize(normalize(x)) == normalize(x)`` exact.
+    return normalize_quanta(lifted)
 
 
 def normalize_project(
@@ -338,6 +821,10 @@ def _normalize_canonical_project(project: dict[str, Any], *, account_id: str | N
     metadata = project.get("metadata") if isinstance(project.get("metadata"), dict) else {}
     normalized["metadata"] = {**normalized["metadata"], **metadata}
     normalized["shotlist"] = normalize_shotlist(project.get("shotlist"))
+    # Pass the quanta through explicitly: normalize rebuilds from empty_project()
+    # and copies known keys, so without this line ProjectStore.load() would
+    # silently strip project_state.quanta on every read (spec §2.4).
+    normalized["quanta"] = normalize_quanta(project.get("quanta"))
     return normalized
 
 
@@ -517,24 +1004,36 @@ def _normalize_tracks(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list) or not value:
         return _default_tracks()
     tracks: list[dict[str, Any]] = []
+    next_video_index = 1
+    next_overlay_index = 1
+    next_audio_index = 1
     for index, raw in enumerate(value):
         if not isinstance(raw, dict):
             continue
         raw_id = str(raw.get("id", ""))
-        if raw_id.startswith("OV"):
-            inferred = "overlay"
-        elif raw_id.startswith("A"):
-            inferred = "audio"
+        raw_kind = str(raw.get("kind") or "").strip().lower()
+        if raw_kind == "overlay" or raw_id.startswith("OV"):
+            kind = "overlay"
+            prefix = "OV"
+            default_name = "Overlay"
+            fallback_id = f"OV{next_overlay_index}"
+            next_overlay_index += 1
+        elif raw_kind == "audio" or raw_id.startswith("A"):
+            kind = "audio"
+            prefix = "A"
+            default_name = "Audio"
+            fallback_id = f"A{next_audio_index}"
+            next_audio_index += 1
         else:
-            inferred = "video"
-        kind = str(raw.get("kind") or inferred)
-        if kind not in TRACK_KINDS:
             kind = "video"
-        prefix = {"audio": "A", "overlay": "OV"}.get(kind, "V")
-        default_name = {"audio": "Audio", "overlay": "Overlay"}.get(kind, "Video")
+            prefix = "V"
+            default_name = "Video"
+            fallback_id = f"V{next_video_index}"
+            next_video_index += 1
+        normalized_id = str(raw.get("id") or fallback_id)
         tracks.append(
             {
-                "id": str(raw.get("id") or f"{prefix}{index + 1}"),
+                "id": normalized_id,
                 "kind": kind,
                 "name": str(raw.get("name") or default_name),
                 "index": int(_float_or(raw.get("index"), index)),
@@ -624,12 +1123,16 @@ def _utc_now() -> str:
 
 
 __all__ = [
+    "QUANTA_BLOCK_KINDS",
+    "QUANTA_VERSION",
     "IMAGE_DURATION",
     "PROJECT_SCHEMA",
     "PROJECT_SCHEMA_VERSION",
     "clip_count",
+    "empty_quanta",
     "empty_project",
     "is_canonical_project",
     "legacy_project_state_from_project",
+    "normalize_quanta",
     "normalize_project",
 ]

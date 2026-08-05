@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from gemia import memory
+from gemia import memory, project_context
 from gemia.tools._context import ToolContext
 
 
@@ -39,21 +39,44 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         raise ValueError("remember requires non-empty 'content'")
     title = args.get("title")
     kind = args.get("kind")
-
-    record = memory.remember_fact(
-        content,
-        title=str(title).strip() if title else None,
-        kind=str(kind).strip() if kind else None,
+    scope = str(args.get("scope") or "auto").strip().lower()
+    if scope not in {"auto", "global", "project"}:
+        raise ValueError("remember scope must be auto, global, or project")
+    extra = getattr(ctx, "extra", {}) if ctx is not None else {}
+    store = extra.get("production_store")
+    project_id = str(extra.get("project_id") or "")
+    has_project = project_context.is_project_workspace(store, project_id)
+    use_project = scope == "project" or (
+        scope == "auto" and has_project
     )
+    if use_project and not has_project:
+        raise ValueError("project memory is unavailable outside a Project session")
+
+    writer = project_context.remember_fact if use_project else None
+    if writer is not None:
+        record = writer(
+            store,
+            project_id,
+            content,
+            title=str(title).strip() if title else None,
+            kind=str(kind).strip() if kind else None,
+        )
+    else:
+        record = memory.remember_fact(
+            content,
+            title=str(title).strip() if title else None,
+            kind=str(kind).strip() if kind else None,
+        )
     action = record.get("action", "appended")
     return {
         "remembered": True,
+        "scope": "project" if use_project else "global",
         "action": action,
         "title": record.get("title", ""),
         "kind": record.get("kind", ""),
         "entry": record.get("entry", content),
         "summary": (
-            f"Remembered durable fact ({action})"
+            f"Remembered {'Project' if use_project else 'global'} durable fact ({action})"
             + (f" — {record['title']}" if record.get("title") else "")
             + "."
         ),

@@ -94,6 +94,9 @@ _CORE_SQL = """
 SELECT a.rowid AS rowid, a.annotation_id AS annotation_id, a.asset_id AS asset_id,
        a.scope AS scope, a.start_sec AS start_sec, a.end_sec AS end_sec,
        a.label AS label, a.category AS category, a.confidence AS confidence,
+       a.source AS source, a.note AS note, a.tags_json AS tags_json,
+       a.metadata_json AS metadata_json, a.created_at AS created_at,
+       a.updated_at AS updated_at,
        a.search_text AS search_text,
        m.name AS name, m.media_kind AS media_kind, m.duration AS duration,
        bm25(media_annotations_fts) AS rank
@@ -231,6 +234,12 @@ def search_media_annotations(
                     "label": label,
                     "category": str(row["category"] or ""),
                     "confidence": row["confidence"],
+                    "source": str(row["source"] or "user"),
+                    "note": str(row["note"] or ""),
+                    "tags": _json_list(row["tags_json"]),
+                    "metadata": _json_dict(row["metadata_json"]),
+                    "created_at": str(row["created_at"] or ""),
+                    "updated_at": str(row["updated_at"] or ""),
                     "annotation_id": str(row["annotation_id"] or ""),
                     "_rank": rank,
                 }
@@ -248,7 +257,7 @@ def search_media_annotations(
     for score, entry in scored[:limit]:
         time_rows = sorted(entry["time_rows"], key=lambda r: r["_rank"])[:6]
         for tr in time_rows:
-            tr.pop("_rank", None)
+            tr["match_rank"] = round(float(tr.pop("_rank", 0.0)), 6)
         results.append(
             {
                 "library_asset_id": entry["library_asset_id"],
@@ -270,6 +279,34 @@ def search_media_annotations(
         "results": results,
         "unindexed_count": unindexed,
     }
+
+
+def _json_list(raw: Any) -> list[Any]:
+    if isinstance(raw, list):
+        return raw
+    if not raw:
+        return []
+    import json
+
+    try:
+        value = json.loads(str(raw))
+    except Exception:
+        return []
+    return value if isinstance(value, list) else []
+
+
+def _json_dict(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    import json
+
+    try:
+        value = json.loads(str(raw))
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def asset_ids_matching(account_id: str, q: str, *, limit: int = 1000) -> list[str]:

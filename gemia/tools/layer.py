@@ -249,7 +249,11 @@ def _compact_tree_summary(layer: dict[str, Any], depth: int = 0, max_depth: int 
         return ""
 
     indent = "  " * depth
-    layer_id = str(layer.get("id", "?"))[:12]
+    # Full id, never truncated: the model addresses layers (delete/patch/
+    # set_visibility) by this exact string. Truncating to 12 chars produced a
+    # display id like "shape_1571eb" for a real "shape_1571eb06a035", so every
+    # edit the model copied from this tree failed with E_NOT_FOUND.
+    layer_id = str(layer.get("id", "?"))
     layer_type = str(layer.get("type", "?"))
     layer_name = str(layer.get("name", ""))
     visible = "👁" if layer.get("visible", True) else "🚫"

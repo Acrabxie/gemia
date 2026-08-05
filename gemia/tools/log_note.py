@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from gemia import memory
+from gemia import memory, project_context
 from gemia.tools._context import ToolContext
 
 
@@ -35,10 +35,31 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     if not text:
         return {"logged": False, "reason": "empty", "summary": "Nothing to log."}
 
-    record = memory.append_daily_entry(text)
+    scope = str(args.get("scope") or "auto").strip().lower()
+    if scope not in {"auto", "global", "project"}:
+        return {"logged": False, "reason": "invalid_scope", "summary": "Invalid log scope."}
+    extra = getattr(ctx, "extra", {}) if ctx is not None else {}
+    store = extra.get("production_store")
+    project_id = str(extra.get("project_id") or "")
+    has_project = project_context.is_project_workspace(store, project_id)
+    use_project = scope == "project" or (
+        scope == "auto" and has_project
+    )
+    if use_project and not has_project:
+        return {
+            "logged": False,
+            "reason": "project_unavailable",
+            "summary": "Project log is unavailable outside a Project session.",
+        }
+    record = (
+        project_context.append_log(store, project_id, text)
+        if use_project
+        else memory.append_daily_entry(text)
+    )
     written = bool(record.get("written"))
     out: dict[str, Any] = {
         "logged": written,
+        "scope": "project" if use_project else "global",
         "entry": record.get("entry", ""),
         "path": record.get("path", ""),
     }
@@ -47,7 +68,11 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         out["reason"] = reason
         out["summary"] = f"Note not logged ({reason})."
     else:
-        out["summary"] = "Logged a note to today's daily log."
+        out["summary"] = (
+            "Logged a note to the Project log."
+            if use_project
+            else "Logged a note to today's global log."
+        )
     return out
 
 

@@ -234,41 +234,6 @@ def resolve_font_path(font_config: dict[str, Any] | None = None) -> str | None:
     return default_font.path
 
 
-def load_pillow_font(
-    size: int,
-    *,
-    font_config: dict[str, Any] | None = None,
-    bold: bool = False,
-    monospaced: bool = False,
-) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    """Load a scalable local font on Windows, macOS, or Linux."""
-
-    cfg = dict(font_config or {})
-    if bold:
-        cfg.setdefault("weight", 700)
-    if monospaced:
-        cfg.setdefault("family", "Consolas" if os.name == "nt" else "Courier")
-    resolved = resolve_font_path(cfg)
-    candidates = [
-        resolved,
-        "C:/Windows/Fonts/consola.ttf" if monospaced else None,
-        "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
-        "/System/Library/Fonts/Courier New.ttf" if monospaced else None,
-        "/System/Library/Fonts/Helvetica.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf" if monospaced else None,
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "DejaVuSansMono.ttf" if monospaced else ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"),
-    ]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        try:
-            return ImageFont.truetype(str(candidate), max(int(size), 8))
-        except Exception:
-            continue
-    return ImageFont.load_default()
-
-
 def google_fonts_payload(
     *,
     limit: int | None = 120,

@@ -5,9 +5,9 @@ was no way to voice a script. This synthesizes speech from text and registers it
 as an audio asset, returning its measured duration — the hook for pacing a cut
 to the voiceover ("按旁白配节奏").
 
-Backend: the local offline system voice (macOS ``say``, Windows SAPI, or
-``espeak``), via ``gemia.audio.effects.text_to_speech``. A higher-fidelity
-cloud voice can slot in behind the same tool interface later.
+Backend: the local macOS ``say`` engine (offline, no API key, $0), via
+``gemia.audio.effects.text_to_speech``. It is reliable and deterministic; a
+higher-fidelity cloud voice can slot in behind the same tool interface later.
 Pass ``voice`` to pick a specific system voice (e.g. English ``Ava``/``Samantha``,
 Chinese ``Tingting``/``Meijia``); omit it to use the system default.
 """

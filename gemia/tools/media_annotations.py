@@ -6,14 +6,14 @@ from typing import Any
 from gemia.tools._context import ProgressUpdate, ToolContext
 
 
-def _workspace_id(ctx: ToolContext) -> str:
-    from gemia.tools._library_session import workspace_id_for
-
-    return workspace_id_for(ctx)
+def _account_id(ctx: ToolContext) -> str:
+    return "local"
 
 
 async def dispatch_annotate(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
-    account_id = _workspace_id(ctx)
+    account_id = _account_id(ctx)
+    if not account_id:
+        raise ValueError("annotate_media requires a local workspace")
     from gemia.media_annotations import annotate_asset_heuristic
     from gemia.media_library import list_assets
 
@@ -61,7 +61,9 @@ async def dispatch_annotate(args: dict[str, Any], ctx: ToolContext) -> dict[str,
 
 
 async def dispatch_get(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
-    account_id = _workspace_id(ctx)
+    account_id = _account_id(ctx)
+    if not account_id:
+        raise ValueError("get_media_annotations requires a local workspace")
     from gemia.media_annotations import list_annotations
 
     asset_id = str(args.get("library_asset_id") or args.get("asset_id") or "")
@@ -75,30 +77,48 @@ async def dispatch_get(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]
 
 
 async def dispatch_write(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
-    account_id = _workspace_id(ctx)
-    from gemia.media_annotations import create_annotation, update_annotation
+    account_id = _account_id(ctx)
+    if not account_id:
+        raise ValueError("write_media_annotation requires a local workspace")
+    from gemia.media_annotations import (
+        MediaAnnotationError,
+        create_annotation,
+        get_annotation,
+        update_annotation,
+    )
 
     asset_id = str(args.get("library_asset_id") or args.get("asset_id") or "")
     annotation_id = str(args.get("annotation_id") or "")
-    payload = {
-        "scope": args.get("scope") or "asset",
-        "start_sec": args.get("start_sec"),
-        "end_sec": args.get("end_sec"),
-        "frame": args.get("frame"),
-        "label": args.get("label"),
-        "note": args.get("note") or "",
-        "tags": args.get("tags") or [],
-        "category": args.get("category") or "",
-        "confidence": args.get("confidence"),
-        "source": "gemini",
-        "language": args.get("language") or "auto",
-        "metadata": args.get("metadata") if isinstance(args.get("metadata"), dict) else {},
-    }
-    annotation = (
-        update_annotation(account_id, asset_id, annotation_id, payload)
-        if annotation_id
-        else create_annotation(account_id, asset_id, payload)
+    writable_fields = (
+        "scope",
+        "start_sec",
+        "end_sec",
+        "frame",
+        "label",
+        "note",
+        "tags",
+        "category",
+        "confidence",
+        "language",
+        "metadata",
     )
+    payload = {key: args[key] for key in writable_fields if key in args}
+    if "metadata" in payload and not isinstance(payload["metadata"], dict):
+        raise ValueError("write_media_annotation metadata must be an object")
+
+    if annotation_id:
+        current = get_annotation(account_id, asset_id, annotation_id)
+        if current.get("source") == "user":
+            raise MediaAnnotationError(
+                "write_media_annotation cannot update a user annotation; "
+                "create a new annotation instead"
+            )
+        annotation = update_annotation(account_id, asset_id, annotation_id, payload)
+    else:
+        payload.setdefault("scope", "asset")
+        payload.setdefault("language", "auto")
+        payload["source"] = "gemini"
+        annotation = create_annotation(account_id, asset_id, payload)
     return {
         "asset_id": asset_id,
         "annotation": annotation,

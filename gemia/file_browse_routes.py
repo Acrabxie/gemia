@@ -14,6 +14,9 @@ a fixed whitelist:
 
   session    <LUMERI_V3_OUTPUT_ROOT>/workdirs/<sid> — a session's working
              files (requires ?session=; same id alphabet as v3_routes)
+  project_source / project_edit
+             the active session's bound local folder / private edit folder;
+             local requests only, never exposed through the public edge
   outputs / frames / styled / demo / inputs / uploads / temp / timeline
              the repo-relative roots /file/ already serves one-by-one
 
@@ -23,6 +26,7 @@ escape the root).
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any, Callable
@@ -52,6 +56,9 @@ def try_handle(handler, *, method: str, serve_file: Callable[[Path], None]) -> b
     root_key = (query.get("root") or [""])[0]
     rel = (query.get("path") or [""])[0]
     session = (query.get("session") or [""])[0]
+    if root_key in {"project_source", "project_edit"} and _is_remote(handler):
+        _json_error(handler, 403, "local project folders are unavailable remotely")
+        return True
     base = _resolve_root(root_key, session)
     if base is None:
         _json_error(handler, 404, f"unknown or empty root: {root_key}")
@@ -85,9 +92,13 @@ def _roots_payload() -> list[dict[str, Any]]:
 
 
 def _workdirs_root() -> Path:
-    from gemia.runtime_paths import output_root
+    try:
+        from gemia.session_manager import get_manager
 
-    return output_root() / "workdirs"
+        return get_manager().output_root / "workdirs"
+    except Exception:
+        base = os.environ.get("LUMERI_V3_OUTPUT_ROOT") or "/tmp/lumeri-v3"
+        return Path(base) / "workdirs"
 
 
 def _resolve_root(root: str, session: str) -> Path | None:
@@ -96,10 +107,33 @@ def _resolve_root(root: str, session: str) -> Path | None:
             return None
         p = _workdirs_root() / session
         return p if p.is_dir() else None
+    if root in {"project_source", "project_edit"}:
+        if not _SESSION_ID_RE.match(session or ""):
+            return None
+        try:
+            from gemia.session_manager import get_manager
+
+            runner = get_manager().get(session)
+            if runner is None or runner.production_store is None:
+                return None
+            record = runner.production_store.load_project(runner.project_id)
+            key = "source_root" if root == "project_source" else "edit_root"
+            raw = str(record.get(key) or "").strip()
+            path = Path(raw).expanduser().resolve() if raw else None
+            return path if path is not None and path.is_dir() else None
+        except Exception:
+            return None
     if root in _REPO_KEYS:
         p = _REPO_ROOT / root
         return p if p.is_dir() else None
     return None
+
+
+def _is_remote(handler) -> bool:
+    try:
+        return str(handler.headers.get("X-Lumeri-Remote", "")).strip() == "1"
+    except Exception:
+        return False
 
 
 def _safe_child(base: Path, rel: str) -> Path | None:

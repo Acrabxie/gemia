@@ -27,6 +27,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 _CONFIG_PATH = Path.home() / ".gemia" / "config.json"
 _BASE_DIR = Path(__file__).resolve().parent
 _STATIC_V3_DIR = _BASE_DIR / "static" / "v3"
+_INPUTS_DIR = _BASE_DIR / "inputs"
+_LOCAL_WORKSPACE_ID = "local"
 
 # Directories that may be served via /file/.
 _ALLOWED_ROOTS = {"outputs", "frames", "styled", "demo", "inputs", "uploads", "temp", "timeline"}
@@ -314,11 +316,126 @@ class _Handler(BaseHTTPRequestHandler):
             _json_response(self, 200, sandbox_status())
             return
 
+        if path == "/projects":
+            from gemia.local_projects import list_projects
+            _json_response(self, 200, {"projects": list_projects()})
+            return
+
         # ── v3 session routes ──
         if path == "/sessions" or path.startswith("/sessions/"):
             from gemia.v3_routes import try_handle as _v3_try
             if _v3_try(self, method="GET"):
                 return
+
+        # ── Local session history (single-user, no account namespace) ──
+        if path == "/session-history":
+            from gemia.session_history import load_current_session
+            _json_response(self, 200, load_current_session())
+            return
+
+        if path == "/session-history/list":
+            from gemia.session_history import list_session_snapshots
+            from gemia.session_manager import get_manager
+            query = parse_qs(parsed_url.query)
+            try:
+                limit = int(query.get("limit", ["30"])[0] or 30)
+            except ValueError:
+                limit = 30
+            snapshots = list_session_snapshots(limit=limit)
+            manager = get_manager()
+            list_persisted = getattr(manager, "list_persisted_sessions", None)
+            records = list_persisted(include_deleted=True) if callable(list_persisted) else []
+            session_meta = {str(item.get("session_id") or ""): item for item in records}
+            if not session_meta:
+                from gemia.local_projects import session_metadata
+                session_meta = session_metadata()
+            visible = []
+            for snapshot in snapshots:
+                meta = session_meta.get(str(snapshot.get("v3_session_id") or ""))
+                if meta and meta.get("deleted_at"):
+                    continue
+                visible.append({**snapshot, "pinned": bool(meta and meta.get("pinned"))})
+            visible.sort(key=lambda item: bool(item.get("pinned")), reverse=True)
+            _json_response(self, 200, {"sessions": visible})
+            return
+
+        if path.startswith("/session-history/"):
+            from gemia.session_history import load_session_snapshot
+            snapshot_id = path.removeprefix("/session-history/").strip()
+            try:
+                _json_response(self, 200, load_session_snapshot(snapshot_id, activate=True))
+            except FileNotFoundError:
+                _json_response(self, 404, {"error": "session not found"})
+            return
+
+        # ── Local media library ──
+        if path == "/media-library/list":
+            from gemia.media_library import list_assets
+            query = parse_qs(parsed_url.query)
+            try:
+                limit = int(query.get("limit", ["200"])[0] or 200)
+            except ValueError:
+                limit = 200
+            _json_response(self, 200, {"assets": list_assets(
+                _LOCAL_WORKSPACE_ID,
+                kind=str(query.get("kind", [""])[0] or ""),
+                q=str(query.get("q", [""])[0] or ""),
+                limit=limit,
+            )})
+            return
+
+        if path.startswith("/media-library/prepare/"):
+            from gemia.roughcut import RoughcutError, get_prepare_job
+            try:
+                _json_response(self, 200, get_prepare_job(
+                    _LOCAL_WORKSPACE_ID,
+                    path.removeprefix("/media-library/prepare/").strip(),
+                ))
+            except RoughcutError as exc:
+                _json_response(self, 404, {"error": str(exc)})
+            return
+
+        if path.startswith("/media-library/") and path.endswith("/roughcut"):
+            from gemia.roughcut import RoughcutError, load_roughcut
+            asset_id = path.split("/")[2]
+            try:
+                _json_response(self, 200, {"manifest": load_roughcut(_LOCAL_WORKSPACE_ID, asset_id)})
+            except RoughcutError as exc:
+                _json_response(self, 404, {"error": str(exc)})
+            return
+
+        if path.startswith("/media-library/") and path.endswith("/annotations"):
+            from gemia.media_annotations import MediaAnnotationError, list_annotations
+            asset_id = path.split("/")[2]
+            try:
+                _json_response(self, 200, {"annotations": list_annotations(_LOCAL_WORKSPACE_ID, asset_id)})
+            except MediaAnnotationError as exc:
+                _json_response(self, 404, {"error": str(exc)})
+            return
+
+        if path.startswith("/media-library/file/"):
+            from gemia.media_library import MediaLibraryError, resolve_asset_file
+            parts = path.split("/")
+            try:
+                target = resolve_asset_file(
+                    _LOCAL_WORKSPACE_ID,
+                    parts[3] if len(parts) >= 5 else "",
+                    parts[4] if len(parts) >= 5 else "",
+                    parts[5] if len(parts) >= 6 else None,
+                )
+                _file_response(self, target)
+            except MediaLibraryError as exc:
+                _json_response(self, 404, {"error": str(exc)})
+            return
+
+        if path.startswith("/media-library/"):
+            from gemia.media_library import get_asset
+            asset = get_asset(_LOCAL_WORKSPACE_ID, path.split("/")[2])
+            if asset:
+                _json_response(self, 200, {"asset": asset})
+            else:
+                _json_response(self, 404, {"error": "media asset not found"})
+            return
 
         # ── File serving ──
         if path.startswith("/file/"):
@@ -340,11 +457,78 @@ class _Handler(BaseHTTPRequestHandler):
         parsed_url = urlparse(self.path)
         path = unquote(parsed_url.path).rstrip("/") or "/"
 
+        if path == "/projects":
+            try:
+                from gemia.local_projects import create_project
+                payload = _read_json_body(self)
+                project = create_project(
+                    str(payload.get("name") or ""),
+                    str(payload.get("source_root") or payload.get("path") or ""),
+                )
+                _json_response(self, 201, project)
+            except ValueError as exc:
+                _json_response(self, 400, {"error": str(exc)})
+            return
+
+        if path == "/projects/pick-folder":
+            if os.name != "nt":
+                _json_response(self, 200, {"path": "", "cancelled": True})
+                return
+            result = subprocess.run(
+                [
+                    "powershell.exe", "-NoProfile", "-STA", "-Command",
+                    "Add-Type -AssemblyName System.Windows.Forms; "
+                    "$d=New-Object System.Windows.Forms.FolderBrowserDialog; "
+                    "$d.Description='选择 Lumeri Project 文件夹'; "
+                    "if($d.ShowDialog() -eq 'OK'){$d.SelectedPath}",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            selected = result.stdout.strip()
+            _json_response(self, 200, {"path": selected, "cancelled": not bool(selected)})
+            return
+
+        if path == "/sessions":
+            try:
+                from gemia.local_projects import link_session
+                from gemia.session_manager import get_manager
+                from gemia.transport.sse import REGISTRY as sse_registry
+                from gemia.v3_contract import PROTOCOL_VERSION
+                payload = _read_json_body(self)
+                project_id = str(payload.get("project_id") or "").strip()
+                runner = get_manager().create_session()
+                link_session(project_id, runner.session_id)
+                _json_response(self, 201, {
+                    "session_id": runner.session_id,
+                    "project_id": project_id or None,
+                    "run_id": runner.session_id if project_id else None,
+                    "assets": runner.list_assets(),
+                    "latest_event_id": sse_registry.latest_event_id(runner.session_id),
+                    "plan_mode": runner.plan_mode,
+                    "protocol_version": PROTOCOL_VERSION,
+                    "stream_url": f"/sessions/{runner.session_id}/stream",
+                    "turn_url": f"/sessions/{runner.session_id}/turn",
+                    "assets_url": f"/sessions/{runner.session_id}/assets",
+                })
+            except Exception as exc:
+                _json_response(self, 500, {"error": str(exc)})
+            return
+
         # ── v3 session routes ──
-        if path == "/sessions" or path.startswith("/sessions/"):
+        if path.startswith("/sessions/"):
             from gemia.v3_routes import try_handle as _v3_try
             if _v3_try(self, method="POST"):
                 return
+
+        if path == "/session-history":
+            try:
+                from gemia.session_history import save_current_session
+                _json_response(self, 200, save_current_session(_read_json_body(self)))
+            except Exception as exc:
+                _json_response(self, 400, {"error": str(exc)})
+            return
 
         # ── Config save ──
         if path == "/config":
@@ -418,6 +602,132 @@ class _Handler(BaseHTTPRequestHandler):
                 _json_response(self, 500, {"error": str(exc)})
             return
 
+        if path == "/model/add":
+            try:
+                from gemia import brain_config
+                from gemia.memory import add_model_to_catalog, model_selection_payload
+                payload = _read_json_body(self)
+                model_id = str(payload.get("id") or "").strip()
+                if not model_id:
+                    raise ValueError("missing model id")
+                cfg = json.loads(_CONFIG_PATH.read_text()) if _CONFIG_PATH.exists() else {}
+                add_model_to_catalog(
+                    model_id,
+                    label=str(payload.get("label") or ""),
+                    provider=str(payload.get("provider") or brain_config.read_status(cfg).get("provider") or ""),
+                    slot="planner",
+                )
+                _json_response(self, 200, {"ok": True, **model_selection_payload("planner")})
+            except ValueError as exc:
+                _json_response(self, 400, {"error": str(exc)})
+            return
+
+        if path == "/model/remove":
+            try:
+                from gemia.memory import model_selection_payload, remove_model_from_catalog
+                payload = _read_json_body(self)
+                model_id = str(payload.get("id") or "").strip()
+                if not model_id:
+                    raise ValueError("missing model id")
+                remove_model_from_catalog(model_id, slot="planner")
+                _json_response(self, 200, {"ok": True, **model_selection_payload("planner")})
+            except ValueError as exc:
+                _json_response(self, 400, {"error": str(exc)})
+            return
+
+        if path == "/media-library/annotate":
+            try:
+                from gemia.media_annotations import annotate_asset_heuristic
+                from gemia.media_library import list_assets
+                payload = _read_json_body(self)
+                asset_ids = payload.get("asset_ids") or payload.get("assets") or []
+                if isinstance(asset_ids, str):
+                    asset_ids = [asset_ids]
+                if not asset_ids and payload.get("all"):
+                    asset_ids = [item["asset_id"] for item in list_assets(
+                        _LOCAL_WORKSPACE_ID,
+                        kind=str(payload.get("kind") or "video"),
+                        limit=int(payload.get("max_assets") or 20),
+                    )]
+                results = [annotate_asset_heuristic(
+                    _LOCAL_WORKSPACE_ID,
+                    str(asset_id),
+                    mode=str(payload.get("mode") or "quick"),
+                    language=str(payload.get("language") or "auto"),
+                    tags=payload.get("tags") if isinstance(payload.get("tags"), list) else None,
+                    replace_existing=bool(payload.get("replace_existing", True)),
+                ) for asset_id in asset_ids]
+                _json_response(self, 200, {"results": results, "asset_count": len(results)})
+            except Exception as exc:
+                _json_response(self, 400, {"error": str(exc)})
+            return
+
+        if path == "/media-library/prepare":
+            try:
+                from gemia.roughcut import prepare_roughcut, start_prepare_job
+                payload = _read_json_body(self)
+                if bool(payload.get("background", True)):
+                    _json_response(self, 202, start_prepare_job(_LOCAL_WORKSPACE_ID, payload))
+                else:
+                    ids = payload.get("asset_ids") or payload.get("assets") or []
+                    if isinstance(ids, str):
+                        ids = [ids]
+                    _json_response(self, 200, prepare_roughcut(
+                        _LOCAL_WORKSPACE_ID,
+                        [str(item) for item in ids],
+                        all_assets=bool(payload.get("all") or payload.get("all_assets")),
+                        language=str(payload.get("language") or "auto"),
+                        create_proxies=bool(payload.get("create_proxies", True)),
+                        proxy_resolution=int(payload.get("proxy_resolution") or 540),
+                        resume=bool(payload.get("resume", True)),
+                        max_assets=int(payload.get("max_assets") or 100),
+                    ))
+            except Exception as exc:
+                _json_response(self, 400, {"error": str(exc)})
+            return
+
+        if path.startswith("/media-library/prepare/") and path.endswith("/resume"):
+            try:
+                from gemia.roughcut import resume_prepare_job
+                job_id = path.removeprefix("/media-library/prepare/").removesuffix("/resume").strip("/")
+                _json_response(self, 202, resume_prepare_job(_LOCAL_WORKSPACE_ID, job_id))
+            except Exception as exc:
+                _json_response(self, 400, {"error": str(exc)})
+            return
+
+        if path.startswith("/media-library/") and path.endswith("/roughcut/review"):
+            try:
+                from gemia.roughcut import apply_roughcut_review
+                _json_response(self, 200, apply_roughcut_review(
+                    _LOCAL_WORKSPACE_ID, path.split("/")[2], _read_json_body(self)
+                ))
+            except Exception as exc:
+                _json_response(self, 400, {"error": str(exc)})
+            return
+
+        if path.startswith("/media-library/") and "/annotations" in path:
+            try:
+                from gemia.media_annotations import create_annotation, update_annotation
+                parts = path.split("/")
+                payload = _read_json_body(self)
+                if len(parts) >= 5 and parts[4]:
+                    result = update_annotation(_LOCAL_WORKSPACE_ID, parts[2], parts[4], payload)
+                else:
+                    result = create_annotation(_LOCAL_WORKSPACE_ID, parts[2], payload)
+                _json_response(self, 200, {"annotation": result})
+            except Exception as exc:
+                _json_response(self, 400, {"error": str(exc)})
+            return
+
+        if path.startswith("/media-library/") and path.endswith("/add-to-project"):
+            from gemia.media_library import default_clip_for_asset, get_asset
+            asset = get_asset(_LOCAL_WORKSPACE_ID, path.split("/")[2])
+            if not asset:
+                _json_response(self, 404, {"error": "media asset not found"})
+            else:
+                _json_response(self, 200, {"asset": asset, "clip": default_clip_for_asset(asset)})
+            return
+
         # ── Sandbox toggle ──
         if path == "/settings/sandbox":
             try:
@@ -441,6 +751,27 @@ class _Handler(BaseHTTPRequestHandler):
             from gemia.v3_routes import try_handle as _v3_try
             if _v3_try(self, method="DELETE"):
                 return
+
+        if path.startswith("/media-library/") and "/annotations/" in path:
+            try:
+                from gemia.media_annotations import delete_annotation
+                parts = path.split("/")
+                _json_response(self, 200, {"annotation": delete_annotation(
+                    _LOCAL_WORKSPACE_ID, parts[2], parts[4]
+                )})
+            except Exception as exc:
+                _json_response(self, 404, {"error": str(exc)})
+            return
+
+        if path.startswith("/media-library/"):
+            try:
+                from gemia.media_library import soft_delete_asset
+                _json_response(self, 200, {"asset": soft_delete_asset(
+                    _LOCAL_WORKSPACE_ID, path.split("/")[2]
+                )})
+            except Exception as exc:
+                _json_response(self, 404, {"error": str(exc)})
+            return
 
         _json_response(self, 404, {"error": "not found"})
 

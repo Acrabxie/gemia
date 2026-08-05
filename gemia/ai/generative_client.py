@@ -32,6 +32,7 @@ import cv2
 import numpy as np
 
 from gemia.primitives_common import ensure_float32, to_uint8
+from gemia.model_strength import is_model_unavailable_error, media_model_failover_chain, strongest_media_model
 
 # ── Defaults ─────────────────────────────────────────────────────────────
 
@@ -118,7 +119,7 @@ class GenerativeClient:
     # ── OpenRouter chat-completions image API ─────────────────────────────
 
     def _openrouter_text_to_image(self, prompt: str) -> np.ndarray:
-        body = self._post_json(
+        body = self._post_json_with_model_failover(
             f"{self.base_url}/chat/completions",
             self._chat_payload(prompt),
         )
@@ -126,7 +127,7 @@ class GenerativeClient:
 
     def _openrouter_image_and_text(self, img: np.ndarray, prompt: str) -> np.ndarray:
         image_data_uri = f"data:image/png;base64,{_ndarray_to_b64(img)}"
-        body = self._post_json(
+        body = self._post_json_with_model_failover(
             f"{self.base_url}/chat/completions",
             self._chat_payload(prompt, image_data_uri=image_data_uri),
         )
@@ -222,6 +223,20 @@ class GenerativeClient:
         return self._url_to_ndarray(url)
 
     # ── HTTP helpers ──────────────────────────────────────────────────────
+
+    def _post_json_with_model_failover(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        chain = media_model_failover_chain("image", "openrouter", (self._model,))
+        for index, model in enumerate(chain):
+            attempt = dict(payload)
+            attempt["model"] = model
+            try:
+                body = self._post_json(url, attempt)
+                self._model = model
+                return body
+            except RuntimeError as exc:
+                if index + 1 >= len(chain) or not is_model_unavailable_error(exc):
+                    raise
+        raise RuntimeError("No usable image generation model")
 
     def _post_json(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         """POST JSON payload, return parsed response body."""
@@ -394,8 +409,9 @@ def _resize_to_height(img: np.ndarray, height: int) -> np.ndarray:
 
 
 def _resolve_image_model(tier: str) -> str:
+    candidates: list[str] = []
     if tier == "pro":
-        return (
+        candidates.append(
             os.environ.get("GEMIA_IMAGE_PRO_MODEL")
             or os.environ.get("NANO_BANANA_PRO_MODEL")
             or os.environ.get("OPENROUTER_IMAGE_PRO_MODEL")
@@ -405,15 +421,17 @@ def _resolve_image_model(tier: str) -> str:
             or _model_or_empty(_read_config_key("image_model"))
             or _DEFAULT_PRO_MODEL
         )
-    return (
-        os.environ.get("GEMIA_IMAGE_MODEL")
-        or os.environ.get("NANO_BANANA_MODEL")
-        or os.environ.get("OPENROUTER_IMAGE_MODEL")
-        or _model_or_empty(_read_config_key("image_model"))
-        or _read_config_key("nano_banana_model")
-        or _read_config_key("openrouter_image_model")
-        or _DEFAULT_MODEL
-    )
+    else:
+        candidates.append(
+            os.environ.get("GEMIA_IMAGE_MODEL")
+            or os.environ.get("NANO_BANANA_MODEL")
+            or os.environ.get("OPENROUTER_IMAGE_MODEL")
+            or _model_or_empty(_read_config_key("image_model"))
+            or _read_config_key("nano_banana_model")
+            or _read_config_key("openrouter_image_model")
+            or _DEFAULT_MODEL
+        )
+    return strongest_media_model("image", "openrouter", candidates)
 
 
 def _resolve_base_url() -> tuple[str, str]:

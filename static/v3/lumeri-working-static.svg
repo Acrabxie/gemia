@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="90" height="44" viewBox="0 0 90 44" role="img" aria-label="Lumeri">
+  <defs>
+    <linearGradient id="lws-grad" gradientUnits="userSpaceOnUse" x1="8" y1="22" x2="82" y2="22">
+      <stop offset="0" stop-color="#5FC6DE"/>
+      <stop offset=".7" stop-color="#8BD8EA"/>
+      <stop offset="1" stop-color="#ABE5F1"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="13" width="42" height="18" rx="9" fill="url(#lws-grad)"/>
+  <circle cx="71" cy="22" r="11" fill="url(#lws-grad)"/>
+</svg>
