@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -39,12 +40,15 @@ def create_project(name: str, source_root: str = "") -> dict[str, Any]:
     title = str(name or "").strip() or "未命名 Project"
     source = str(source_root or "").strip()
     if source:
-        path = Path(source).expanduser().resolve()
-        if not path.is_dir():
-            raise ValueError("Project 目录不存在或不是文件夹")
-        if path == Path.home().resolve() or path.parent == path:
+        # The public runtime stores this as creator-selected metadata only; it
+        # never reads from or writes to the submitted path. The native folder
+        # picker is the existence check, while normalization prevents home or
+        # disk roots from being recorded as an over-broad Project boundary.
+        normalized = os.path.normpath(os.path.abspath(os.path.expanduser(source)))
+        home = os.path.normcase(os.path.normpath(str(Path.home())))
+        if os.path.normcase(normalized) == home or os.path.dirname(normalized) == normalized:
             raise ValueError("不能把用户目录或磁盘根目录作为 Project")
-        source = str(path)
+        source = normalized
     payload = _read()
     project = {
         "project_id": f"project-{uuid.uuid4().hex[:12]}",
