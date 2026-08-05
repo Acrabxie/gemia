@@ -27,7 +27,15 @@ jobs:
           cache: pip
       - name: Install FFmpeg
         shell: pwsh
-        run: choco install ffmpeg --yes --no-progress
+        run: |
+          choco install ffmpeg --yes --no-progress
+          # Chocolatey updates the current shell but does not reliably persist
+          # its shim directory to the next GitHub Actions step.
+          $chocoBin = Join-Path $env:ChocolateyInstall "bin"
+          $chocoBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $env:Path += ";$chocoBin"
+          Get-Command ffmpeg -ErrorAction Stop
+          Get-Command ffprobe -ErrorAction Stop
       - name: Run the documented Windows setup
         shell: pwsh
         run: |
