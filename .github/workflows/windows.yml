@@ -111,7 +111,19 @@ jobs:
               "--dump-dom",
               "http://127.0.0.1:7788/"
             )
-            $edgeProc = Start-Process -FilePath $edge -ArgumentList $edgeArgs -Wait -PassThru -RedirectStandardOutput $edgeDom -RedirectStandardError $edgeStderr
+            # Start-Process -Wait follows Edge's whole child-process tree. The
+            # workspace keeps an SSE connection open, so that tree can outlive
+            # the one-shot --dump-dom browser process indefinitely. Wait only
+            # for the process we launched and keep CI bounded.
+            $edgeProc = Start-Process -FilePath $edge -ArgumentList $edgeArgs -PassThru -RedirectStandardOutput $edgeDom -RedirectStandardError $edgeStderr
+            if (-not $edgeProc.WaitForExit(45000)) {
+              Stop-Process -Id $edgeProc.Id -Force -ErrorAction SilentlyContinue
+              throw "Microsoft Edge did not finish rendering the Windows workspace within 45 seconds."
+            }
+            if ($edgeProc.ExitCode -ne 0) {
+              Get-Content $edgeStderr -ErrorAction SilentlyContinue
+              throw "Microsoft Edge failed while rendering the Windows workspace."
+            }
             $renderedText = Get-Content $edgeDom -Raw -ErrorAction SilentlyContinue
             if ($renderedText -notmatch "代码执行锁定" -or $renderedText -notmatch "Ctrl\+U") {
               throw "The rendered Windows workspace did not expose its locked execution state and Windows shortcut labels."
