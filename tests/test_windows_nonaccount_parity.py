@@ -21,6 +21,14 @@ def test_current_workspace_is_served_without_account_gate() -> None:
     assert "/config/codex-subscription" in script
 
 
+def test_windows_doctor_tolerates_codex_status_on_native_stderr() -> None:
+    doctor = (ROOT / "scripts/windows/doctor.ps1").read_text(encoding="utf-8")
+
+    assert '$ErrorActionPreference = "Continue"' in doctor
+    assert "$CodexExitCode = $LASTEXITCODE" in doctor
+    assert "if ($CodexExitCode -eq 0" in doctor
+
+
 def test_provider_errors_are_creator_readable_and_redacted() -> None:
     script = (ROOT / "static/v3/v3.js").read_text(encoding="utf-8")
 

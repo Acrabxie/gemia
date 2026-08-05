@@ -47,8 +47,19 @@ if ($null -eq $Codex) {
     Write-Host "Optional OpenAI subscription: Codex CLI not found. Install Node.js, run 'npm install -g @openai/codex', then 'codex login'." -ForegroundColor Yellow
 }
 else {
-    $CodexStatus = & $Codex.Source login status 2>&1
-    if ($LASTEXITCODE -eq 0 -and ($CodexStatus -join " ") -match "ChatGPT") {
+    # Windows PowerShell 5.1 wraps native stderr as ErrorRecord objects. Codex
+    # currently writes its successful login status there, so do not let the
+    # script-wide Stop preference turn that expected output into a failure.
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $CodexStatus = & $Codex.Source login status 2>&1
+        $CodexExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+    if ($CodexExitCode -eq 0 -and ($CodexStatus -join " ") -match "ChatGPT") {
         Write-Host "Optional OpenAI subscription: local Codex is signed in with ChatGPT." -ForegroundColor Green
     }
     else {
