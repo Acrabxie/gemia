@@ -294,7 +294,18 @@ class _Handler(BaseHTTPRequestHandler):
                     pass
             from gemia import brain_config
             status = brain_config.read_status(cfg)
-            _json_response(self, 200, status)
+            # The v3 Setup panel consumes ``brain`` as a nested object.  Keep
+            # the top-level ``has_key`` for the small first-run status check,
+            # but provide the same public shape to both web clients.
+            _json_response(self, 200, {"has_key": _has_valid_key(), "brain": status})
+            return
+
+        # ── Model selection ──
+        # The v3 command palette fetches this route directly.  It is local-only
+        # state and contains no provider secrets.
+        if path == "/model":
+            from gemia.memory import model_selection_payload
+            _json_response(self, 200, model_selection_payload("planner"))
             return
 
         # ── Sandbox settings ──
@@ -392,6 +403,19 @@ class _Handler(BaseHTTPRequestHandler):
                 _json_response(self, 200, res)
             except Exception as exc:
                 _json_response(self, 400, {"error": str(exc)})
+            return
+
+        # ── Model selection ──
+        if path == "/model":
+            try:
+                from gemia.memory import apply_model_selection, model_selection_payload
+                payload = _read_json_body(self)
+                apply_model_selection(payload, "planner")
+                _json_response(self, 200, {"ok": True, **model_selection_payload("planner")})
+            except ValueError as exc:
+                _json_response(self, 400, {"error": str(exc)})
+            except Exception as exc:
+                _json_response(self, 500, {"error": str(exc)})
             return
 
         # ── Sandbox toggle ──
