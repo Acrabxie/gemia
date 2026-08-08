@@ -59,6 +59,10 @@ def empty_project(*, account_id: str | None = None, title: str = "Untitled Proje
         "metadata": {
             "generator": "gemia",
         },
+        # Per-clip SegmentDocuments are created lazily on the first real edit.
+        # Keeping the map in the canonical snapshot preserves the same
+        # ProjectStore journal while a read-only legacy clip remains zero-write.
+        "segments": {},
         "shotlist": empty_shotlist(),
         "quanta": empty_quanta(),
     }
@@ -104,6 +108,28 @@ def _normalize_shot(raw: Any, *, scene_idx: int, shot_idx: int) -> dict[str, Any
     status = str(raw.get("status") or "draft").strip().lower()
     if status not in SHOT_STATUSES:
         status = "draft"
+    asset_id = _optional_str(raw.get("asset_id"))
+    library_asset_id = _optional_str(raw.get("library_asset_id"))
+    raw_evidence = raw.get("evidence")
+    if not library_asset_id and isinstance(raw_evidence, dict):
+        library_asset_id = _optional_str(raw_evidence.get("library_asset_id"))
+    source_in: float | None = None
+    source_out: float | None = None
+    if asset_id or library_asset_id:
+        try:
+            candidate_in = float(raw.get("source_in"))
+            candidate_out = float(raw.get("source_out"))
+            if candidate_in >= 0.0 and candidate_out > candidate_in:
+                source_in = round(candidate_in, 3)
+                source_out = round(candidate_out, 3)
+        except (TypeError, ValueError):
+            pass
+    evidence = (
+        _normalize_shot_evidence(raw_evidence)
+        if (asset_id or library_asset_id)
+        else None
+    )
+    alternatives = _normalize_shot_alternatives(raw.get("alternatives"))
     return {
         "id": str(raw.get("id") or "") or f"s{scene_idx}_shot{shot_idx}",
         "description": str(raw.get("description") or ""),
@@ -113,12 +139,100 @@ def _normalize_shot(raw: Any, *, scene_idx: int, shot_idx: int) -> dict[str, Any
         "mood": _optional_str(raw.get("mood")),
         "source": source,
         "search_query": _optional_str(raw.get("search_query")),
-        "asset_id": _optional_str(raw.get("asset_id")),
+        "asset_id": asset_id,
+        "library_asset_id": library_asset_id,
+        "source_in": source_in,
+        "source_out": source_out,
+        "evidence": evidence,
+        "alternatives": alternatives,
         "clip_id": _optional_str(raw.get("clip_id")),
         "transition_after": _normalize_transition(raw.get("transition_after")),
         "status": status,
         "notes": _optional_str(raw.get("notes")),
     }
+
+
+def _normalize_shot_evidence(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    evidence_id = str(raw.get("evidence_id") or "").strip()
+    annotation_id = str(raw.get("annotation_id") or "").strip()
+    library_asset_id = str(raw.get("library_asset_id") or "").strip()
+    if not evidence_id or not annotation_id or not library_asset_id:
+        return None
+    confidence = raw.get("confidence")
+    score = raw.get("score")
+    evidence: dict[str, Any] = {
+        "evidence_id": evidence_id,
+        "library_asset_id": library_asset_id,
+        "annotation_id": annotation_id,
+        "label": str(raw.get("label") or "")[:200],
+        "note": str(raw.get("note") or "")[:5000],
+        "tags": [str(item)[:60] for item in raw.get("tags") or []][:30],
+        "category": str(raw.get("category") or "")[:80],
+        "source": str(raw.get("source") or "user")[:32],
+        "confidence": (
+            round(max(0.0, min(float(confidence), 1.0)), 3)
+            if isinstance(confidence, (int, float))
+            else None
+        ),
+        "matched_terms": [str(item)[:80] for item in raw.get("matched_terms") or []][:20],
+        "score": round(float(score), 6) if isinstance(score, (int, float)) else 0.0,
+        "score_components": _normalize_json_dict(raw.get("score_components")),
+        "ranking_reasons": [str(item)[:200] for item in raw.get("ranking_reasons") or []][:10],
+        "query": str(raw.get("query") or "")[:500],
+        "decision": str(raw.get("decision") or "observe")[:32],
+        "decision_control_annotation_id": _optional_str(
+            raw.get("decision_control_annotation_id")
+        ),
+        "authority_tier": max(0, min(int(_float_or(raw.get("authority_tier"), 0.0)), 9)),
+        "algorithm_version": str(raw.get("algorithm_version") or "")[:80],
+        "metadata": _normalize_json_dict(raw.get("metadata")),
+        "provenance": _normalize_json_dict(raw.get("provenance")),
+        "created_at": str(raw.get("created_at") or "")[:80],
+        "updated_at": str(raw.get("updated_at") or "")[:80],
+    }
+    for key in ("start_sec", "end_sec", "duration_sec", "match_rank", "raw_score"):
+        value = raw.get(key)
+        if isinstance(value, (int, float)):
+            evidence[key] = round(float(value), 6)
+    return evidence
+
+
+def _normalize_shot_alternatives(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    alternatives: list[dict[str, Any]] = []
+    for item in raw[:3]:
+        normalized = _normalize_shot_evidence(item)
+        if normalized is None:
+            continue
+        normalized["reason_not_selected"] = str(
+            item.get("reason_not_selected") or "lower-ranked candidate"
+        )[:240]
+        alternatives.append(normalized)
+    return alternatives
+
+
+def _normalize_json_dict(raw: Any, *, _depth: int = 0) -> dict[str, Any]:
+    if not isinstance(raw, dict) or _depth >= 4:
+        return {}
+    out: dict[str, Any] = {}
+    for key, value in list(raw.items())[:40]:
+        clean_key = str(key)[:100]
+        if isinstance(value, dict):
+            out[clean_key] = _normalize_json_dict(value, _depth=_depth + 1)
+        elif isinstance(value, list):
+            clean_list: list[Any] = []
+            for item in value[:40]:
+                if isinstance(item, dict):
+                    clean_list.append(_normalize_json_dict(item, _depth=_depth + 1))
+                elif isinstance(item, (str, int, float, bool)) or item is None:
+                    clean_list.append(item if not isinstance(item, str) else item[:500])
+            out[clean_key] = clean_list
+        elif isinstance(value, (str, int, float, bool)) or value is None:
+            out[clean_key] = value if not isinstance(value, str) else value[:1000]
+    return out
 
 
 def _normalize_scene(raw: Any, *, scene_idx: int) -> dict[str, Any]:
@@ -710,6 +824,19 @@ def _normalize_canonical_project(project: dict[str, Any], *, account_id: str | N
     }
     metadata = project.get("metadata") if isinstance(project.get("metadata"), dict) else {}
     normalized["metadata"] = {**normalized["metadata"], **metadata}
+    raw_segments = project.get("segments") if isinstance(project.get("segments"), dict) else {}
+    try:
+        from gemia.segment_document import normalize_segment
+        normalized["segments"] = {
+            str(segment_id): normalize_segment(value, clip_id=str(value.get("clip_id") or ""))
+            for segment_id, value in list(raw_segments.items())[:2000]
+            if isinstance(value, dict)
+        }
+    except Exception:
+        # Model normalization must remain a compatibility boundary even when a
+        # partially-installed optional segment adapter is imported by an older
+        # worker.
+        normalized["segments"] = {}
     normalized["shotlist"] = normalize_shotlist(project.get("shotlist"))
     # Pass the quanta through explicitly: normalize rebuilds from empty_project()
     # and copies known keys, so without this line ProjectStore.load() would
@@ -813,6 +940,7 @@ def _timeline_clip_from_legacy(clip: dict[str, Any], asset: dict[str, Any], *, s
         "keyframes": clip.get("keyframes") if isinstance(clip.get("keyframes"), list) else [],
         "text_config": None,
         "provenance": clip.get("provenance") if isinstance(clip.get("provenance"), dict) else None,
+        "segment_ref": str(clip.get("segment_ref") or "") or None,
     }
 
 
@@ -867,6 +995,7 @@ def _normalize_timeline_clip(clip: dict[str, Any]) -> dict[str, Any]:
         "keyframes": clip.get("keyframes") if isinstance(clip.get("keyframes"), list) else [],
         "text_config": _normalize_text_config(clip.get("text_config")) if media_kind == "text" else None,
         "provenance": clip.get("provenance") if isinstance(clip.get("provenance"), dict) else None,
+        "segment_ref": str(clip.get("segment_ref") or "") or None,
     }
 
 
@@ -894,24 +1023,36 @@ def _normalize_tracks(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list) or not value:
         return _default_tracks()
     tracks: list[dict[str, Any]] = []
+    next_video_index = 1
+    next_overlay_index = 1
+    next_audio_index = 1
     for index, raw in enumerate(value):
         if not isinstance(raw, dict):
             continue
         raw_id = str(raw.get("id", ""))
-        if raw_id.startswith("OV"):
-            inferred = "overlay"
-        elif raw_id.startswith("A"):
-            inferred = "audio"
+        raw_kind = str(raw.get("kind") or "").strip().lower()
+        if raw_kind == "overlay" or raw_id.startswith("OV"):
+            kind = "overlay"
+            prefix = "OV"
+            default_name = "Overlay"
+            fallback_id = f"OV{next_overlay_index}"
+            next_overlay_index += 1
+        elif raw_kind == "audio" or raw_id.startswith("A"):
+            kind = "audio"
+            prefix = "A"
+            default_name = "Audio"
+            fallback_id = f"A{next_audio_index}"
+            next_audio_index += 1
         else:
-            inferred = "video"
-        kind = str(raw.get("kind") or inferred)
-        if kind not in TRACK_KINDS:
             kind = "video"
-        prefix = {"audio": "A", "overlay": "OV"}.get(kind, "V")
-        default_name = {"audio": "Audio", "overlay": "Overlay"}.get(kind, "Video")
+            prefix = "V"
+            default_name = "Video"
+            fallback_id = f"V{next_video_index}"
+            next_video_index += 1
+        normalized_id = str(raw.get("id") or fallback_id)
         tracks.append(
             {
-                "id": str(raw.get("id") or f"{prefix}{index + 1}"),
+                "id": normalized_id,
                 "kind": kind,
                 "name": str(raw.get("name") or default_name),
                 "index": int(_float_or(raw.get("index"), index)),

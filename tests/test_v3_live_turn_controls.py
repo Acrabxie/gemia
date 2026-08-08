@@ -66,27 +66,73 @@ def test_steer_and_stop_routes_accept_only_active_turns() -> None:
 
 def test_web_composer_exposes_stop_and_midturn_guidance() -> None:
     # M3 restyle: the dedicated #session-stop-btn was removed. Mid-turn, the
-    # voice-input button morphs into the stop control (pause icon, label
+    # unified send/voice button morphs into the stop control (pause icon, label
     # "停止当前执行" -> stopCurrentTurn), and the send button relabels to
     # "引导当前执行" so submissions route to steerTurn instead of submitTurn.
     html = (ROOT / "static/v3/index.html").read_text(encoding="utf-8")
     source = (ROOT / "static/v3/v3.js").read_text(encoding="utf-8")
+    css = (ROOT / "static/v3/v3.css").read_text(encoding="utf-8")
 
-    assert 'id="voice-input-btn"' in html
+    assert 'id="send-btn"' in html
+    assert "voiceInputBtn: null" not in source
 
     # Stop affordance: the composer button cancels the active turn via /stop.
     assert '/stop`' in source
-    assert 'if (state.turnInProgress) stopCurrentTurn();' in source
+    assert "if (state.turnInProgress)" in source
+    assert "stopCurrentTurn();" in source
     assert '"停止当前执行"' in source
 
     # Mid-turn guidance: submissions during a turn steer it via /steer.
     assert '/steer`' in source
     assert 'state.turnInProgress ? steerTurn(msg) : submitTurn(msg)' in source
     assert '"引导当前执行"' in source
+    assert 'classList.toggle("is-stop", state.turnInProgress && !hasText)' in source
+    assert ".input-shell.is-working .send-btn" not in css
+    assert ".send-btn.is-stop" in css
 
     # Server events for both flows are still handled.
     assert 'turn_guidance_applied:' in source
     assert 'turn_cancelled:' in source
+
+
+def test_midturn_guidance_is_a_blue_lumeri_progress_marker_without_label() -> None:
+    source = (ROOT / "static/v3/v3.js").read_text(encoding="utf-8")
+    css = (ROOT / "static/v3/v3.css").read_text(encoding="utf-8")
+
+    assert 'class="turn-guidance${isActiveTurn ? " is-active" : ""}"' in source
+    assert 'class="turn-guidance-mark"' in source
+    assert 'aria-label="Lumeri 进度反馈"' in source
+    assert 'turn-guidance-label' not in source
+    assert ".turn-guidance.is-active .turn-guidance-mark" in css
+    assert "border: 1px solid color-mix(in srgb, var(--m3-primary)" in css
+
+
+def test_user_message_hover_actions_include_original_sent_time() -> None:
+    source = (ROOT / "static/v3/v3.js").read_text(encoding="utf-8")
+    css = (ROOT / "static/v3/v3.css").read_text(encoding="utf-8")
+
+    assert 'class="message-sent-time"' in source
+    assert 'title="发送于 ${escapeHTML(sentTimeTitle)}"' in source
+    assert "timestamp: turn.startedAt || Date.now()" in source
+    assert 'newTurn(msg.content || "", msg.timestamp)' in source
+    assert ".message-sent-time" in css
+
+
+def test_cancelled_turn_has_no_repeated_visible_confirmation_copy() -> None:
+    source = (ROOT / "static/v3/v3.js").read_text(encoding="utf-8")
+    manager = (ROOT / "gemia/session_manager.py").read_text(encoding="utf-8")
+
+    handler = source.split("turn_cancelled: () => {", 1)[1].split(
+        "model_text_delta:", 1
+    )[0]
+    cancelled_event = manager.rsplit("except asyncio.CancelledError:", 1)[1].split(
+        "raise", 1
+    )[0]
+
+    assert "t.banners.push" not in handler
+    assert "已经完成的进度会保留" not in source
+    assert '"kind": "turn_cancelled"' in cancelled_event
+    assert '"message"' not in cancelled_event
 
 
 class SteeringClient:

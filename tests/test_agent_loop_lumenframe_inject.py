@@ -9,10 +9,13 @@ planting ``_DOC_CACHE`` directly (and by testing a copied implementation on a
 ``MinimalLoop``). These tests drive a REAL ``AgentLoopV3`` whose document is
 saved the way tool dispatchers save it.
 """
+
 from __future__ import annotations
 
-from pathlib import Path
+import json
+import re
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -53,23 +56,61 @@ def _save_via_production_path(loop: AgentLoopV3, doc: dict) -> None:
     layer_module._save_lumendoc(loop._tool_ctx, doc)
 
 
+def _assert_compact_fresh_ops_bootstrap(ops: str) -> None:
+    assert "get_lumenframe" in ops
+    assert "lumen_patch" in ops
+    for op_name in (
+        "add_gradient",
+        "add_shape",
+        "set_opacity",
+        "set_blend_mode",
+        "add_effect",
+        "gaussian_blur",
+        "set_mask",
+        "clip_to_below",
+        "add_adjustment_layer",
+    ):
+        assert op_name in ops
+    assert "lumen_get" not in ops
+    assert "lumen_*" not in ops
+    assert len(ops) < 2500
+
+
 def test_no_doc_yet_prompt_is_placeholder_and_ops_minimal(loop: AgentLoopV3) -> None:
-    """Fresh session: no lumenframe.json → placeholder text + short pointer."""
+    """Fresh session gets a compact, usable appearance-ops bootstrap."""
     assert loop._get_lumenframe_prompt_text() == "(no lumenframe document in session yet)"
     ops = loop._get_lumenframe_ops_catalog()
-    assert "lumen_get" in ops
-    assert len(ops) < 200
+    _assert_compact_fresh_ops_bootstrap(ops)
+    assert ops in loop.render_messages()[0]["content"]
     # Prompt building must not create the file as a side effect.
     lf_path = layer_module._lumenframe_file_path(loop._tool_ctx)
     assert lf_path is not None and not lf_path.exists()
 
 
 def test_empty_saved_doc_keeps_ops_minimal(loop: AgentLoopV3) -> None:
-    """A saved but layer-less doc still gets the short pointer, not the catalog."""
+    """A saved layer-less doc gets the compact bootstrap, not the full catalog."""
     _save_via_production_path(loop, empty_doc())
     ops = loop._get_lumenframe_ops_catalog()
-    assert "lumen_get" in ops
-    assert len(ops) < 200
+    _assert_compact_fresh_ops_bootstrap(ops)
+
+
+def test_fresh_bootstrap_examples_are_valid_atomic_layer_patch(
+    loop: AgentLoopV3,
+) -> None:
+    """The compact examples must stay aligned with the real LayerPatch contract."""
+    examples = [
+        json.loads(raw)
+        for raw in re.findall(r'`(\{"op":[^`]+\})`', loop._get_lumenframe_ops_catalog())
+    ]
+
+    assert len(examples) == 8
+    doc = apply_layer_patch(empty_doc(), {"version": 1, "ops": examples})
+    layers = doc["root"]["children"]
+    assert [layer["type"] for layer in layers] == ["gradient", "shape", "adjustment"]
+    assert layers[1]["opacity"] == 0.7
+    assert layers[1]["blend_mode"] == "screen"
+    assert layers[1]["effects"][0]["type"] == "gaussian_blur"
+    assert layers[2]["effects"][0]["type"] == "gaussian_blur"
 
 
 def test_saved_doc_with_layers_injects_summary_and_full_catalog(loop: AgentLoopV3) -> None:
@@ -91,15 +132,27 @@ def test_saved_doc_with_layers_injects_summary_and_full_catalog(loop: AgentLoopV
     assert "add_layer" in ops or "set_opacity" in ops
 
 
-def test_full_catalog_much_larger_than_pointer(loop: AgentLoopV3) -> None:
-    """Size contract: pointer stays tiny, full catalog is substantial."""
+def test_full_catalog_much_larger_than_fresh_bootstrap(loop: AgentLoopV3) -> None:
+    """Size contract: fresh guidance stays compact; full catalog is on-demand."""
     ops_empty = loop._get_lumenframe_ops_catalog()
     _save_via_production_path(loop, _doc_with_layer())
     ops_full = loop._get_lumenframe_ops_catalog()
 
-    assert len(ops_empty) < 200
-    assert len(ops_full) > 1500
-    assert (len(ops_full) - len(ops_empty)) > 1500
+    assert len(ops_empty) < 2500
+    assert len(ops_full) > 10_000
+    assert (len(ops_full) - len(ops_empty)) > 8_000
+
+
+def test_system_prompt_routes_all_layer_edits_through_lumen_patch() -> None:
+    prompt = (Path(__file__).resolve().parents[1] / "gemia" / "prompts" / "system_v3.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "All layer-document edits go through `lumen_patch`" in prompt
+    assert "operation through `lumen_patch`" in prompt
+    assert "edits go through the `lumen_*` verbs" not in prompt
+    assert "`lumen_patch` is the low-level\nfallback" not in prompt
+    assert "Drop to\n`lumen_patch` only" not in prompt
 
 
 def test_prompt_text_is_size_capped(loop: AgentLoopV3) -> None:

@@ -36,6 +36,15 @@ _MAX_PAGE_BYTES = 3 * 1024 * 1024
 # dispatcher falls back to the no-key duckduckgo scraper and records a note.
 _USER_AGENT = "Lumeri/4.0 (+https://lumeri.local)"
 _MAX_PROVIDER_BYTES = 2 * 1024 * 1024
+_AUXILIARY_SEARCH_CONFIG_FIELDS = {
+    "tavily_api_key",
+    "brave_api_key",
+    "serper_api_key",
+    "exa_api_key",
+    "bing_api_key",
+    "google_cse_key",
+    "searxng_api_key",
+}
 
 # Order auto-detect probes config for a present key/URL. Paid BYOK engines rank
 # first (a present key means the operator opted into that engine), then searxng —
@@ -65,7 +74,28 @@ _DEFAULT_PAGE_CHARS = 6000
 _MAX_PAGE_CHARS = 12000
 
 
+def _cloud_account_mode() -> bool:
+    try:
+        from gemia import cloud_accounts
+
+        return cloud_accounts.enabled()
+    except Exception:
+        return os.environ.get("LUMERI_CLOUD_ACCOUNTS", "").strip().lower() in {"1", "true", "yes"}
+
+
 def _read_config(key: str) -> str | None:
+    if _cloud_account_mode() and key in _AUXILIARY_SEARCH_CONFIG_FIELDS:
+        try:
+            from gemia import cloud_accounts
+
+            snapshot = cloud_accounts.client().auxiliary_credential_snapshot()
+            for item in snapshot.values():
+                if item.get("config_field") == key and item.get("secret"):
+                    return str(item["secret"])
+        except Exception:
+            pass
+        # Never fall back to a stale machine-global search key in cloud mode.
+        return None
     config_path = Path.home() / ".gemia" / "config.json"
     if not config_path.exists():
         return None
@@ -370,6 +400,34 @@ def _provider_creds(provider: str) -> dict[str, str]:
         return {}
     value = _read_config(config_key)
     return {"key": value} if value else {}
+
+
+def search_provider_status() -> dict[str, Any]:
+    """Return effective search state without returning credentials."""
+
+    configured = str(_read_config("search_provider") or "auto").strip().lower()
+    if configured not in _VALID_PROVIDERS:
+        configured = "auto"
+    effective, credentials = _resolve_provider({})
+    ready = effective == "duckduckgo" or bool(credentials)
+    source = (
+        "configured"
+        if configured != "auto"
+        else "auto_detect"
+        if effective != "duckduckgo"
+        else "built_in"
+    )
+    return {
+        "configured_provider": configured,
+        "effective_provider": effective,
+        "source": source,
+        "ready": ready,
+        "built_in": {
+            "provider": "duckduckgo",
+            "available": True,
+            "role": "active" if effective == "duckduckgo" else "fallback",
+        },
+    }
 
 
 # ── provider HTTP helper ─────────────────────────────────────────────────────

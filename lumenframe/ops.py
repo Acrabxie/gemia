@@ -28,6 +28,7 @@ Extensions register further ops through :mod:`lumenframe.registry`.
 from __future__ import annotations
 
 import copy
+import math
 from typing import Any
 
 from lumenframe import model, timebase
@@ -1432,6 +1433,53 @@ def _op_set_effect_params(doc: dict[str, Any], op: dict[str, Any]) -> None:
     raise LayerPatchError("E_NOT_FOUND", f"set_effect_params: effect {effect_id} not found")
 
 
+@register_op("set_effect_enabled", source="core")
+def _op_set_effect_enabled(doc: dict[str, Any], op: dict[str, Any]) -> None:
+    """Enable or disable one effect without changing its parameters or order."""
+    layer = _require_layer(doc, _require_arg(op, "layer_id"), op="set_effect_enabled")
+    effect_id = str(_require_arg(op, "effect_id"))
+    enabled = _require_arg(op, "enabled")
+    if not isinstance(enabled, bool):
+        raise LayerPatchError("E_ARG", "set_effect_enabled: enabled must be a boolean")
+    for effect in layer.get("effects") or []:
+        if str(effect.get("id")) == effect_id:
+            effect["enabled"] = enabled
+            return
+    raise LayerPatchError("E_NOT_FOUND", f"set_effect_enabled: effect {effect_id} not found")
+
+
+@register_op("reorder_effect", source="core")
+def _op_reorder_effect(doc: dict[str, Any], op: dict[str, Any]) -> None:
+    """Move one effect to an exact zero-based index within its layer chain."""
+    layer = _require_layer(doc, _require_arg(op, "layer_id"), op="reorder_effect")
+    effect_id = str(_require_arg(op, "effect_id"))
+    raw_index = _require_arg(op, "index")
+    if isinstance(raw_index, bool):
+        raise LayerPatchError("E_ARG", "reorder_effect: index must be an integer")
+    try:
+        numeric_index = float(raw_index)
+    except (TypeError, ValueError) as exc:
+        raise LayerPatchError("E_ARG", "reorder_effect: index must be an integer") from exc
+    if not math.isfinite(numeric_index) or not numeric_index.is_integer():
+        raise LayerPatchError("E_ARG", "reorder_effect: index must be an integer")
+
+    effects = layer.get("effects") or []
+    current = next(
+        (idx for idx, effect in enumerate(effects) if str(effect.get("id")) == effect_id),
+        None,
+    )
+    if current is None:
+        raise LayerPatchError("E_NOT_FOUND", f"reorder_effect: effect {effect_id} not found")
+    index = int(numeric_index)
+    if index < 0 or index >= len(effects):
+        raise LayerPatchError(
+            "E_RANGE",
+            f"reorder_effect: index {index} outside [0, {len(effects) - 1}]",
+        )
+    effect = effects.pop(current)
+    effects.insert(index, effect)
+
+
 @register_op("color_grade", source="core")
 def _op_color_grade(doc: dict[str, Any], op: dict[str, Any]) -> None:
     """Convenience: upsert a single ``color_grade`` effect on the layer.
@@ -2400,6 +2448,93 @@ def _op_add_gradient(doc: dict[str, Any], op: dict[str, Any]) -> None:
         props["radius"] = model._as_float(op.get("radius")) if op.get("radius") is not None else 0.5
 
     _add_visual_layer(doc, op, "gradient", "Gradient", props)
+
+
+def _gradient_float(value: Any, *, field: str) -> float:
+    """Parse one finite numeric gradient field without silent coercion to zero."""
+    if isinstance(value, bool):
+        raise LayerPatchError("E_ARG", f"set_gradient: {field} must be a finite number")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise LayerPatchError("E_ARG", f"set_gradient: {field} must be a finite number") from exc
+    if not math.isfinite(number):
+        raise LayerPatchError("E_ARG", f"set_gradient: {field} must be a finite number")
+    return number
+
+
+def _gradient_color(value: Any) -> str:
+    """Validate the colour syntax the gradient renderer actually understands."""
+    if not isinstance(value, str):
+        raise LayerPatchError("E_ARG", "set_gradient: stop colour must be #RRGGBB or #RRGGBBAA")
+    color = value.strip()
+    hex_digits = color[1:] if color.startswith("#") else ""
+    if len(hex_digits) not in {6, 8} or any(ch not in "0123456789abcdefABCDEF" for ch in hex_digits):
+        raise LayerPatchError("E_ARG", "set_gradient: stop colour must be #RRGGBB or #RRGGBBAA")
+    return color
+
+
+@register_op("set_gradient", source="core")
+def _op_set_gradient(doc: dict[str, Any], op: dict[str, Any]) -> None:
+    """Update only supplied gradient fields, validating each value strictly."""
+    layer = _require_layer(doc, _require_arg(op, "layer_id"), op="set_gradient")
+    if str(layer.get("type")) != "gradient":
+        raise LayerPatchError("E_TYPE", "set_gradient: target layer must be a gradient")
+
+    fields = {"mode", "stops", "angle", "center", "radius"}
+    supplied = fields.intersection(op)
+    if not supplied:
+        raise LayerPatchError(
+            "E_ARG",
+            "set_gradient: provide at least one of mode, stops, angle, center, radius",
+        )
+
+    updates: dict[str, Any] = {}
+    if "mode" in supplied:
+        mode = str(op["mode"])
+        if mode not in {"linear", "radial"}:
+            raise LayerPatchError("E_ARG", "set_gradient: mode must be linear or radial")
+        updates["mode"] = mode
+
+    if "stops" in supplied:
+        raw_stops = op["stops"]
+        if not isinstance(raw_stops, list) or len(raw_stops) < 2:
+            raise LayerPatchError("E_ARG", "set_gradient: stops must contain at least two [position, colour] pairs")
+        stops: list[list[Any]] = []
+        for stop in raw_stops:
+            if not isinstance(stop, (list, tuple)) or len(stop) != 2:
+                raise LayerPatchError("E_ARG", "set_gradient: each stop must be exactly [position, colour]")
+            position = _gradient_float(stop[0], field="stop position")
+            if position < 0.0 or position > 1.0:
+                raise LayerPatchError("E_RANGE", "set_gradient: stop positions must be within [0, 1]")
+            stops.append([round(position, 6), _gradient_color(stop[1])])
+        stops.sort(key=lambda item: item[0])
+        updates["stops"] = stops
+
+    if "angle" in supplied:
+        updates["angle"] = _gradient_float(op["angle"], field="angle")
+
+    if "center" in supplied:
+        center = op["center"]
+        if not isinstance(center, (list, tuple)) or len(center) != 2:
+            raise LayerPatchError("E_ARG", "set_gradient: center must be [x, y]")
+        cx = _gradient_float(center[0], field="center x")
+        cy = _gradient_float(center[1], field="center y")
+        if not (0.0 <= cx <= 1.0 and 0.0 <= cy <= 1.0):
+            raise LayerPatchError("E_RANGE", "set_gradient: center coordinates must be within [0, 1]")
+        updates["center"] = [round(cx, 6), round(cy, 6)]
+
+    if "radius" in supplied:
+        radius = _gradient_float(op["radius"], field="radius")
+        if radius <= 0.0 or radius > 1.0:
+            raise LayerPatchError("E_RANGE", "set_gradient: radius must be within (0, 1]")
+        updates["radius"] = radius
+
+    props = layer.get("props")
+    if not isinstance(props, dict):
+        props = {}
+        layer["props"] = props
+    props.update(updates)
 
 
 @register_op("add_shape", source="core")

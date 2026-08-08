@@ -91,6 +91,94 @@ def test_session_runner_rejects_overlapping_turns(monkeypatch, tmp_path: Path) -
         runner.close()
 
 
+def test_distinct_sessions_run_turns_concurrently(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(session_manager, "AgentLoopV3", FakeAgentLoop)
+    manager = SessionManager(
+        output_root=tmp_path / "runtime",
+        max_sessions=3,
+        idle_timeout_sec=0,
+        sweep_interval_sec=0,
+    )
+    first = manager.create_session()
+    second = manager.create_session()
+    try:
+        assert first.submit_turn("first session work") is True
+        assert second.submit_turn("second session work") is True
+        deadline = time.time() + 1
+        while (
+            not first.agent.started or not second.agent.started
+        ) and time.time() < deadline:
+            time.sleep(0.01)
+        assert first.agent.started is True
+        assert second.agent.started is True
+        assert first.turn_in_progress is True
+        assert second.turn_in_progress is True
+    finally:
+        manager.close_all()
+
+
+def test_compact_session_list_reports_activity_without_heavy_snapshots(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(session_manager, "AgentLoopV3", FakeAgentLoop)
+    manager = SessionManager(
+        output_root=tmp_path / "runtime",
+        max_sessions=2,
+        idle_timeout_sec=0,
+        sweep_interval_sec=0,
+    )
+    runner = manager.create_session()
+    monkeypatch.setattr(v3_routes, "get_manager", lambda: manager)
+    handler = FakeHandler()
+    handler.path = "/sessions?compact=1"
+    try:
+        assert v3_routes.try_handle(handler, method="GET") is True
+        assert handler.status == 200
+        item = handler.body_json["sessions"][0]
+        assert item["session_id"] == runner.session_id
+        assert item["project_id"] == runner.project_id
+        assert item["turn_in_progress"] is False
+        assert item["pending_jobs"] == []
+        assert item["active_subagents"] == []
+        assert "assets" not in item
+        assert "budget" not in item
+    finally:
+        manager.close_all()
+
+
+def test_compact_session_list_includes_only_live_subagent_presence(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(session_manager, "AgentLoopV3", FakeAgentLoop)
+    manager = SessionManager(
+        output_root=tmp_path / "runtime",
+        max_sessions=2,
+        idle_timeout_sec=0,
+        sweep_interval_sec=0,
+    )
+    runner = manager.create_session()
+    runner.agent._active_subagents = {
+        "call-1:sub_1": {
+            "agent_id": "sub_1",
+            "goal": "检查镜头素材",
+            "tool_profile": "probe",
+        },
+    }
+    monkeypatch.setattr(v3_routes, "get_manager", lambda: manager)
+    handler = FakeHandler()
+    handler.path = "/sessions?compact=1"
+    try:
+        assert v3_routes.try_handle(handler, method="GET") is True
+        item = handler.body_json["sessions"][0]
+        assert item["active_subagents"] == [{
+            "agent_id": "sub_1",
+            "goal": "检查镜头素材",
+            "tool_profile": "probe",
+        }]
+    finally:
+        manager.close_all()
+
+
 def test_session_runner_can_steer_and_stop_active_turn(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(session_manager, "AgentLoopV3", FakeAgentLoop)
     runner = SessionRunner(
@@ -143,6 +231,46 @@ def test_session_manager_caps_sessions_and_sweeps_idle(monkeypatch, tmp_path: Pa
     manager.close_all(remove_workdirs=True)
 
 
+def test_session_route_transparently_resumes_sleeping_durable_session(
+    monkeypatch,
+) -> None:
+    class SleepingRunner:
+        session_id = "v3-sleeping"
+        plan_mode = False
+        turn_in_progress = False
+        project_id = "project-sleeping"
+        run_id = "run-sleeping"
+
+        def list_assets(self) -> list:
+            return []
+
+        def list_tasks(self) -> list:
+            return []
+
+    class SleepingManager:
+        def __init__(self) -> None:
+            self.runner = SleepingRunner()
+            self.resume_calls: list[str] = []
+
+        def get(self, _session_id: str):
+            return None
+
+        def resume_session(self, session_id: str):
+            self.resume_calls.append(session_id)
+            return self.runner
+
+    manager = SleepingManager()
+    monkeypatch.setattr(v3_routes, "get_manager", lambda: manager)
+    handler = FakeHandler()
+    handler.path = "/sessions/v3-sleeping"
+
+    assert v3_routes.try_handle(handler, method="GET") is True
+    assert handler.status == 200
+    assert handler.body_json["session_id"] == "v3-sleeping"
+    assert handler.body_json["project_id"] == "project-sleeping"
+    assert manager.resume_calls == ["v3-sleeping"]
+
+
 def test_session_manager_cap_counts_sessions_being_created(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(session_manager, "AgentLoopV3", FakeAgentLoop)
     manager = SessionManager(
@@ -180,6 +308,21 @@ def test_sse_reconnect_reports_replay_gap_after_buffer_overflow() -> None:
         sse.REGISTRY.unregister(sid)
 
 
+def test_sse_registry_continues_ids_after_durable_resume() -> None:
+    sid = f"test-{uuid.uuid4().hex}"
+    sse.REGISTRY.register(sid, last_event_id=2409)
+    try:
+        assert sse.REGISTRY.latest_event_id(sid) == 2409
+        assert sse.REGISTRY.emit(sid, {"kind": "turn_start"}) == 2410
+        gen = sse.iter_events(sid, last_event_id=2409)
+        event_id, payload = _parse_sse(next(gen))
+        assert event_id == 2410
+        assert payload["kind"] == "turn_start"
+    finally:
+        sse.REGISTRY.close(sid)
+        sse.REGISTRY.unregister(sid)
+
+
 def test_v3_asset_range_supports_suffix_and_clamps_end(tmp_path: Path) -> None:
     asset = tmp_path / "asset.bin"
     asset.write_bytes(b"0123456789")
@@ -210,6 +353,46 @@ def test_v3_upload_rejects_bad_content_length_without_500() -> None:
     assert "Content-Length" in handler.body_json["error"]
 
 
+def test_v3_upload_also_registers_signed_in_media_library_asset(monkeypatch, tmp_path: Path) -> None:
+    class Runner:
+        output_dir = tmp_path
+        account_id = "signed-in-account"
+        session_id = "v3-upload-library"
+
+        def add_external_asset(
+            self,
+            path: Path,
+            *,
+            summary: str = "",
+            original_name: str | None = None,
+        ) -> str:
+            assert path.read_bytes() == b"audio-bytes"
+            assert "take.wav" in summary
+            return "aud_001"
+
+    from gemia import media_library
+
+    monkeypatch.setattr(
+        media_library,
+        "import_media",
+        lambda account_id, path, original_name=None: {
+            "asset_id": "asset_library_001",
+            "account_id": account_id,
+            "name": original_name,
+        },
+    )
+    handler = FakeHandler(
+        headers={"Content-Length": str(len(b"audio-bytes")), "X-Filename": "take.wav"},
+        body=b"audio-bytes",
+    )
+
+    assert _upload_asset(handler, Runner()) is True
+    assert handler.status == 201
+    assert handler.body_json["asset_id"] == "aud_001"
+    assert handler.body_json["library_asset_id"] == "asset_library_001"
+    assert handler.body_json["library_asset"]["name"] == "take.wav"
+
+
 def test_v3_try_handle_hides_internal_errors_by_default(monkeypatch) -> None:
     handler = FakeHandler()
     handler.path = "/sessions/v3-test"
@@ -222,6 +405,23 @@ def test_v3_try_handle_hides_internal_errors_by_default(monkeypatch) -> None:
     assert v3_routes.try_handle(handler, method="GET") is True
     assert handler.status == 500
     assert handler.body_json == {"error": "internal server error"}
+
+
+@pytest.mark.parametrize("disconnect", [BrokenPipeError(), ConnectionResetError()])
+def test_v3_try_handle_does_not_turn_client_disconnect_into_500(
+    monkeypatch, disconnect: OSError
+) -> None:
+    handler = FakeHandler()
+    handler.path = "/projects/project-1/artifacts/v_001"
+
+    def disconnected(*_args, **_kwargs):
+        raise disconnect
+
+    monkeypatch.setattr(v3_routes, "_route_get", disconnected)
+
+    assert v3_routes.try_handle(handler, method="GET") is True
+    assert handler.status is None
+    assert handler.body == b""
 
 
 def test_v3_static_path_guard_rejects_prefix_sibling(tmp_path: Path) -> None:
@@ -253,7 +453,7 @@ def test_tool_result_scrubber_removes_local_paths() -> None:
         },
     }
 
-    assert _scrub_local_paths(payload) == {
+    assert _scrub_local_paths(payload) == {  # noqa: F821 - intentionally absent; see skip reason
         "asset_id": "v_002",
         "metadata": {"nested": [{"ok": True}]},
     }
@@ -373,14 +573,65 @@ def test_v3_frontend_persists_last_event_id_and_handles_replay_gap() -> None:
 
 
 def test_v3_frontend_recovers_an_expired_session_before_retrying_upload() -> None:
-    """A runtime reload must not leave an open browser tab unable to upload."""
+    """A runtime reload must resume the durable project before retrying."""
     source = Path("static/v3/v3.js").read_text(encoding="utf-8")
 
     assert "async function uploadFile(file, retryExpiredSession = true)" in source
     assert "r.status === 404 && retryExpiredSession" in source
-    assert "await autoSaveSession();" in source
-    assert "await createSession();" in source
+    assert "const expected = { project_id: state.projectId, run_id: state.runId };" in source
+    assert "await resumeSession(staleSessionId, expected);" in source
     assert "return uploadFile(file, false);" in source
+
+    upload_source = source[source.index("async function uploadFile"):source.index("function setUploadStatus")]
+    assert "createSession(" not in upload_source
+
+
+def test_tester_managed_frontend_skips_legacy_asset_probes_and_imports_into_the_session() -> None:
+    """The classmate build must stay on the isolated session-asset contract."""
+    source = Path("static/v3/v3.js").read_text(encoding="utf-8")
+
+    managed_refresh = source[
+        source.index("async function fetchMediaLibrary"):
+        source.index("async function fetchLegacyMediaLibrary")
+    ]
+    assert "if (isTesterManagedWorkspace())" in managed_refresh
+    assert managed_refresh.index('state.mediaLibraryStatus = "ready";') < managed_refresh.index("return;")
+    assert "apiFetch(" not in managed_refresh
+    assert "return fetchLegacyMediaLibrary();" in managed_refresh
+    legacy_refresh = source[
+        source.index("async function fetchLegacyMediaLibrary"):
+        source.index("async function annotateLibraryAsset")
+    ]
+    assert 'apiFetch("/media-library/list?limit=100")' in legacy_refresh
+    assert "fetchSessionNonMediaAssets" in legacy_refresh
+
+    activation = source[
+        source.index("async function activateSessionPayload"):
+        source.index("async function createSession")
+    ]
+    upload = source[
+        source.index("async function uploadFile"):
+        source.index("function setUploadStatus")
+    ]
+    for caller in (activation, upload):
+        assert "fetchMediaLibrary().catch" in caller
+        assert "fetchLegacyMediaLibrary" not in caller
+
+    assert 'apiFetch(`/sessions/${state.sessionId}/assets`, {' in upload
+    assert 'preview_src: previewSrc' in source
+    assert '`/sessions/${encodeURIComponent(state.sessionId)}/assets/${encodeURIComponent(assetId)}`' in source
+
+    files_panel = source[
+        source.index("async function renderFilesPanel"):
+        source.index("async function renderLibraryPanel")
+    ]
+    assert files_panel.index("if (isTesterManagedWorkspace())") < files_panel.index('apiFetch("/files/roots")')
+    managed_files_guard = files_panel[
+        files_panel.index("if (isTesterManagedWorkspace())"):
+        files_panel.index("if (!filesState)")
+    ]
+    assert "return;" in managed_files_guard
+    assert "apiFetch(" not in managed_files_guard
 
 
 def test_v3_frontend_uses_only_model_authored_activity_copy() -> None:
@@ -412,6 +663,30 @@ def test_v3_frontend_renders_lumeri_wrapup_as_assistant_report() -> None:
     assert 'String(ev.message || "").trim()' in source
     assert "t.assistantText = modelReport || fallbackReport" in source
     assert "本轮已暂停，等待下一步" not in source
+
+
+def test_v3_conversation_distinguishes_source_without_alarm_chrome() -> None:
+    source = Path("static/v3/v3.js").read_text(encoding="utf-8")
+    css = Path("static/v3/v3.css").read_text(encoding="utf-8")
+
+    render_banner = source[source.index("function renderBanner"):source.index("function renderAssets")]
+    system_style = css[css.index(".system-message {"):css.index("/* ── Assets")]
+    assistant_style = css[css.index(".assistant-bubble {"):css.index(".assistant-bubble.streaming")]
+
+    assert 'class="system-message"' in render_banner
+    assert "banner-turn-error" not in render_banner
+    assert "background:" not in system_style
+    assert "border:" not in system_style
+    assert "color: var(--system-text);" in system_style
+    assert "color: var(--m3-on-surface);" in assistant_style
+
+
+def test_v3_frontend_renders_only_host_approved_text_deltas_live() -> None:
+    source = Path("static/v3/v3.js").read_text(encoding="utf-8")
+
+    assert 'if (ev.display === "stream")' in source
+    assert "t.assistantText = stripActivityMarkup(t.pendingAssistantText)" in source
+    assert "t.streaming = true" in source
 
 
 # ──────────────────────────── budget_guard regression ────────────────────────────

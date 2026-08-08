@@ -1,0 +1,16 @@
+{
+  "fixture_version": 1,
+  "name": "first-party-headless-creator-loop",
+  "steps": [
+    {"kind": "domain", "method": "POST", "path": "/api/v1/projects", "produces": "project"},
+    {"kind": "domain", "method": "POST", "path": "/api/v1/sessions", "produces": "session"},
+    {"kind": "domain", "method": "POST", "path": "/api/v1/sessions/{session_id}/assets", "produces": "asset"},
+    {"kind": "capability", "name": "analyze_media", "effect": "read"},
+    {"kind": "capability", "name": "timeline_insert_clip", "effect": "write"},
+    {"kind": "capability", "name": "render_preview", "effect": "write"},
+    {"kind": "capability", "name": "get_timeline", "effect": "read"},
+    {"kind": "capability", "name": "timeline_trim_clip", "effect": "write"},
+    {"kind": "capability", "name": "project_export", "effect": "write"},
+    {"kind": "capability", "name": "verify_delivery", "effect": "write"}
+  ]
+}

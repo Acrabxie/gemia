@@ -24,6 +24,11 @@ def account_id_for(ctx: ToolContext) -> str:
         return ""
 
 
+def project_id_for(ctx: ToolContext) -> str:
+    """Return the durable Project id carried by the active tool session."""
+    return str(ctx.extra.get("project_id") or "").strip()
+
+
 def ensure_session_asset(ctx: ToolContext, asset: dict[str, Any]) -> str | None:
     """Register a media-library asset into the session registry, returning its
     session ``asset_id`` (memoized per resolved path). Returns ``None`` when the
@@ -60,4 +65,4 @@ def ensure_session_asset(ctx: ToolContext, asset: dict[str, Any]) -> str | None:
     return record.asset_id
 
 
-__all__ = ["account_id_for", "ensure_session_asset"]
+__all__ = ["account_id_for", "ensure_session_asset", "project_id_for"]

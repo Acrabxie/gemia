@@ -23,6 +23,10 @@ def test_save_and_load_current_session(monkeypatch, tmp_path: Path) -> None:
             {"id": "bad", "role": "assistant", "content": "ignored", "timestamp": 124},
         ],
         "project_state": {"clips": [{"id": "clip_1", "name": "a.mp4"}]},
+        "timeline_markers": [
+            {"time": 1.23456, "label": "开场复核", "color": "#ffcf3b"},
+            {"time": -1, "label": "invalid"},
+        ],
         "server_video_path": str(source_video),
         "creative_runtime_task_id": "task_crt_restore",
     }
@@ -35,6 +39,9 @@ def test_save_and_load_current_session(monkeypatch, tmp_path: Path) -> None:
     assert saved["project"]["timeline"]["clips"][0]["name"] == "a.mp4"
     assert loaded["messages"] == [{"id": "m1", "role": "user", "content": "剪一条预告", "statusType": None, "timestamp": 123}]
     assert loaded["project"]["version"] == 1
+    assert loaded["timeline_markers"] == [
+        {"time": 1.235, "label": "开场复核", "color": "#ffcf3b"}
+    ]
     assert loaded["server_video_path"] == str(source_video)
     assert loaded["creative_runtime_task_id"] == "task_crt_restore"
     assert (root / "current.json").stat().st_mode & 0o777 == 0o600
@@ -56,6 +63,123 @@ def test_list_session_snapshots_is_metadata_only(monkeypatch, tmp_path: Path) ->
     assert items[0]["message_count"] == 1
     assert items[0]["clip_count"] == 2
     assert "messages" not in items[0]
+
+
+def test_session_history_preserves_safe_skill_space_selection(monkeypatch, tmp_path: Path) -> None:
+    _patch_roots(monkeypatch, tmp_path)
+    digest = "a" * 64
+
+    loaded = session_history.save_current_session(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "做一支产品宣传片",
+                    "skillSpace": [
+                        {
+                            "kind": "workflow",
+                            "id": "product-promo",
+                            "version": "1.0.0",
+                            "title": "产品宣传片制作",
+                            "publisher": "Lumeri",
+                            "visibility": "public",
+                            "access": "public",
+                            "content_sha256": digest,
+                        },
+                        {"kind": "skill", "id": "../unsafe", "version": "1.0.0"},
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert loaded["messages"][0]["skillSpace"] == [
+        {
+            "kind": "workflow",
+            "id": "product-promo",
+            "version": "1.0.0",
+            "title": "产品宣传片制作",
+            "publisher": "Lumeri",
+            "visibility": "public",
+            "access": "public",
+            "content_sha256": digest,
+        }
+    ]
+
+
+def test_session_history_preserves_only_safe_explicit_workspace_context(monkeypatch, tmp_path: Path) -> None:
+    _patch_roots(monkeypatch, tmp_path)
+
+    loaded = session_history.save_current_session(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "调一下这个图层",
+                    "workspaceContext": [
+                        {
+                            "kind": "canvas_layer",
+                            "id": "shape_f522ea15d181",
+                            "label": "主标题背景",
+                            "layer_type": "shape",
+                            "frame": 42,
+                            "surface": "preview",
+                        },
+                        {"kind": "canvas_layer", "id": "../unsafe", "label": "bad"},
+                        {"kind": "unknown", "id": "thing", "label": "bad"},
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert loaded["messages"][0]["workspaceContext"] == [
+        {
+            "kind": "canvas_layer",
+            "id": "shape_f522ea15d181",
+            "label": "主标题背景",
+            "layer_type": "shape",
+            "surface": "preview",
+            "frame": 42.0,
+        }
+    ]
+
+
+def test_linked_v3_session_autosave_updates_one_history_item(
+    monkeypatch, tmp_path: Path
+) -> None:
+    root = _patch_roots(monkeypatch, tmp_path)
+    identity = {
+        "v3_session_id": "v3-linked",
+        "project_id": "project-linked",
+        "run_id": "run-linked",
+        "project_revision": 7,
+        "production_state": "ready_for_review",
+    }
+    session_history.save_current_session(
+        {
+            **identity,
+            "messages": [{"role": "user", "content": "first"}],
+        }
+    )
+    original = next((root / "history").glob("*.json"))
+    stable = original.with_name("20000101T000000Z-linked.json")
+    original.rename(stable)
+
+    session_history.save_current_session(
+        {
+            **identity,
+            "messages": [{"role": "user", "content": "updated"}],
+        }
+    )
+
+    snapshots = list((root / "history").glob("*.json"))
+    assert snapshots == [stable]
+    assert session_history.load_session_snapshot(stable.stem)["messages"][0]["content"] == "updated"
+
+    duplicate = stable.with_name("20000102T000000Z-linked-copy.json")
+    duplicate.write_bytes(stable.read_bytes())
+    assert len(session_history.list_session_snapshots()) == 1
 
 
 def test_load_session_snapshot_can_activate_previous_session(monkeypatch, tmp_path: Path) -> None:

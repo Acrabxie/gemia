@@ -192,9 +192,11 @@
 
   <div class="toasts" id="toasts"></div>
 
+<script src="/video/api-client.js"></script>
 <script>
 (() => {
   "use strict";
+  const apiFetch = (...args) => window.LumeriApi["fetch"](...args);
   const $ = (id) => document.getElementById(id);
   const params = new URLSearchParams(location.search);
   const sessionId = params.get("session") || params.get("s") || "";
@@ -348,6 +350,7 @@
       setActivity(true, "正在理解你的请求", "", null);
     },
     model_text_delta: () => {},
+    model_stream_reset: () => {},
     model_tool_call_start: (ev) => {
       state.running.set(ev.call_id, "正在执行");
       setActivity(true, "正在执行", "", null);
@@ -405,7 +408,8 @@
     },
     turn_error: (ev) => {
       _dismissPreviewAsk();
-      toast("本轮任务暂时暂停", "err");
+      const errorReason = String(ev.error || ev.message || "未知错误");
+      toast(`Error: ${errorReason}`, "err");
       setActivity(false);
       idleEmptyIfBlank();
     },
@@ -496,7 +500,7 @@
       btn.disabled = true;
       dock.querySelectorAll(".ask-field-error").forEach(e => { e.textContent = ""; });
       try {
-        const res = await fetch("/sessions/" + encodeURIComponent(sessionId) + "/ask_response", {
+        const res = await apiFetch("/sessions/" + encodeURIComponent(sessionId) + "/ask_response", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ question_id: state.pendingAsk.question_id, answers }),
         });
@@ -523,7 +527,7 @@
   // ── REST + SSE ─────────────────────────────────────────────────────
   async function loadInitial() {
     try {
-      const info = await fetch(`/sessions/${encodeURIComponent(sessionId)}`).then((r) => r.ok ? r.json() : null);
+      const info = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}`).then((r) => r.ok ? r.json() : null);
       if (info && info.latest_event_id != null) state.lastEventId = info.latest_event_id;
       const list = info && Array.isArray(info.assets) ? info.assets : [];
       for (const a of list) {
@@ -558,7 +562,7 @@
 
   async function resync() {
     try {
-      const info = await fetch(`/sessions/${encodeURIComponent(sessionId)}`).then((r) => r.ok ? r.json() : null);
+      const info = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}`).then((r) => r.ok ? r.json() : null);
       if (info && info.latest_event_id != null) state.lastEventId = info.latest_event_id;
       if (info && Array.isArray(info.assets)) {
         for (const a of info.assets) {

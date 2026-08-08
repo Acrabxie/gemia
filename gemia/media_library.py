@@ -1,4 +1,10 @@
-"""Account-scoped media asset library for Gemia."""
+"""Project-scoped media asset library for Gemia.
+
+The sqlite file and blobs remain underneath the signed-in account, but every
+public record belongs to exactly one Project.  Older account-wide rows are kept
+in a private compatibility scope and are never surfaced to a real Project
+unless they are explicitly copied/imported there.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -25,7 +31,8 @@ from gemia.video.timeline_assets import (
     probe_media,
 )
 
-MEDIA_LIBRARY_SCHEMA_VERSION = 1
+MEDIA_LIBRARY_SCHEMA_VERSION = 2
+LEGACY_PROJECT_SCOPE = "__legacy_account_scope__"
 
 
 class MediaLibraryError(ValueError):
@@ -52,8 +59,25 @@ def asset_cache_root(account_id: str, asset_id: str) -> Path:
     return cache_root(account_id) / _safe_asset_id(asset_id)
 
 
-def import_media(account_id: str, source_path: str | Path, *, original_name: str | None = None) -> dict[str, Any]:
-    """Copy a local media file into the account library and return its public asset record."""
+def ensure_library(account_id: str) -> None:
+    """Create/migrate the account container without exposing any Project."""
+    _ensure_library_dirs(account_id)
+
+
+def import_media(
+    account_id: str,
+    source_path: str | Path,
+    *,
+    original_name: str | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    """Copy media into one Project and return its public asset record.
+
+    ``project_id=None`` is retained only for old direct Python callers.  It is
+    isolated in :data:`LEGACY_PROJECT_SCOPE`; HTTP and agent surfaces always
+    pass their active Project id.
+    """
+    project_scope = _project_scope(project_id)
     source = Path(source_path)
     if not source.exists() or not source.is_file():
         raise MediaLibraryError(f"media file not found: {source_path}")
@@ -64,7 +88,10 @@ def import_media(account_id: str, source_path: str | Path, *, original_name: str
 
     _ensure_library_dirs(account_id)
     fingerprint = _sha256_file(source)
-    asset_id = f"asset_{fingerprint[:24]}"
+    scoped_fingerprint = hashlib.sha256(
+        f"{project_scope}\0{fingerprint}".encode()
+    ).hexdigest()
+    asset_id = f"asset_{scoped_fingerprint[:24]}"
     display_name = Path(original_name or source.name).name or f"{asset_id}{ext}"
     storage_path = originals_root(account_id) / f"{asset_id}{ext}"
     if not storage_path.exists() or not _same_file(source, storage_path):
@@ -113,6 +140,7 @@ def import_media(account_id: str, source_path: str | Path, *, original_name: str
     row = {
         "asset_id": asset_id,
         "account_id": account_id,
+        "project_id": project_scope,
         "name": display_name,
         "media_kind": media_kind,
         "mime_type": mime_type,
@@ -139,11 +167,37 @@ def import_media(account_id: str, source_path: str | Path, *, original_name: str
     metadata["asset_identity"] = asset_identity_for_record(row)
     row["metadata_json"] = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
     with _connect(account_id) as conn:
-        existing = _row_by_id(conn, asset_id)
+        existing = _row_by_id(conn, asset_id, project_scope)
         if existing:
             row["created_at"] = str(existing["created_at"] or now)
         _upsert_asset(conn, row)
-    return get_asset(account_id, asset_id) or _public_asset(row)
+    return get_asset(account_id, asset_id, project_id=project_scope) or _public_asset(row)
+
+
+def copy_asset_to_project(
+    account_id: str,
+    asset_id: str,
+    *,
+    source_project_id: str,
+    target_project_id: str,
+) -> dict[str, Any]:
+    """Explicitly copy one source-Project asset into a target Project record."""
+    source_scope = _project_scope(source_project_id)
+    target_scope = _project_scope(target_project_id)
+    if source_scope == target_scope:
+        asset = get_asset(account_id, asset_id, project_id=source_scope)
+        if not asset:
+            raise MediaLibraryError("media asset not found")
+        return asset
+    source = get_asset(account_id, asset_id, project_id=source_scope)
+    if not source:
+        raise MediaLibraryError("media asset not found")
+    return import_media(
+        account_id,
+        str(source.get("storage_path") or source.get("source_path") or ""),
+        original_name=str(source.get("name") or "") or None,
+        project_id=target_scope,
+    )
 
 
 def list_assets(
@@ -153,10 +207,12 @@ def list_assets(
     q: str | None = None,
     limit: int = 200,
     include_deleted: bool = False,
+    project_id: str | None = None,
 ) -> list[dict[str, Any]]:
     _ensure_library_dirs(account_id)
-    clauses = ["1=1"]
-    params: list[Any] = []
+    project_scope = _project_scope(project_id)
+    clauses = ["project_id = ?"]
+    params: list[Any] = [project_scope]
     if not include_deleted:
         clauses.append("deleted_at IS NULL")
     if kind in {"video", "image", "audio", "lottie"}:
@@ -172,7 +228,7 @@ def list_assets(
     """
     with _connect(account_id) as conn:
         assets = [_public_asset(_dict_from_row(row)) for row in conn.execute(sql, params).fetchall()]
-    assets = [_with_annotation_summary(account_id, asset) for asset in assets]
+    assets = [_with_annotation_summary(account_id, asset, project_scope) for asset in assets]
     if query:
         filtered: list[dict[str, Any]] = []
         for asset in assets:
@@ -180,7 +236,11 @@ def list_assets(
             try:
                 from gemia.media_annotations import search_annotation_text
 
-                annotation_text = search_annotation_text(account_id, str(asset.get("asset_id") or ""))
+                annotation_text = search_annotation_text(
+                    account_id,
+                    str(asset.get("asset_id") or ""),
+                    project_id=project_scope,
+                )
             except Exception:
                 annotation_text = ""
             haystack = " ".join(
@@ -199,35 +259,54 @@ def list_assets(
     return assets
 
 
-def get_asset(account_id: str, asset_id: str, *, include_deleted: bool = False) -> dict[str, Any] | None:
+def get_asset(
+    account_id: str,
+    asset_id: str,
+    *,
+    include_deleted: bool = False,
+    project_id: str | None = None,
+) -> dict[str, Any] | None:
+    project_scope = _project_scope(project_id)
     with _connect(account_id) as conn:
-        row = _row_by_id(conn, _safe_asset_id(asset_id))
+        row = _row_by_id(conn, _safe_asset_id(asset_id), project_scope)
         if not row:
             return None
         payload = _dict_from_row(row)
         if payload.get("deleted_at") and not include_deleted:
             return None
-        return _with_annotation_summary(account_id, attach_asset_identity(_public_asset(payload)))
+        return _with_annotation_summary(
+            account_id,
+            attach_asset_identity(_public_asset(payload)),
+            project_scope,
+        )
 
 
-def soft_delete_asset(account_id: str, asset_id: str) -> dict[str, Any]:
+def soft_delete_asset(account_id: str, asset_id: str, *, project_id: str | None = None) -> dict[str, Any]:
+    project_scope = _project_scope(project_id)
     now = _utc_now()
     with _connect(account_id) as conn:
-        row = _row_by_id(conn, _safe_asset_id(asset_id))
+        row = _row_by_id(conn, _safe_asset_id(asset_id), project_scope)
         if not row:
             raise MediaLibraryError("media asset not found")
         conn.execute(
-            "UPDATE media_assets SET deleted_at = ?, updated_at = ?, status = ? WHERE asset_id = ?",
-            (now, now, "deleted", _safe_asset_id(asset_id)),
+            "UPDATE media_assets SET deleted_at = ?, updated_at = ?, status = ? WHERE asset_id = ? AND project_id = ?",
+            (now, now, "deleted", _safe_asset_id(asset_id), project_scope),
         )
-    asset = get_asset(account_id, asset_id, include_deleted=True)
+    asset = get_asset(account_id, asset_id, include_deleted=True, project_id=project_scope)
     if not asset:
         raise MediaLibraryError("media asset not found")
     return asset
 
 
-def resolve_asset_file(account_id: str, asset_id: str, area: str, filename: str | None = None) -> Path:
-    asset = get_asset(account_id, asset_id)
+def resolve_asset_file(
+    account_id: str,
+    asset_id: str,
+    area: str,
+    filename: str | None = None,
+    *,
+    project_id: str | None = None,
+) -> Path:
+    asset = get_asset(account_id, asset_id, project_id=project_id)
     if not asset:
         raise MediaLibraryError("media asset not found")
     if area == "original":
@@ -326,6 +405,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS media_assets (
             asset_id TEXT PRIMARY KEY,
             account_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
             name TEXT NOT NULL,
             media_kind TEXT NOT NULL,
             mime_type TEXT NOT NULL,
@@ -352,9 +432,17 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(media_assets)")}
+    if "project_id" not in columns:
+        conn.execute("ALTER TABLE media_assets ADD COLUMN project_id TEXT NOT NULL DEFAULT ''")
+    conn.execute(
+        "UPDATE media_assets SET project_id = ? WHERE project_id = ''",
+        (LEGACY_PROJECT_SCOPE,),
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_media_assets_kind ON media_assets(media_kind)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_media_assets_project ON media_assets(project_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_media_assets_updated ON media_assets(updated_at)")
-    conn.execute("PRAGMA user_version = 1")
+    conn.execute(f"PRAGMA user_version = {MEDIA_LIBRARY_SCHEMA_VERSION}")
     conn.commit()
 
 
@@ -362,13 +450,13 @@ def _upsert_asset(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
     conn.execute(
         """
         INSERT INTO media_assets (
-            asset_id, account_id, name, media_kind, mime_type, fingerprint,
+            asset_id, account_id, project_id, name, media_kind, mime_type, fingerprint,
             original_path, storage_path, source_path, duration, width, height,
             fps, codec, audio_codec, has_audio, file_size_bytes, metadata_json,
             thumbnails_json, waveform_peaks_json, status, error, deleted_at,
             created_at, updated_at
         ) VALUES (
-            :asset_id, :account_id, :name, :media_kind, :mime_type, :fingerprint,
+            :asset_id, :account_id, :project_id, :name, :media_kind, :mime_type, :fingerprint,
             :original_path, :storage_path, :source_path, :duration, :width, :height,
             :fps, :codec, :audio_codec, :has_audio, :file_size_bytes, :metadata_json,
             :thumbnails_json, :waveform_peaks_json, :status, :error, NULL,
@@ -402,8 +490,11 @@ def _upsert_asset(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
     conn.commit()
 
 
-def _row_by_id(conn: sqlite3.Connection, asset_id: str) -> sqlite3.Row | None:
-    return conn.execute("SELECT * FROM media_assets WHERE asset_id = ?", (_safe_asset_id(asset_id),)).fetchone()
+def _row_by_id(conn: sqlite3.Connection, asset_id: str, project_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM media_assets WHERE asset_id = ? AND project_id = ?",
+        (_safe_asset_id(asset_id), _project_scope(project_id)),
+    ).fetchone()
 
 
 def _dict_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -422,6 +513,7 @@ def _public_asset(row: dict[str, Any]) -> dict[str, Any]:
         "id": asset_id,
         "asset_id": asset_id,
         "account_id": str(row.get("account_id") or ""),
+        "project_id": str(row.get("project_id") or LEGACY_PROJECT_SCOPE),
         "name": str(row.get("name") or "media"),
         "media_kind": str(row.get("media_kind") or "video"),
         "mime_type": str(row.get("mime_type") or metadata.get("mime_type") or ""),
@@ -450,11 +542,15 @@ def _public_asset(row: dict[str, Any]) -> dict[str, Any]:
     })
 
 
-def _with_annotation_summary(account_id: str, asset: dict[str, Any]) -> dict[str, Any]:
+def _with_annotation_summary(account_id: str, asset: dict[str, Any], project_id: str) -> dict[str, Any]:
     try:
         from gemia.media_annotations import annotation_summary
 
-        asset["annotation_summary"] = annotation_summary(account_id, str(asset.get("asset_id") or ""))
+        asset["annotation_summary"] = annotation_summary(
+            account_id,
+            str(asset.get("asset_id") or ""),
+            project_id=project_id,
+        )
     except Exception:
         asset["annotation_summary"] = {"count": 0, "labels": [], "tags": [], "categories": []}
     return asset
@@ -551,6 +647,15 @@ def _safe_asset_id(value: str) -> str:
     return text
 
 
+def _project_scope(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return LEGACY_PROJECT_SCOPE
+    if len(text) > 160 or not re.fullmatch(r"[A-Za-z0-9_.:-]+", text):
+        raise MediaLibraryError("invalid project id")
+    return text
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -558,10 +663,13 @@ def _utc_now() -> str:
 __all__ = [
     "MEDIA_LIBRARY_SCHEMA_VERSION",
     "MediaLibraryError",
+    "LEGACY_PROJECT_SCOPE",
     "asset_cache_root",
     "asset_identity_for_record",
     "cache_root",
+    "copy_asset_to_project",
     "default_clip_for_asset",
+    "ensure_library",
     "get_asset",
     "import_media",
     "library_path",

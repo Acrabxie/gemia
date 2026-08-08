@@ -115,13 +115,9 @@ def test_mutating_lumen_edit_appends_post_state_digest(tmp_path: Path) -> None:
     assert '"applied": true' in result_text
     assert result_text.index('"applied": true') < result_text.index("[POST-EDIT STATE")
 
-    # The edit landed, but host-owned completion now requires a post-mutation
-    # visual review. A structural digest alone must not be mislabeled complete.
-    assert not [e for e in events if e.get("kind") == "turn_complete"]
-    assert any(
-        e.get("kind") == "turn_error" and e.get("reason") == "incomplete_goal"
-        for e in events
-    )
+    # The digest is evidence for the model, not a host completion gate.
+    assert [e for e in events if e.get("kind") == "turn_complete"]
+    assert not [e for e in events if e.get("reason") == "incomplete_goal"]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -202,14 +198,10 @@ def test_digest_exception_does_not_break_turn(tmp_path: Path, monkeypatch) -> No
     # Must NOT raise despite the digest path raising.
     asyncio.run(loop.run_turn("add a layer, but digest will explode"))
 
-    # The digest exception is still non-fatal: the edit landed and the loop
-    # reaches its normal host acceptance decision. It ends incomplete solely
-    # because no post-mutation visual review occurred.
-    assert not [e for e in events if e.get("kind") == "turn_complete"]
-    assert any(
-        e.get("kind") == "turn_error" and e.get("reason") == "incomplete_goal"
-        for e in events
-    )
+    # The digest exception is still non-fatal: the edit landed and the model's
+    # natural no-tool response ends the turn.
+    assert [e for e in events if e.get("kind") == "turn_complete"]
+    assert not [e for e in events if e.get("reason") == "incomplete_goal"]
 
     result_text = _tool_result_for(loop, "call_1")
     # The underlying edit still succeeded and was recorded...

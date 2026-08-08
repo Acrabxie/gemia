@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from gemia.tools._context import ToolContext
-from gemia.tools._library_session import account_id_for, ensure_session_asset
+from gemia.tools._library_session import account_id_for, ensure_session_asset, project_id_for
 
 _VALID_KINDS = {"video", "image", "audio", "any"}
 _DEFAULT_LIMIT = 8
@@ -53,16 +53,17 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
             "index_hint": "",
             "summary": "no account context; sign in to search the media library",
         }
+    project_id = project_id_for(ctx) or None
 
     from gemia.media_library import get_asset
     from gemia.media_search import search_media_annotations
 
-    raw = search_media_annotations(account_id, query, kind=kind, limit=limit)
+    raw = search_media_annotations(account_id, query, kind=kind, limit=limit, project_id=project_id)
 
     results: list[dict[str, Any]] = []
     for item in raw["results"]:
         library_asset_id = str(item.get("library_asset_id") or "")
-        asset = get_asset(account_id, library_asset_id) if library_asset_id else None
+        asset = get_asset(account_id, library_asset_id, project_id=project_id) if library_asset_id else None
         session_asset_id = ensure_session_asset(ctx, asset) if asset else None
         if not session_asset_id:
             # backing file gone: skip so the model never gets an unusable id

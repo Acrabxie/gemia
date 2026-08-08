@@ -15,6 +15,7 @@ from gemia.tools._context import ToolContext
 from gemia.tools._library_session import (
     account_id_for as _account_id,
     ensure_session_asset as _session_id_for_library_asset,
+    project_id_for as _project_id,
 )
 
 _VALID_KINDS = {"video", "image", "audio", "any"}
@@ -92,6 +93,7 @@ def _library_matches(
     account_id = _account_id(ctx)
     if not account_id:
         return []
+    project_id = _project_id(ctx) or None
 
     try:
         from gemia.media_library import list_assets
@@ -101,6 +103,7 @@ def _library_matches(
             kind=None if kind == "any" else kind,
             q=query,
             limit=limit,
+            project_id=project_id,
         )
     except Exception:
         return []

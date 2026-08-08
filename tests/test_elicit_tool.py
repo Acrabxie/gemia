@@ -2,7 +2,7 @@
 
 ``elicit.dispatch`` is async and drives a human-in-the-loop round-trip through an
 AskBridge placed in ``ctx.extra["ask_bridge"]``: it emits an ``ask_question`` event
-and awaits the answer. These tests use a stub bridge (delivered answer / timeout)
+and awaits the answer. These tests use a stub bridge (delivered answer / cancellation)
 and drive the coroutine with ``asyncio.run`` so no async plugin is needed.
 """
 import asyncio
@@ -22,8 +22,10 @@ class StubBridge:
         self.answer = answer
         self.emitted = []
 
-    async def emit_and_wait(self, question, *, timeout=None):
+    async def emit_and_wait(self, question, *, timeout=None, required=False):
+        del timeout
         self.emitted.append(question)
+        self.required = required
         return self.answer
 
 
@@ -80,15 +82,15 @@ def test_elicit_rejects_invalid_answer():
     assert result["error_code"] == "E_ELICIT_INVALID_ANSWER"
 
 
-def test_elicit_timeout_falls_back_to_defaults():
-    bridge = StubBridge(answer=None)  # no answer delivered → timeout sentinel
+def test_required_elicit_never_falls_back_to_defaults():
+    bridge = StubBridge(answer=None)  # cancellation sentinel from a required wait
     args = {"title": "t", "controls": {
         "fmt": {"type": "select", "options": ["mp4", "mov"], "default": "mp4"},
         "q":   {"type": "slider", "min": 0, "max": 10, "step": 1, "default": 7}}}
     result = run(dispatch(args, _ctx(bridge)))
-    assert result["status"] == "answer_received"
-    assert result["fallback_used"] is True
-    assert result["answers"] == {"fmt": "mp4", "q": 7}
+    assert result["error_code"] == "E_ASK_CANCELLED"
+    assert bridge.required is True
+    assert "answers" not in result
 
 
 def test_elicit_panel_form_round_trip():
@@ -112,11 +114,10 @@ def test_elicit_bare_string_options_work():
     assert result["status"] == "answer_received" and result["answers"]["fmt"] == "mov"
 
 
-def test_elicit_without_bridge_returns_question():
-    """Legacy/test context with no bridge: emit nothing, hand back the question."""
+def test_elicit_without_bridge_fails_closed():
     args = {"title": "t", "controls": {"c": {"type": "select", "options": ["a"]}}}
     result = run(dispatch(args, _ctx(bridge=None)))
-    assert result["status"] == "question_emitted"
+    assert result["error_code"] == "E_ASK_UNAVAILABLE"
     assert "question" in result and "c" in result["question"]["controls"]
 
 
@@ -141,7 +142,7 @@ def test_creative_preference_uses_explicit_defaults_without_ask_event():
     assert bridge.emitted == []
 
 
-def test_clarification_guard_allows_only_one_real_question():
+def test_clarification_guard_allows_later_genuine_question():
     guard = ClarificationGuard()
     bridge = StubBridge(answer={"choice": "a"})
     args = {
@@ -154,8 +155,8 @@ def test_clarification_guard_allows_only_one_real_question():
     second = run(dispatch(args, _ctx(bridge, guard)))
 
     assert first["status"] == "answer_received"
-    assert second["error_code"] == "E_CLARIFICATION_LIMIT"
-    assert len(bridge.emitted) == 1
+    assert second["status"] == "answer_received"
+    assert len(bridge.emitted) == 2
 
 
 def test_creative_preference_without_complete_defaults_is_not_fabricated():
@@ -173,17 +174,16 @@ def test_creative_preference_without_complete_defaults_is_not_fabricated():
 def test_elicit_all_control_types():
     bridge = StubBridge(answer={
         "sel": "a", "multi": ["b"], "txt": "hello", "sld": 5,
-        "pnl": {"field1": "x"}, "custom": {"anything": 1}})
+        "pnl": {"field1": "x"}})
     args = {"title": "Kitchen sink", "controls": {
         "sel":    {"type": "select", "options": [{"label": "A", "value": "a"}]},
         "multi":  {"type": "multi_select", "options": [{"label": "B", "value": "b"}]},
         "txt":    {"type": "text", "placeholder": "text"},
         "sld":    {"type": "slider", "min": 0, "max": 10},
-        "pnl":    {"type": "panel", "fields": {"field1": {"type": "text"}}},
-        "custom": {"type": "custom_panel", "schema": {}}}}
+        "pnl":    {"type": "panel", "fields": {"field1": {"type": "text"}}}}}
     result = run(dispatch(args, _ctx(bridge)))
     assert result["status"] == "answer_received"
-    assert set(bridge.emitted[0]["controls"]) == {"sel", "multi", "txt", "sld", "pnl", "custom"}
+    assert set(bridge.emitted[0]["controls"]) == {"sel", "multi", "txt", "sld", "pnl"}
 
 
 # ── _build_controls (schema parsing) ────────────────────────────────────────
@@ -223,9 +223,9 @@ def test_build_controls_panel():
 
 
 def test_build_controls_custom_panel():
-    controls = _build_controls({"my_custom": {"type": "custom_panel",
-        "schema": {"type": "complex", "nested": {"key": "value"}}}})
-    assert controls["my_custom"].schema["type"] == "complex"
+    with pytest.raises(ValueError, match="host-registered validator"):
+        _build_controls({"my_custom": {"type": "custom_panel",
+            "schema": {"type": "complex", "nested": {"key": "value"}}}})
 
 
 def test_build_controls_invalid_type():

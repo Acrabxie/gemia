@@ -62,14 +62,25 @@ class GeminiAdapter:
         api_url: str = "https://openrouter.ai/api/v1/chat/completions",
         log_dir: str | Path = "logs/gemini",
     ) -> None:
+        try:
+            from gemia import cloud_accounts
+
+            cloud_mode = cloud_accounts.enabled()
+            cloud_gemini_key = cloud_accounts.credential_for_provider("gemini")
+            cloud_openrouter_key = cloud_accounts.credential_for_provider("openrouter")
+        except Exception:
+            cloud_mode = os.environ.get("LUMERI_CLOUD_ACCOUNTS", "").strip().lower() in {"1", "true", "yes"}
+            cloud_gemini_key = "" if cloud_mode else None
+            cloud_openrouter_key = "" if cloud_mode else None
         self.gemini_api_key = (
-            api_key
-            or os.environ.get("GEMINI_API_KEY")
-            or _read_config_key("gemini_api_key")
+            cloud_gemini_key
+            if cloud_mode
+            else api_key or os.environ.get("GEMINI_API_KEY") or _read_config_key("gemini_api_key")
         )
         self.openrouter_api_key = (
-            os.environ.get("OPENROUTER_API_KEY")
-            or _read_config_key("openrouter_api_key")
+            cloud_openrouter_key
+            if cloud_mode
+            else os.environ.get("OPENROUTER_API_KEY") or _read_config_key("openrouter_api_key")
         )
         configured_provider = (
             os.environ.get("GEMIA_AI_PROVIDER")
@@ -93,14 +104,20 @@ class GeminiAdapter:
             or _read_config_key("openrouter_model")
             or _DEFAULT_OPENROUTER_MODEL
         )
-        if configured_provider in {"openrouter", "gemini_native"}:
+        if cloud_mode:
+            self.provider = "gemini_native" if self.gemini_api_key else "openrouter"
+        elif configured_provider in {"openrouter", "gemini_native"}:
             self.provider = configured_provider
         elif self.openrouter_api_key:
             self.provider = "openrouter"
         else:
             self.provider = "gemini_native"
         self.model = self.openrouter_model if self.provider == "openrouter" else self.gemini_model
-        self.api_url = api_url
+        self.api_url = (
+            "https://openrouter.ai/api/v1/chat/completions"
+            if cloud_mode
+            else api_url
+        )
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.ssl_verify = os.environ.get("GEMIA_SSL_VERIFY", "1") != "0"
@@ -108,7 +125,7 @@ class GeminiAdapter:
         # Empty by default — only set GEMIA_PROXY / config.proxy when an actual
         # local HTTP proxy exists; otherwise every native call burns ~90s on
         # connection refused before falling back to OpenRouter.
-        self.proxy = (
+        self.proxy = "" if cloud_mode else (
             os.environ.get("GEMIA_PROXY")
             or _read_config_key("proxy")
             or ""

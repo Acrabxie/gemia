@@ -21,8 +21,8 @@ from gemia.tools import files as file_tools
 # an outside dest) are covered engine-level via file_tools.dispatch_* — those
 # dispatchers still back the registered verbs and remain in the _REAL map.
 
-_MACHINE_VERBS = ("read_file", "write_file", "copy_in", "list_dir", "move_file", "organize_files")
-_REMOVED_SESSION_VERBS = ("file_list", "file_read", "file_write", "file_copy", "file_move", "file_delete")
+_MACHINE_VERBS = ("read_file", "write_file", "copy_in", "list_dir", "move_file", "organize_files", "file_delete")
+_REMOVED_SESSION_VERBS = ("file_list", "file_read", "file_write", "file_copy", "file_move")
 
 
 def _ctx(workspace: Path) -> ToolContext:
@@ -92,9 +92,7 @@ def test_workspace_has_full_file_permissions(tmp_path: Path) -> None:
     listed = _run("list_dir", {"path": "notes"}, ctx)
     assert [entry["name"] for entry in listed["entries"]] == ["a.txt", "c.txt"]
 
-    # Delete lost its registered verb in the slimming; keep the engine guard
-    # covered (workspace delete allowed).
-    _engine(file_tools.dispatch_delete, {"path": "notes/c.txt"}, ctx)
+    _run("file_delete", {"path": "notes/c.txt"}, ctx)
     assert not (ctx.output_dir / "notes" / "c.txt").exists()
 
 
@@ -226,6 +224,7 @@ def test_copy_in_registers_workspace_media_without_self_copy(tmp_path: Path) -> 
     assert copied["name"] == "lumeri_logo.png"
     assert copied["asset_id"] == "img_001"
     assert copied["kind"] == "image"
+    assert copied["asset_registered"] is True
     assert ctx.registry.get("img_001").path == logo.resolve()
 
 

@@ -188,6 +188,16 @@ class GoogleGenAIClient:
         timeout_sec: float = _DEFAULT_TIMEOUT_SEC,
         api_version: str = _DEFAULT_API_VERSION,
     ) -> None:
+        try:
+            from gemia import cloud_accounts
+
+            cloud_mode = cloud_accounts.enabled()
+        except Exception:
+            cloud_mode = os.environ.get("LUMERI_CLOUD_ACCOUNTS", "").strip().lower() in {"1", "true", "yes"}
+        if cloud_mode:
+            raise VertexAuthMissingError(
+                "Vertex/ADC media access is unavailable in cloud-account mode."
+            )
         resolved_project = (
             project
             or os.environ.get("VERTEX_PROJECT")

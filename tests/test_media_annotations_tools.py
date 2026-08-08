@@ -4,7 +4,10 @@ import asyncio
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from gemia import accounts
+from gemia import media_annotations as MA
 from gemia.media_library import import_media
 from gemia.tools import DISPATCHER, TOOL_NAMES, TOOL_SCHEMAS
 from gemia.tools._context import AssetRegistry, ToolContext
@@ -47,7 +50,7 @@ def _ctx(tmp_path: Path, account_id: str) -> ToolContext:
 
 
 def test_media_annotation_tools_registered() -> None:
-    for name in ("annotate_media", "get_media_annotations", "write_media_annotation"):
+    for name in ("annotate_media", "get_media_annotations", "write_media_annotation", "prepare_roughcut"):
         assert name in TOOL_NAMES
         assert name in DISPATCHER
     by_name = {tool["function"]["name"]: tool for tool in TOOL_SCHEMAS}
@@ -68,7 +71,10 @@ def test_media_annotation_tools_write_and_read(monkeypatch, tmp_path: Path) -> N
                 "label": "usable still",
                 "note": "good thumbnail candidate",
                 "tags": ["thumbnail", "keeper"],
+                "category": "selection",
+                "confidence": 0.8,
                 "language": "en",
+                "metadata": {"model": "baseline", "prompt_version": 1},
             },
             ctx,
         )
@@ -87,3 +93,84 @@ def test_media_annotation_tools_write_and_read(monkeypatch, tmp_path: Path) -> N
     )
     assert batch["asset_count"] == 1
     assert batch["results"][0]["annotation_count"] >= 1
+
+
+def test_agent_annotation_update_is_partial(monkeypatch, tmp_path: Path) -> None:
+    _patch_account_roots(monkeypatch, tmp_path)
+    account_id = "google_partial_update"
+    asset = import_media(account_id, _make_image(tmp_path / "partial.png"))
+    ctx = _ctx(tmp_path, account_id)
+    original = MA.create_annotation(
+        account_id,
+        asset["asset_id"],
+        {
+            "scope": "asset",
+            "label": "first caption",
+            "note": "keep this note",
+            "tags": ["keeper"],
+            "category": "selection",
+            "confidence": 0.81,
+            "source": "gemini",
+            "language": "en",
+            "metadata": {"model": "baseline", "prompt_version": 4},
+        },
+    )
+
+    updated = asyncio.run(
+        DISPATCHER["write_media_annotation"](
+            {
+                "asset_id": asset["asset_id"],
+                "annotation_id": original["annotation_id"],
+                "label": "revised caption",
+            },
+            ctx,
+        )
+    )["annotation"]
+
+    assert updated["label"] == "revised caption"
+    assert updated["note"] == "keep this note"
+    assert updated["tags"] == ["keeper"]
+    assert updated["category"] == "selection"
+    assert updated["confidence"] == 0.81
+    assert updated["source"] == "gemini"
+    assert updated["language"] == "en"
+    assert updated["metadata"] == {"model": "baseline", "prompt_version": 4}
+
+
+def test_agent_cannot_overwrite_user_annotation(monkeypatch, tmp_path: Path) -> None:
+    _patch_account_roots(monkeypatch, tmp_path)
+    account_id = "google_user_annotation_guard"
+    asset = import_media(account_id, _make_image(tmp_path / "user.png"))
+    ctx = _ctx(tmp_path, account_id)
+    user_annotation = MA.create_annotation(
+        account_id,
+        asset["asset_id"],
+        {
+            "scope": "asset",
+            "label": "my keeper note",
+            "note": "human-authored",
+            "source": "user",
+        },
+    )
+
+    with pytest.raises(
+        MA.MediaAnnotationError,
+        match="cannot update a user annotation; create a new annotation instead",
+    ):
+        asyncio.run(
+            DISPATCHER["write_media_annotation"](
+                {
+                    "asset_id": asset["asset_id"],
+                    "annotation_id": user_annotation["annotation_id"],
+                    "label": "agent rewrite",
+                },
+                ctx,
+            )
+        )
+
+    unchanged = MA.get_annotation(
+        account_id, asset["asset_id"], user_annotation["annotation_id"]
+    )
+    assert unchanged["label"] == "my keeper note"
+    assert unchanged["note"] == "human-authored"
+    assert unchanged["source"] == "user"

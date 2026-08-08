@@ -343,7 +343,7 @@ def test_panel_wrong_type():
 
 
 def test_custom_panel_without_validator():
-    """CustomPanelControl passes through answer if no validator."""
+    """CustomPanelControl fails closed without a registered validator."""
     ctrl = CustomPanelControl(schema={
         "type": "complex_nested",
         "nested": {"key": "value"},
@@ -351,8 +351,8 @@ def test_custom_panel_without_validator():
 
     answer = {"some": "data"}
     value, error = ctrl.validate(answer)
-    assert value == answer
-    assert error is None
+    assert value is None
+    assert "no registered validator" in error
 
 
 def test_custom_panel_with_validator():
@@ -535,6 +535,49 @@ def test_validate_ask_answer_control_error():
     result, error = validate_ask_answer(q, a)
     assert result is None
     assert "control 'choice'" in error
+
+
+def test_required_answer_does_not_substitute_control_defaults():
+    question = AskQuestion(
+        question_id="q_required",
+        title="Choose",
+        controls={
+            "choice": SelectControl(
+                options=[{"label": "A", "value": "a"}], default="a"
+            ),
+            "strength": SliderControl(min=0, max=10, default=5),
+        },
+    )
+
+    result, error = validate_ask_answer(
+        question,
+        AskAnswer(question_id="q_required", answers={}),
+    )
+    assert result is None
+    assert "answer required" in error
+
+
+def test_required_panel_fields_do_not_substitute_defaults():
+    question = AskQuestion(
+        question_id="q_panel",
+        title="Choose",
+        controls={
+            "form": PanelControl(
+                fields={
+                    "choice": SelectControl(
+                        options=[{"label": "A", "value": "a"}], default="a"
+                    )
+                }
+            )
+        },
+    )
+
+    result, error = validate_ask_answer(
+        question,
+        AskAnswer(question_id="q_panel", answers={"form": {}}),
+    )
+    assert result is None
+    assert "answer required" in error
 
 
 def test_ask_control_to_dict_roundtrip():

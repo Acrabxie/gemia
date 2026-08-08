@@ -14,11 +14,19 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from gemia.production_budget import (
+    MediaBudgetDecision,
+    PaidMediaCall,
+    ProductionMediaBudget,
+)
+
 
 _TOOL_COSTS: dict[str, dict[str, float]] = {
     # Provider-backed (real money). Numbers verified in doc 07 from
     # Google's public pricing pages (2026-05-30 snapshot).
-    "generate_image":     {"usd": 0.101, "eta_sec": 10.0},   # Nano Banana 2, 2K
+    # Retained safety estimate until subscription image quota gets a separate
+    # accounting unit; the dispatcher itself is OpenAI-subscription-only.
+    "generate_image":     {"usd": 0.101, "eta_sec": 10.0},
     "generate_video":     {"usd": 2.80,  "eta_sec": 120.0},  # Veo 3.1 fast, 8s
     "generate_audio":     {"usd": 0.00,  "eta_sec": 45.0},   # Lyria 3 clip — preview, currently free
     "analyze_media":      {"usd": 0.01,  "eta_sec": 4.0},    # rough Gemini text estimate
@@ -44,6 +52,7 @@ _TOOL_COSTS: dict[str, dict[str, float]] = {
     "inspect_lottie":     {"usd": 0.00, "eta_sec": 1.0},
     "search_library":     {"usd": 0.00, "eta_sec": 0.5},
     "search_media":       {"usd": 0.00, "eta_sec": 0.5},
+    "stock_media":        {"usd": 0.00, "eta_sec": 5.0},
     "search_frames":      {"usd": 0.00, "eta_sec": 3.0},
     "draft_shotlist":     {"usd": 0.00, "eta_sec": 0.3},
     "set_shotlist":       {"usd": 0.00, "eta_sec": 0.2},
@@ -61,6 +70,7 @@ _TOOL_COSTS: dict[str, dict[str, float]] = {
     "subtitle":           {"usd": 0.00, "eta_sec": 4.0},
     "animate_captions":   {"usd": 0.00, "eta_sec": 5.0},
     "annotate_media":     {"usd": 0.00, "eta_sec": 8.0},
+    "prepare_roughcut":   {"usd": 0.00, "eta_sec": 30.0},
     "get_media_annotations": {"usd": 0.00, "eta_sec": 0.2},
     "write_media_annotation": {"usd": 0.00, "eta_sec": 0.2},
     "export":             {"usd": 0.00, "eta_sec": 20.0},
@@ -81,8 +91,19 @@ _TOOL_COSTS: dict[str, dict[str, float]] = {
     "wait_for_job":       {"usd": 0.00, "eta_sec": 30.0},    # Blocking job wait
     "kill_job":           {"usd": 0.00, "eta_sec": 0.5},     # Kill a running background job
     "save_skill":         {"usd": 0.00, "eta_sec": 0.5},     # Skill file copy + metadata
+    "publish_cloud_guide": {"usd": 0.00, "eta_sec": 1.0},    # Authenticated GCS object write
+    "list_cloud_guides":   {"usd": 0.00, "eta_sec": 0.5},    # Account-scoped GCS metadata read
+    "load_cloud_guide":    {"usd": 0.00, "eta_sec": 0.5},    # Exact account-scoped GCS object read
+    "install_point_library": {"usd": 0.00, "eta_sec": 0.5},
+    "list_point_libraries":  {"usd": 0.00, "eta_sec": 0.2},
+    "rollback_point_library": {"usd": 0.00, "eta_sec": 0.2},
+    "publish_point_library": {"usd": 0.00, "eta_sec": 1.0},
     # Timeline v1 verbs (document mutation = pure in-process patch; near-free).
     "get_timeline":             {"usd": 0.00, "eta_sec": 0.2},
+    "get_segment":              {"usd": 0.00, "eta_sec": 0.2},
+    "segment_edit":             {"usd": 0.00, "eta_sec": 0.3},
+    "get_design_state":         {"usd": 0.00, "eta_sec": 0.2},
+    "patch_design_state":       {"usd": 0.00, "eta_sec": 0.2},
     "timeline_insert_clip":     {"usd": 0.00, "eta_sec": 0.5},
     "timeline_delete_clip":     {"usd": 0.00, "eta_sec": 0.2},
     "timeline_move_clip":       {"usd": 0.00, "eta_sec": 0.2},
@@ -98,6 +119,7 @@ _TOOL_COSTS: dict[str, dict[str, float]] = {
     "get_safe_areas":           {"usd": 0.00, "eta_sec": 0.1},
     "render_preview":           {"usd": 0.00, "eta_sec": 20.0},  # ffmpeg low-res proxy
     "project_export":           {"usd": 0.00, "eta_sec": 60.0},  # full-quality multi-track export
+    "verify_delivery":          {"usd": 0.00, "eta_sec": 1.0},
     # Lumenframe layer/time verbs (pure document patch unless rendering).
     "get_lumenframe":           {"usd": 0.00, "eta_sec": 0.2},
     "lumen_patch":              {"usd": 0.00, "eta_sec": 0.2},
@@ -126,6 +148,7 @@ _TOOL_COSTS: dict[str, dict[str, float]] = {
     # Vector motion design: create/adjust only compile SVG + patch the doc —
     # the actual html→mp4 render cost is paid later by lumen_render/seek.
     "vector_motion":            {"usd": 0.00, "eta_sec": 1.0},
+    "point_library":             {"usd": 0.00, "eta_sec": 1.0},
     # Creative point libraries: create/adjust only compute a deterministic
     # recipe/scene/plan (+ kinetic_type patches the doc); render cost is paid
     # later by lumen_render/seek. catalog is free vocabulary.
@@ -181,12 +204,36 @@ class BudgetReservation:
 class BudgetGuard:
     """Per-session cumulative cost + time tracker."""
 
-    def __init__(self, *, max_usd: float = 5.0, max_seconds: float = 600.0) -> None:
+    def __init__(
+        self,
+        *,
+        max_usd: float = 5.0,
+        max_seconds: float | None = 600.0,
+        production_media_budget: ProductionMediaBudget | None = None,
+    ) -> None:
         self.max_usd = float(max_usd)
-        self.max_seconds = float(max_seconds)
+        self.max_seconds = float(max_seconds) if max_seconds is not None else None
+        self.production_media_budget = production_media_budget
         self.spent_usd = 0.0
         self.spent_seconds = 0.0
         self._started_at = time.monotonic()
+
+    @classmethod
+    def for_production_run(
+        cls, production_media_budget: ProductionMediaBudget
+    ) -> "BudgetGuard":
+        """Create the formal-run guard: no cumulative time stop, one money ledger.
+
+        Local work is never stopped by the legacy 600-second session ceiling;
+        provider-backed media must be reserved through ``reserve_paid_media``
+        and therefore cannot be accidentally blocked by the legacy $5 cap.
+        """
+        cap = float(production_media_budget.snapshot()["cap_usd"])
+        return cls(
+            max_usd=cap,
+            max_seconds=None,
+            production_media_budget=production_media_budget,
+        )
 
     def estimate(self, tool_name: str) -> tuple[float, float]:
         entry = _TOOL_COSTS.get(tool_name)
@@ -196,6 +243,13 @@ class BudgetGuard:
 
     def check(self, tool_name: str) -> BudgetDecision:
         cost, eta = self.estimate(tool_name)
+        if self.production_media_budget is not None and is_paid_media_tool(tool_name):
+            return BudgetDecision(
+                ok=True,
+                estimated_cost_usd=cost,
+                estimated_eta_sec=eta,
+                reason="persistent paid-media reservation required",
+            )
         projected_usd = self.spent_usd + cost
         # Use cumulative tool-execution time (spent_seconds), not wall-clock elapsed time.
         # This is symmetric with cost accounting: both measure actual committed resources,
@@ -209,7 +263,7 @@ class BudgetGuard:
                 reason=f"session cost would exceed cap: ${projected_usd:.2f} > ${self.max_usd:.2f}",
                 alternatives=_cheaper(tool_name),
             )
-        if projected_sec > self.max_seconds:
+        if self.max_seconds is not None and projected_sec > self.max_seconds:
             return BudgetDecision(
                 ok=False,
                 estimated_cost_usd=cost,
@@ -231,6 +285,10 @@ class BudgetGuard:
         no ``await`` between the ``check()`` read and the ``spent_*`` add, so the
         check-then-add is atomic (see docs/multi-agent-plan.md §5.1).
         """
+        if self.production_media_budget is not None and is_paid_media_tool(tool_name):
+            raise RuntimeError(
+                "paid media in a production run must use reserve_paid_media()"
+            )
         decision = self.check(tool_name)
         if not decision.ok:
             return decision, None
@@ -271,7 +329,7 @@ class BudgetGuard:
                 ),
                 None,
             )
-        if projected_sec > self.max_seconds:
+        if self.max_seconds is not None and projected_sec > self.max_seconds:
             return (
                 BudgetDecision(
                     ok=False,
@@ -335,13 +393,47 @@ class BudgetGuard:
         self.spent_seconds += float(actual_seconds) if actual_seconds is not None else eta
 
     def snapshot(self) -> dict[str, Any]:
-        return {
+        snapshot = {
             "max_usd": self.max_usd,
             "max_seconds": self.max_seconds,
             "spent_usd": round(self.spent_usd, 4),
             "spent_seconds": round(self.spent_seconds, 2),
             "elapsed_seconds": round(time.monotonic() - self._started_at, 2),
         }
+        if self.production_media_budget is not None:
+            snapshot["production_media"] = self.production_media_budget.snapshot()
+        return snapshot
+
+    def reserve_paid_media(
+        self,
+        tool_name: str,
+        *,
+        idempotency_key: str,
+        provider: str = "",
+        model: str = "",
+        requested_duration_sec: float | None = None,
+    ) -> MediaBudgetDecision:
+        """Persistently reserve one externally billed media call.
+
+        The normal in-memory counters remain available for legacy and local
+        tools.  Paid production calls use the run ledger so parallel children
+        and process restarts share one hard cap.
+        """
+        if self.production_media_budget is None:
+            raise RuntimeError("persistent production media budget is not configured")
+        return self.production_media_budget.reserve(
+            idempotency_key=idempotency_key,
+            tool_name=tool_name,
+            estimated_usd=paid_media_cost_usd(tool_name),
+            provider=provider,
+            model=model,
+            requested_duration_sec=requested_duration_sec,
+        )
+
+    def paid_media_call_context(self, reservation_id: str) -> PaidMediaCall:
+        if self.production_media_budget is None:
+            raise RuntimeError("persistent production media budget is not configured")
+        return self.production_media_budget.call_context(reservation_id)
 
 
 def tool_cost_usd(tool_name: str) -> float:
@@ -349,6 +441,23 @@ def tool_cost_usd(tool_name: str) -> float:
     BudgetGuard instance (e.g. the generate_image dispatcher's audit record)."""
     entry = _TOOL_COSTS.get(tool_name)
     return float(entry["usd"]) if entry else 0.0
+
+
+_PAID_MEDIA_TOOLS = frozenset(
+    {"generate_image", "generate_video", "generate_audio", "stock_media"}
+)
+
+
+def paid_media_cost_usd(tool_name: str) -> float:
+    """Fail-closed price lookup for a provider-backed generation call."""
+    name = str(tool_name)
+    if name not in _PAID_MEDIA_TOOLS or name not in _TOOL_COSTS:
+        raise KeyError(f"no approved paid-media price for tool {name!r}")
+    return float(_TOOL_COSTS[name]["usd"])
+
+
+def is_paid_media_tool(tool_name: str) -> bool:
+    return str(tool_name) in _PAID_MEDIA_TOOLS
 
 
 def _cheaper(tool_name: str) -> list[str]:
@@ -359,4 +468,11 @@ def _cheaper(tool_name: str) -> list[str]:
     return []
 
 
-__all__ = ["BudgetGuard", "BudgetDecision", "BudgetReservation", "tool_cost_usd"]
+__all__ = [
+    "BudgetGuard",
+    "BudgetDecision",
+    "BudgetReservation",
+    "tool_cost_usd",
+    "paid_media_cost_usd",
+    "is_paid_media_tool",
+]

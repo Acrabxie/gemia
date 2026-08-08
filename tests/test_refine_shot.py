@@ -141,6 +141,37 @@ def test_retime_changes_shot_duration(tmp_path):
     assert by_id["shot1"]["duration_sec"] == 4.0
 
 
+def test_retime_preserves_nonzero_source_in(tmp_path):
+    ctx = _ctx(tmp_path)
+    asset_id = ctx.registry.add_external(
+        _make_clip(tmp_path / "long.mp4", duration=20.0), summary="long"
+    ).asset_id
+    _call("set_shotlist", {"shotlist": {"scenes": [{"shots": [{
+        "id": "shot1",
+        "description": "selected answer",
+        "duration_sec": 5.0,
+        "asset_id": asset_id,
+        "library_asset_id": "lib_long",
+        "source_in": 12.0,
+        "source_out": 17.0,
+        "source": "search",
+        "status": "filled",
+        "evidence": {
+            "evidence_id": "lib_long:ann_1",
+            "annotation_id": "ann_1",
+            "library_asset_id": "lib_long",
+        },
+    }]}]}}, ctx)
+    _call("assemble_shotlist", {}, ctx)
+
+    _call("refine_shot", {"shot_id": "shot1", "duration_sec": 3.0}, ctx)
+
+    clip = next(c for c in _clips(ctx) if c.get("media_kind") == "video")
+    assert (clip["source_in"], clip["source_out"], clip["duration"]) == (12.0, 15.0, 3.0)
+    shot = ctx.project.load()["shotlist"]["scenes"][0]["shots"][0]
+    assert (shot["source_in"], shot["source_out"]) == (12.0, 15.0)
+
+
 def test_retime_text_overlay(tmp_path):
     """Test that retime also updates the text overlay duration."""
     ctx = _ctx(tmp_path)

@@ -105,6 +105,8 @@ class SessionStore:
             return []
         out: list[dict[str, Any]] = []
         for path in sorted(tdir.glob("*.json")):
+            if path.name.startswith("._"):
+                continue
             try:
                 out.append(json.loads(path.read_text(encoding="utf-8")))
             except (OSError, json.JSONDecodeError):

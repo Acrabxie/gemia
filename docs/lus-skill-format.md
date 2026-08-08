@@ -6,6 +6,11 @@ Scope: `/Volumes/Extreme SSD/lumeri` (backend + web v3; directory renamed from `
 Audience: a parser/validator author. This document is the complete reference; no other
 document is required to implement `.lus` reading, writing, validation, or migration.
 
+Point Library bundles are specified separately in
+[`point-library-lus-format.md`](point-library-lus-format.md). This v1 document
+continues to govern legacy text Skills; the v2 bundle is additive and does not
+change the legacy parser contract.
+
 > Normative keywords: MUST / MUST NOT / SHOULD / MAY as in RFC 2119.
 > All byte offsets and lengths in this spec are **UTF-8 bytes** unless stated otherwise.
 

@@ -1,60 +1,132 @@
-"""RC4 one-shot completion-check gate for AgentLoopV3.
-
-When the model stops emitting tool_calls and the gate is enabled
-(COMPLETION_CHECK_ENABLED=True), the loop injects ONE user message
-prompting goal completion verification, then re-runs the model once more.
-On the second no-tool-call, the loop respects honest stop and emits turn_complete.
-The gate prevents infinite loops while allowing the model a final chance to
-course-correct.
-"""
+"""The host records execution but never owns the completion verdict."""
 from __future__ import annotations
 
 import asyncio
 import json
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Any, AsyncIterator
 
 import gemia.agent_loop_v3 as loop_mod
-import pytest
-from gemia.agent_loop_v3 import AgentLoopV3, COMPLETION_CHECK_ENABLED
-from gemia.agent_loop_v3 import _relevant_existing_jobs
+
+from gemia.agent_loop_v3 import AgentLoopV3, _relevant_existing_jobs
 
 
-class _ModelStopsImmediately:
-    """Model that emits no tool_calls — just text, then stop."""
-
+class _TextOnlyClient:
     model = "fake"
 
-    def __init__(self) -> None:
+    def __init__(self, text: str = "自然回答。") -> None:
+        self.text = text
         self.calls = 0
+        self.system_prompts: list[str] = []
+        self.tool_names_seen: list[set[str]] = []
 
     async def stream_turn(
-        self, messages: list[dict[str, Any]], *, tools=None, temperature: float = 0.7
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools=None,
+        temperature: float = 0.7,
     ) -> AsyncIterator[dict[str, Any]]:
-        del messages, tools, temperature
+        del temperature
         self.calls += 1
-        yield {"kind": "text_delta", "text": "Done processing."}
+        self.system_prompts.append(str(messages[0]["content"]))
+        self.tool_names_seen.append(
+            {
+                str(schema["function"]["name"])
+                for schema in (tools or [])
+            }
+        )
+        yield {"kind": "text_delta", "text": self.text}
         yield {"kind": "finish", "reason": "stop"}
 
 
-class _CapturesInformationalSurface(_ModelStopsImmediately):
-    def __init__(self) -> None:
+class _ToolThenTextClient(_TextOnlyClient):
+    def __init__(self, tool_name: str, text: str = "这是实际结果。") -> None:
+        super().__init__(text)
+        self.tool_name = tool_name
+
+    async def stream_turn(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools=None,
+        temperature: float = 0.7,
+    ) -> AsyncIterator[dict[str, Any]]:
+        del temperature
+        self.calls += 1
+        self.system_prompts.append(str(messages[0]["content"]))
+        self.tool_names_seen.append(
+            {
+                str(schema["function"]["name"])
+                for schema in (tools or [])
+            }
+        )
+        if self.calls == 1:
+            yield {
+                "kind": "tool_call_start",
+                "index": 0,
+                "id": "call_1",
+                "name": self.tool_name,
+            }
+            yield {"kind": "tool_call_args_delta", "index": 0, "delta": "{}"}
+            yield {"kind": "finish", "reason": "tool_calls"}
+            return
+        yield {"kind": "text_delta", "text": self.text}
+        yield {"kind": "finish", "reason": "stop"}
+
+
+class _ManualImportThenActClient(_TextOnlyClient):
+    def __init__(self, media_path: Path, *, refusal_includes_path: bool = True) -> None:
         super().__init__()
-        self.tool_surfaces: list[list[dict[str, Any]]] = []
+        self.media_path = media_path
+        self.refusal_includes_path = refusal_includes_path
+        self.messages_seen: list[list[dict[str, Any]]] = []
 
     async def stream_turn(
-        self, messages: list[dict[str, Any]], *, tools=None, temperature: float = 0.7
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools=None,
+        temperature: float = 0.7,
     ) -> AsyncIterator[dict[str, Any]]:
-        del messages, temperature
+        del temperature
         self.calls += 1
-        self.tool_surfaces.append(list(tools or []))
-        yield {
-            "kind": "text_delta",
-            "text": "Google Photos 官方 API 接入应使用 OAuth 和 Picker API。",
-        }
+        self.messages_seen.append(list(messages))
+        self.tool_names_seen.append(
+            {str(schema["function"]["name"]) for schema in (tools or [])}
+        )
+        if self.calls == 1:
+            refusal = (
+                f"请在素材库中手动导入：\n`{self.media_path}`"
+                if self.refusal_includes_path
+                else "当前会话没有提供可将本地路径注册为项目素材的导入能力。"
+            )
+            yield {
+                "kind": "text_delta",
+                "text": refusal,
+            }
+            yield {"kind": "finish", "reason": "stop"}
+            return
+        if self.calls == 2:
+            yield {
+                "kind": "tool_call_start",
+                "index": 0,
+                "id": "call_import",
+                "name": "copy_in",
+            }
+            yield {
+                "kind": "tool_call_args_delta",
+                "index": 0,
+                "delta": json.dumps({"path": str(self.media_path)}),
+            }
+            yield {"kind": "finish", "reason": "tool_calls"}
+            return
+        yield {"kind": "text_delta", "text": "已直接导入并取得素材身份。"}
         yield {"kind": "finish", "reason": "stop"}
+
+
+def _events_of(events: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
+    return [event for event in events if event.get("kind") == kind]
 
 
 def test_only_explicitly_continued_session_jobs_bind_to_current_turn() -> None:
@@ -66,693 +138,186 @@ def test_only_explicitly_continued_session_jobs_bind_to_current_turn() -> None:
     assert _relevant_existing_jobs("继续等待结果", pending) == pending
 
 
-class _AlwaysAsksInProse(_ModelStopsImmediately):
-    async def stream_turn(
-        self, messages: list[dict[str, Any]], *, tools=None, temperature: float = 0.7
-    ) -> AsyncIterator[dict[str, Any]]:
-        del messages, tools, temperature
-        self.calls += 1
-        yield {"kind": "text_delta", "text": "请告诉我你喜欢什么动画风格？"}
-        yield {"kind": "finish", "reason": "stop"}
-
-
-class _WorksThenActsAfterGate:
-    """Does real work first (a tool call), stops → the gate fires because work
-    was done → then course-corrects with a SECOND tool call after seeing the
-    gate → stops. Exercises both 'gate fires after work' and 'post-gate tool
-    dispatch still works'."""
-
-    model = "fake"
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def stream_turn(
-        self, messages: list[dict[str, Any]], *, tools=None, temperature: float = 0.7
-    ) -> AsyncIterator[dict[str, Any]]:
-        del tools, temperature
-        self.calls += 1
-        if self.calls == 1:
-            # Real work — a tool call marks the turn as having done something.
-            yield {"kind": "tool_call_start", "index": 0, "id": "c1", "name": "fake_ok"}
-            yield {"kind": "tool_call_args_delta", "index": 0, "delta": "{}"}
-            yield {"kind": "finish", "reason": "tool_calls"}
-            return
-        if self.calls == 2:
-            # Stop after work → the gate should fire (work was done).
-            yield {"kind": "text_delta", "text": "第一步做完了。"}
-            yield {"kind": "finish", "reason": "stop"}
-            return
-        if self.calls == 3:
-            # Post-gate: only act if the goal-check nudge was actually injected.
-            has_nudge = any(
-                msg.get("role") == "user"
-                and isinstance(msg.get("content"), str)
-                and "目标核对" in msg["content"]
-                for msg in messages
-            )
-            if has_nudge:
-                yield {"kind": "tool_call_start", "index": 0, "id": "c2", "name": "fake_ok"}
-                yield {"kind": "tool_call_args_delta", "index": 0, "delta": "{}"}
-                yield {"kind": "finish", "reason": "tool_calls"}
-                return
-            yield {"kind": "text_delta", "text": "No nudge found; error."}
-            yield {"kind": "finish", "reason": "stop"}
-            return
-        # After the post-gate tool result: stop for good (gate is one-shot).
-        yield {"kind": "text_delta", "text": "都做完了。"}
-        yield {"kind": "finish", "reason": "stop"}
-
-
-class _RetreatsThenActsAfterGate:
-    """First asks the user to supply creative details in prose, then obeys the
-    host completion gate and uses a tool.  This is the concrete regression for
-    actionable first-response retreat: the gate is based on the current request,
-    even when no tool has run yet."""
-
-    model = "fake"
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def stream_turn(
-        self, messages: list[dict[str, Any]], *, tools=None, temperature: float = 0.7
-    ) -> AsyncIterator[dict[str, Any]]:
-        del tools, temperature
-        self.calls += 1
-        if self.calls == 1:
-            yield {"kind": "text_delta", "text": "请先告诉我动画风格和更多参数。"}
-            yield {"kind": "finish", "reason": "stop"}
-            return
-        if self.calls == 2 and any(
-            message.get("role") == "user"
-            and "直接制作完整7秒动画" in str(message.get("content"))
-            and "目标核对" in str(message.get("content"))
-            for message in messages
-        ):
-            yield {
-                "kind": "tool_call_start",
-                "index": 0,
-                "id": "retreat_generate",
-                "name": "fake_generate_video",
-            }
-            yield {"kind": "tool_call_args_delta", "index": 0, "delta": "{}"}
-            yield {"kind": "finish", "reason": "tool_calls"}
-            return
-        if self.calls == 3:
-            yield {
-                "kind": "tool_call_start",
-                "index": 0,
-                "id": "retreat_review",
-                "name": "analyze_media",
-            }
-            yield {
-                "kind": "tool_call_args_delta",
-                "index": 0,
-                "delta": '{"asset_id":"v_001"}',
-            }
-            yield {"kind": "finish", "reason": "tool_calls"}
-            return
-        if self.calls == 4:
-            yield {"kind": "text_delta", "text": "7 秒动画已完成并复验。"}
-            yield {"kind": "finish", "reason": "stop"}
-            return
-        yield {"kind": "text_delta", "text": "无法再推进。"}
-        yield {"kind": "finish", "reason": "stop"}
-
-
-class _DeniedCreativeElicitThenWrites:
-    """A policy-refused creative ask must not poison later valid work."""
-
-    model = "fake"
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def stream_turn(
-        self, messages: list[dict[str, Any]], *, tools=None, temperature: float = 0.7
-    ) -> AsyncIterator[dict[str, Any]]:
-        del messages, tools, temperature
-        self.calls += 1
-        if self.calls == 1:
-            args = {
-                "reason": "creative_preference",
-                "title": "Choose a file format",
-                "controls": {"format": {"type": "text"}},
-            }
-            yield {
-                "kind": "tool_call_start",
-                "index": 0,
-                "id": "ask-style",
-                "name": "elicit",
-            }
-            yield {
-                "kind": "tool_call_args_delta",
-                "index": 0,
-                "delta": json.dumps(args),
-            }
-            yield {"kind": "finish", "reason": "tool_calls"}
-            return
-        if self.calls == 2:
-            yield {
-                "kind": "tool_call_start",
-                "index": 0,
-                "id": "write-result",
-                "name": "file_write",
-            }
-            yield {
-                "kind": "tool_call_args_delta",
-                "index": 0,
-                "delta": json.dumps(
-                    {"path": "result.txt", "content": "safe default result"}
-                ),
-            }
-            yield {"kind": "finish", "reason": "tool_calls"}
-            return
-        yield {"kind": "text_delta", "text": "已按安全默认值完成。"}
-        yield {"kind": "finish", "reason": "stop"}
-
-
-class _BudgetBlockedThenStops:
-    """Request one over-cap host tool, then stop without asking approval."""
-
-    model = "fake"
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def stream_turn(
-        self, messages: list[dict[str, Any]], *, tools=None, temperature: float = 0.7
-    ) -> AsyncIterator[dict[str, Any]]:
-        del messages, tools, temperature
-        self.calls += 1
-        if self.calls == 1:
-            yield {
-                "kind": "tool_call_start",
-                "index": 0,
-                "id": "budgeted_read",
-                "name": "get_timeline",
-            }
-            yield {"kind": "tool_call_args_delta", "index": 0, "delta": "{}"}
-            yield {"kind": "finish", "reason": "tool_calls"}
-            return
-        yield {"kind": "text_delta", "text": "预算上限无法由批准解除。"}
-        yield {"kind": "finish", "reason": "stop"}
-
-
-class _ReferenceThenFinalVideo:
-    model = "fake"
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def stream_turn(
-        self, messages: list[dict[str, Any]], *, tools=None, temperature: float = 0.7
-    ) -> AsyncIterator[dict[str, Any]]:
-        del messages, tools, temperature
-        self.calls += 1
-        scripted = {
-            1: ("make_reference", "reference"),
-            2: ("make_final_video", "final"),
-            3: ("analyze_media", "review"),
-        }
-        if self.calls in scripted:
-            name, call_id = scripted[self.calls]
-            args = {"asset_id": "v-final"} if name == "analyze_media" else {}
-            yield {
-                "kind": "tool_call_start",
-                "index": 0,
-                "id": call_id,
-                "name": name,
-            }
-            yield {
-                "kind": "tool_call_args_delta",
-                "index": 0,
-                "delta": json.dumps(args),
-            }
-            yield {"kind": "finish", "reason": "tool_calls"}
-            return
-        yield {"kind": "text_delta", "text": "最终视频已完成。"}
-        yield {"kind": "finish", "reason": "stop"}
-
-
-def test_no_gate_for_pure_conversation(tmp_path: Path) -> None:
-    """A pure conversational turn — the model answers in plain text and does no
-    work (no tool calls, no assets, no failures) — must NOT trigger the
-    pre-delivery gate. The gate reviews work; with nothing done, firing it only
-    forces a redundant second reply (the "已完成…" report / rule meta-commentary
-    we want gone). So a hello/identity/thanks turn is a single natural reply."""
-    if not COMPLETION_CHECK_ENABLED:
-        return
-
-    client = _ModelStopsImmediately()
+def test_no_tool_response_is_the_natural_end_of_turn(tmp_path: Path) -> None:
+    client = _TextOnlyClient("我会根据我们的对话诚实回答。")
     events: list[dict[str, Any]] = []
     loop = AgentLoopV3(
-        session_id="pure_conversation_no_gate",
+        session_id="natural_prose",
         output_dir=tmp_path,
         gemini_client=client,  # type: ignore[arg-type]
         emit_event=events.append,
     )
 
-    asyncio.run(loop.run_turn("你是谁"))
-
-    # Exactly ONE model call — no gate round, no forced second reply.
-    assert client.calls == 1, f"Expected 1 call, got {client.calls}"
-
-    # No completion_check event: the gate never fired.
-    completion_checks = [e for e in events if e.get("kind") == "completion_check"]
-    assert (
-        len(completion_checks) == 0
-    ), f"Expected 0 completion_check, got {len(completion_checks)}"
-
-    # Turn completes cleanly on the first stop.
-    turn_completes = [e for e in events if e.get("kind") == "turn_complete"]
-    assert len(turn_completes) == 1, f"Expected 1 turn_complete, got {len(turn_completes)}"
-
-
-@pytest.mark.parametrize(
-    "user_message",
-    [
-        "哦我说的是通过Google官方的api接入photo",
-        "我想了解通过Google官方API接入Google Photos，该怎么做？",
-    ],
-)
-def test_information_correction_has_no_tools_no_gate_and_no_artifact(
-    tmp_path: Path, user_message: str
-) -> None:
-    client = _CapturesInformationalSurface()
-    events: list[dict[str, Any]] = []
-    loop = AgentLoopV3(
-        session_id="information_correction_no_gate",
-        output_dir=tmp_path,
-        gemini_client=client,  # type: ignore[arg-type]
-        emit_event=events.append,
-    )
-
-    asyncio.run(loop.run_turn(user_message))
+    asyncio.run(loop.run_turn("你对我的了解"))
 
     assert client.calls == 1
-    assert client.tool_surfaces == [[]]
-    assert not [e for e in events if e.get("kind") == "completion_check"]
-    assert not [e for e in events if e.get("kind") == "model_tool_call_ready"]
-    completes = [e for e in events if e.get("kind") == "turn_complete"]
-    assert len(completes) == 1
-    assert completes[0]["final_asset_ids"] == []
+    assert _events_of(events, "model_text_delta")
+    assert _events_of(events, "turn_complete")
+    assert not _events_of(events, "completion_check")
+    assert not _events_of(events, "turn_error")
+    assert not _events_of(events, "turn_wrapup")
+    assert loop._turn_ledger is None
 
 
-def test_parent_budget_gate_is_a_non_overridable_blocker_not_an_ask(
-    tmp_path: Path,
-) -> None:
-    client = _BudgetBlockedThenStops()
+def test_local_manual_import_deflection_recovers_into_copy_in(tmp_path: Path) -> None:
+    media = tmp_path / "outside" / "new-animation.mp4"
+    media.parent.mkdir()
+    media.write_bytes(b"media")
+    client = _ManualImportThenActClient(media)
     events: list[dict[str, Any]] = []
     loop = AgentLoopV3(
-        session_id="budget_is_not_approval",
-        output_dir=tmp_path,
+        session_id="manual_import_recovery",
+        output_dir=tmp_path / "workspace",
         gemini_client=client,  # type: ignore[arg-type]
         emit_event=events.append,
     )
-    loop.budget.max_usd = 0.0
-    loop.budget.max_seconds = 0.0
 
-    asyncio.run(loop.run_turn("读取当前时间线；若预算不够就诚实停止，不要询问批准"))
+    asyncio.run(loop.run_turn("再试试"))
 
-    tool_payloads = [
-        json.loads(message["content"])
-        for message in loop._messages
-        if message.get("role") == "tool"
-    ]
-    budget_payload = next(
-        payload for payload in tool_payloads if payload.get("error_code") == "E_BUDGET"
-    )
-    assert budget_payload["blocked_by_budget"] is True
-    assert budget_payload["approval_cannot_override"] is True
-    assert "needs_approval" not in budget_payload
-    assert not [event for event in events if event.get("kind") == "ask_question"]
+    assert client.calls == 3
+    assert "copy_in" in client.tool_names_seen[0]
+    recovery_messages = client.messages_seen[1]
+    assert "Do not ask the user" in str(recovery_messages[-1]["content"])
+    imported = loop.registry.list_records()
+    assert len(imported) == 1
+    assert imported[0].path.name == "new-animation.mp4"
+    results = _events_of(events, "tool_exec_result")
+    assert results[-1]["tool_name"] == "copy_in"
+    assert results[-1]["result"]["asset_registered"] is True
 
 
-@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg required")
-def test_turn_complete_projects_ledger_finals_not_intermediate_assets(
-    tmp_path: Path, monkeypatch
+def test_import_capability_refusal_uses_exact_path_from_current_request(
+    tmp_path: Path,
 ) -> None:
-    async def make_reference(args: dict[str, Any], ctx) -> dict[str, Any]:
-        del args
-        path = tmp_path / "reference.png"
-        path.write_bytes(b"not-needed-for-review")
-        ctx.registry.register_output(
-            "img-ref", kind="image", path=path, summary="reference image"
-        )
-        return {"status": "success", "asset_id": "img-ref", "kind": "image"}
-
-    async def make_final_video(args: dict[str, Any], ctx) -> dict[str, Any]:
-        del args
-        path = tmp_path / "final.mp4"
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-f", "lavfi", "-i",
-                "color=c=black:s=16x16:r=1:d=1",
-                "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path),
-            ],
-            check=True,
-            capture_output=True,
-        )
-        ctx.registry.register_output(
-            "v-final", kind="video", path=path, summary="final video"
-        )
-        return {"status": "success", "asset_id": "v-final", "kind": "video"}
-
-    async def review(args: dict[str, Any], ctx) -> dict[str, Any]:
-        del ctx
-        return {"status": "success", "asset_id": args["asset_id"]}
-
-    monkeypatch.setitem(loop_mod.DISPATCHER, "make_reference", make_reference)
-    monkeypatch.setitem(loop_mod.DISPATCHER, "make_final_video", make_final_video)
-    monkeypatch.setitem(loop_mod.DISPATCHER, "analyze_media", review)
+    media = tmp_path / "outside" / "new animation.mp4"
+    media.parent.mkdir()
+    media.write_bytes(b"media")
+    client = _ManualImportThenActClient(media, refusal_includes_path=False)
     events: list[dict[str, Any]] = []
     loop = AgentLoopV3(
-        session_id="final_projection",
-        output_dir=tmp_path,
-        gemini_client=_ReferenceThenFinalVideo(),  # type: ignore[arg-type]
+        session_id="capability_refusal_recovery",
+        output_dir=tmp_path / "workspace",
+        gemini_client=client,  # type: ignore[arg-type]
         emit_event=events.append,
     )
 
-    asyncio.run(loop.run_turn("生成一个视频"))
+    asyncio.run(loop.run_turn(f"直接导入 {media}，不要让我手动拖入。"))
 
-    complete = [event for event in events if event.get("kind") == "turn_complete"]
-    assert len(complete) == 1
-    assert complete[0]["final_asset_ids"] == ["v-final"]
-
-
-def test_completion_gate_disabled_still_cannot_bypass_host_ledger(tmp_path: Path) -> None:
-    """Disabling the visual/text gate does not disable objective completion."""
-    # Temporarily disable the gate.
-    original_enabled = loop_mod.COMPLETION_CHECK_ENABLED
-    loop_mod.COMPLETION_CHECK_ENABLED = False
-
-    try:
-        client = _ModelStopsImmediately()
-        events: list[dict[str, Any]] = []
-        loop = AgentLoopV3(
-            session_id="completion_gate_disabled",
-            output_dir=tmp_path,
-            gemini_client=client,  # type: ignore[arg-type]
-            emit_event=events.append,
-        )
-
-        asyncio.run(loop.run_turn("Do something"))
-
-        # Adjacent route, then full route, then an honest incomplete stop.
-        assert client.calls == 3, f"Expected 3 calls, got {client.calls}"
-
-        # No completion_check event should be emitted.
-        completion_checks = [e for e in events if e.get("kind") == "completion_check"]
-        assert (
-            len(completion_checks) == 0
-        ), f"Expected 0 completion_check events, got {len(completion_checks)}"
-
-        assert not [e for e in events if e.get("kind") == "turn_complete"]
-        assert any(
-            e.get("kind") == "turn_error" and e.get("reason") == "incomplete_goal"
-            for e in events
-        )
-    finally:
-        loop_mod.COMPLETION_CHECK_ENABLED = original_enabled
+    assert client.calls == 3
+    assert "copy_in" in client.tool_names_seen[0]
+    imported = loop.registry.list_records()
+    assert len(imported) == 1
+    assert imported[0].path.name == "new animation.mp4"
+    results = _events_of(events, "tool_exec_result")
+    assert results[-1]["tool_name"] == "copy_in"
+    assert results[-1]["result"]["asset_registered"] is True
 
 
-def test_agent_loop_passes_all_routed_deliverables_to_host_ledger(
+def test_information_classifier_cannot_withhold_tools_or_activity(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    loop = AgentLoopV3(
-        session_id="multi_deliverable_ledger",
-        output_dir=tmp_path,
-        gemini_client=_ModelStopsImmediately(),  # type: ignore[arg-type]
-        emit_event=lambda _event: None,
-    )
-
-    asyncio.run(loop.run_turn("生成一张图片和一段音频"))
-
-    assert loop._turn_ledger is not None
-    assert loop._turn_ledger.workflows == ("image", "audio")
-    blockers = loop._turn_ledger.completion_decision().blockers
-    assert "final_asset_kind:image:missing" in blockers
-    assert "final_asset_kind:audio:missing" in blockers
-
-
-def test_gate_fires_after_work_and_allows_post_gate_tool(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """When the turn actually did work (a tool ran), the gate DOES fire once —
-    and the model may course-correct with another tool call after it, which is
-    dispatched normally. Proves the gate still guards real work turns and that
-    post-gate tool dispatch survives the new conversational carve-out."""
-    if not COMPLETION_CHECK_ENABLED:
-        return
-
-    async def fake_ok(args: dict[str, Any], ctx) -> dict[str, Any]:
+    async def inspect(args: dict[str, Any], ctx) -> dict[str, Any]:
         del args, ctx
-        return {"status": "ok"}
+        return {"status": "success", "summary": "inspected"}
 
-    monkeypatch.setitem(loop_mod.DISPATCHER, "fake_ok", fake_ok)
-
-    client = _WorksThenActsAfterGate()
+    monkeypatch.setitem(loop_mod.DISPATCHER, "probe_media", inspect)
+    client = _ToolThenTextClient("probe_media", "我已经看过，再直接回答你。")
     events: list[dict[str, Any]] = []
     loop = AgentLoopV3(
-        session_id="gate_after_work",
+        session_id="information_can_act",
         output_dir=tmp_path,
         gemini_client=client,  # type: ignore[arg-type]
         emit_event=events.append,
     )
 
-    asyncio.run(loop.run_turn("做点活儿"))
+    # This is deliberately classified INFORMATION by the legacy presentation
+    # heuristic. It must still expose tools and record an actual tool call.
+    asyncio.run(loop.run_turn("你是谁"))
 
-    # call1 tool → call2 stop → gate → call3 tool → call4 stop.
-    assert client.calls == 4, f"Expected 4 calls, got {client.calls}"
-
-    # Exactly one completion_check event (one-shot, even with post-gate work).
-    completion_checks = [e for e in events if e.get("kind") == "completion_check"]
-    assert len(completion_checks) == 1, f"Expected 1 completion_check, got {len(completion_checks)}"
-
-    # Both the pre-gate and post-gate tool calls dispatched.
-    readys = [e for e in events if e.get("kind") == "model_tool_call_ready"]
-    assert len(readys) == 2, f"Expected 2 dispatched tool calls, got {len(readys)}"
-    assert all(e.get("tool_name") == "fake_ok" for e in readys)
+    assert "probe_media" in client.tool_names_seen[0]
+    assert loop._turn_ledger is not None
+    assert loop._turn_ledger.sequence == 1
+    assert _events_of(events, "turn_complete")
+    assert not _events_of(events, "completion_check")
 
 
-@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg required")
-def test_actionable_first_text_retreat_triggers_gate_and_tool_recovery(
-    tmp_path: Path, monkeypatch
+def test_open_activity_record_cannot_override_model_stop(
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    if not COMPLETION_CHECK_ENABLED:
-        return
-
-    async def fake_generate(args: dict[str, Any], ctx) -> dict[str, Any]:
-        del args
-        output = tmp_path / "recovered.mp4"
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-f", "lavfi", "-i",
-                "color=c=black:s=16x16:r=1:d=7",
-                "-c:v", "libx264", "-pix_fmt", "yuv420p", str(output),
-            ],
-            check=True,
-            capture_output=True,
-        )
-        ctx.registry.register_output(
-            "v_001", kind="video", path=output, summary="recovered animation"
-        )
+    async def fail_tool(args: dict[str, Any], ctx) -> dict[str, Any]:
+        del args, ctx
         return {
-            "status": "ok",
-            "asset_id": "v_001",
-            "kind": "video",
-            # Deliberately omit duration: the host must obtain it via ffprobe.
+            "error": "not available",
+            "error_code": "E_TEST_UNAVAILABLE",
+            "recovery": "none",
         }
 
-    async def fake_analyze(args: dict[str, Any], ctx) -> dict[str, Any]:
-        del ctx
-        return {"status": "ok", "asset_id": args["asset_id"], "summary": "reviewed"}
-
-    monkeypatch.setitem(loop_mod.DISPATCHER, "fake_generate_video", fake_generate)
-    monkeypatch.setitem(loop_mod.DISPATCHER, "analyze_media", fake_analyze)
-    client = _RetreatsThenActsAfterGate()
+    monkeypatch.setitem(loop_mod.DISPATCHER, "fake_failure", fail_tool)
+    client = _ToolThenTextClient(
+        "fake_failure",
+        "这个工具现在不可用，所以我没有把它说成成功。",
+    )
     events: list[dict[str, Any]] = []
     loop = AgentLoopV3(
-        session_id="actionable_retreat_gate",
+        session_id="open_record_natural_stop",
         output_dir=tmp_path,
         gemini_client=client,  # type: ignore[arg-type]
         emit_event=events.append,
     )
 
-    asyncio.run(loop.run_turn("直接制作完整7秒动画"))
+    asyncio.run(loop.run_turn("做一个当前不可用的操作"))
 
-    kinds = [(event.get("kind"), event.get("call_id")) for event in events]
-    assert sum(kind == "completion_check" for kind, _ in kinds) == 1
-    assert kinds.index(("completion_check", None)) < kinds.index(
-        ("tool_exec_start", "retreat_generate")
-    )
-    assert kinds.index(("tool_exec_start", "retreat_generate")) < kinds.index(
-        ("tool_exec_result", "retreat_generate")
-    )
-    assert kinds.index(("tool_exec_result", "retreat_generate")) < kinds.index(
-        ("tool_exec_start", "retreat_review")
-    )
-    assert any(event.get("kind") == "turn_complete" for event in events)
-    assert not any(
-        event.get("kind") == "turn_error"
-        and event.get("reason") == "incomplete_goal"
+    assert client.calls == 2
+    assert loop._turn_ledger is not None
+    assert loop._turn_ledger.open_observations()
+    assert "Tool activity (observational)" in client.system_prompts[1]
+    assert "completion=" not in client.system_prompts[1]
+    assert "blockers=" not in client.system_prompts[1]
+    assert _events_of(events, "model_text_delta")[-1]["delta"].startswith("这个工具")
+    assert _events_of(events, "turn_complete")
+    assert not _events_of(events, "completion_check")
+    assert not [
+        event
         for event in events
-    )
-    assert client.calls == 4
-
-
-def test_actionable_repeated_prose_questions_are_not_exposed(tmp_path: Path) -> None:
-    client = _AlwaysAsksInProse()
-    events: list[dict[str, Any]] = []
-    loop = AgentLoopV3(
-        session_id="prose_question_guard",
-        output_dir=tmp_path,
-        gemini_client=client,  # type: ignore[arg-type]
-        emit_event=events.append,
-    )
-
-    asyncio.run(loop.run_turn("直接制作完整7秒动画，创作偏好使用默认值"))
-
-    assert not [event for event in events if event.get("kind") == "model_text_delta"]
-    assert any(
-        event.get("kind") == "turn_error"
+        if event.get("kind") == "turn_error"
         and event.get("reason") == "incomplete_goal"
-        for event in events
-    )
-    assert loop._tool_ctx.extra["clarification_guard"].asks_used == 0
+    ]
+    assert not _events_of(events, "turn_wrapup")
 
 
-class _WorksThenStopsWithProse:
-    """Does real work (one mutating tool), then stops with an honest prose
-    explanation while the host ledger stays open (no post-mutation visual
-    review). A capable model's closing words must reach the user — unlike the
-    bare no-work re-ask, which is suppressed."""
-
-    model = "fake"
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def stream_turn(
-        self, messages: list[dict[str, Any]], *, tools=None, temperature: float = 0.7
-    ) -> AsyncIterator[dict[str, Any]]:
-        del messages, tools, temperature
-        self.calls += 1
-        if self.calls == 1:
-            yield {"kind": "tool_call_start", "index": 0, "id": "call_1", "name": "lumen_add_layer"}
-            yield {
-                "kind": "tool_call_args_delta",
-                "index": 0,
-                "delta": '{"type": "text", "name": "Title"}',
-            }
-            yield {"kind": "finish", "reason": "tool_calls"}
-            return
-        yield {
-            "kind": "text_delta",
-            "text": "我加了标题层，但还没做视觉复核，要我继续确认吗？",
-        }
-        yield {"kind": "finish", "reason": "stop"}
-
-
-def test_workdone_incomplete_turn_delivers_model_prose(tmp_path: Path) -> None:
-    """Softened degradation: when an actionable turn actually did work but the
-    ledger stays open, the model's honest closing prose IS delivered (not
-    swallowed), while the stop is still reported as an honest incomplete_goal
-    — never a false turn_complete. Contrast with the no-work prose re-ask, which
-    stays suppressed (test_actionable_repeated_prose_questions_are_not_exposed)."""
-    client = _WorksThenStopsWithProse()
-    events: list[dict[str, Any]] = []
-    loop = AgentLoopV3(
-        session_id="workdone_prose_delivered",
-        output_dir=tmp_path,
-        gemini_client=client,  # type: ignore[arg-type]
-        emit_event=events.append,
-    )
-
-    asyncio.run(loop.run_turn("加一个标题层"))
-
-    # The model's own words reached the user.
-    deltas = [e for e in events if e.get("kind") == "model_text_delta"]
-    assert deltas, "work-done incomplete turn must deliver the model's prose"
-    assert any("视觉复核" in e.get("delta", "") for e in deltas)
-    # Still an honest incomplete stop, not a false completion.
-    assert not [e for e in events if e.get("kind") == "turn_complete"]
-    assert any(
-        e.get("kind") == "turn_error" and e.get("reason") == "incomplete_goal"
-        for e in events
-    )
-
-
-def test_policy_refused_creative_elicit_does_not_block_later_valid_work(
-    tmp_path: Path, monkeypatch
+def test_activity_record_still_projects_actual_final_asset(
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    async def fake_file_write(args: dict[str, Any], ctx) -> dict[str, Any]:
-        target = ctx.output_dir / str(args["path"])
-        target.write_text(str(args["content"]), encoding="utf-8")
-        return {"status": "success", "path": str(target)}
+    async def make_image(args: dict[str, Any], ctx) -> dict[str, Any]:
+        del args
+        path = tmp_path / "final.png"
+        path.write_bytes(b"image")
+        ctx.registry.register_output(
+            "img-final", kind="image", path=path, summary="final image"
+        )
+        return {"status": "success", "asset_id": "img-final", "kind": "image"}
 
-    monkeypatch.setitem(loop_mod.DISPATCHER, "file_write", fake_file_write)
-    client = _DeniedCreativeElicitThenWrites()
+    monkeypatch.setitem(loop_mod.DISPATCHER, "fake_make_image", make_image)
     events: list[dict[str, Any]] = []
     loop = AgentLoopV3(
-        session_id="creative_elicit_nonblocking",
+        session_id="activity_asset_projection",
         output_dir=tmp_path,
-        gemini_client=client,  # type: ignore[arg-type]
+        gemini_client=_ToolThenTextClient("fake_make_image", "图片在这里。"),  # type: ignore[arg-type]
         emit_event=events.append,
     )
 
-    asyncio.run(loop.run_turn("写入结果文件，创作格式你决定"))
+    asyncio.run(loop.run_turn("生成一张图片"))
 
-    assert (tmp_path / "result.txt").read_text(encoding="utf-8") == "safe default result"
-    assert not [event for event in events if event.get("kind") == "ask_question"]
-    assert any(
-        event.get("kind") == "tool_exec_error"
-        and event.get("call_id") == "ask-style"
-        and event.get("error_code") == "E_CLARIFICATION_POLICY"
+    completed = _events_of(events, "turn_complete")
+    assert len(completed) == 1
+    assert completed[0]["final_asset_ids"] == ["img-final"]
+    assert completed[0]["outcome"] == "progressed"
+    assert not _events_of(events, "completion_check")
+    assert not [
+        event
         for event in events
-    )
-    failure = loop._turn_ledger.unresolved_failures["ask-style"]
-    assert failure.blocking is False
-    assert any(event.get("kind") == "turn_complete" for event in events)
-    assert not any(
-        event.get("kind") == "turn_error"
-        and event.get("reason") == "incomplete_goal"
-        for event in events
-    )
-
-
-def test_completion_gate_no_infinite_loop_without_tools(tmp_path: Path) -> None:
-    """Regression test: ensure the one-shot guard prevents infinite loops.
-    A model that always stops should result in exactly 2 model calls
-    and then turn_complete."""
-    if not COMPLETION_CHECK_ENABLED:
-        return
-
-    client = _ModelStopsImmediately()
-    events: list[dict[str, Any]] = []
-    loop = AgentLoopV3(
-        session_id="completion_gate_no_loop",
-        output_dir=tmp_path,
-        gemini_client=client,  # type: ignore[arg-type]
-        emit_event=events.append,
-    )
-
-    # This should not hang or loop forever.
-    asyncio.run(loop.run_turn("Stop immediately"))
-
-    # _ModelStopsImmediately does no work, so the conversational carve-out
-    # applies: no gate round, exactly ONE model call, then honest stop.
-    assert client.calls == 1, f"Expected 1 call, got {client.calls}"
-
-    # No completion_check (gate skipped for a zero-work turn).
-    completion_checks = [e for e in events if e.get("kind") == "completion_check"]
-    assert len(completion_checks) == 0, f"Expected 0 completion_check, got {len(completion_checks)}"
-
-    # Verify we end with turn_complete (no error or infinite loop).
-    turn_errors = [e for e in events if e.get("kind") == "turn_error"]
-    assert len(turn_errors) == 0, f"Should have no errors, got {len(turn_errors)}"
-
-    turn_completes = [e for e in events if e.get("kind") == "turn_complete"]
-    assert len(turn_completes) == 1, f"Expected 1 turn_complete, got {len(turn_completes)}"
+        if event.get("reason") == "incomplete_goal"
+    ]

@@ -41,7 +41,7 @@ def test_portrait_1080p_flips_dimensions_and_adds_vertical_aspect() -> None:
     assert criteria["aspect"].expected == (9, 16)
 
 
-def test_future_outcome_and_raw_probe_can_complete_verified_asset_workflow() -> None:
+def test_future_outcome_and_raw_probe_close_requested_observations() -> None:
     ledger = TurnLedger(
         "请做一个 7 秒、1920x1080、30fps、16:9、MP4、带音乐的视频",
         workflow="video_generation",
@@ -85,10 +85,10 @@ def test_future_outcome_and_raw_probe_can_complete_verified_asset_workflow() -> 
         "audio": "passed",
     }
     assert ledger.last_verification_seq > ledger.last_mutation_seq
-    assert ledger.completion_decision().complete is True
+    assert ledger.open_observations() == ()
 
 
-def test_wrong_duration_remains_a_hard_completion_blocker() -> None:
+def test_wrong_duration_remains_an_open_observation() -> None:
     ledger = TurnLedger("做一个 7 秒的视频", workflow="video_generation")
     ledger.record_outcome(
         "generate_video",
@@ -108,9 +108,8 @@ def test_wrong_duration_remains_a_hard_completion_blocker() -> None:
 
     assert ledger.criteria["duration"].actual == 3.0
     assert ledger.criteria["duration"].status == "failed"
-    decision = ledger.completion_decision()
-    assert decision.complete is False
-    assert "criterion:duration:failed" in decision.blockers
+    observations = ledger.open_observations()
+    assert "criterion:duration:failed" in observations
 
 
 def test_generator_self_report_cannot_satisfy_ffprobe_criteria() -> None:
@@ -138,46 +137,45 @@ def test_generator_self_report_cannot_satisfy_ffprobe_criteria() -> None:
 
     assert ledger.criteria["duration"].status == "open"
     assert ledger.criteria["fps"].status == "open"
-    assert ledger.can_complete() is False
+    assert ledger.open_observations()
 
 
 def test_mutation_invalidates_prior_visual_verification_and_old_asset_review() -> None:
     ledger = TurnLedger("生成一个视频", workflow="video_generation")
     ledger.record_outcome("generate_video", {"ok": True, "asset_id": "v-1"})
     ledger.record_outcome("analyze_media", {"asset_id": "v-1", "summary": "reviewed"})
-    assert ledger.can_complete() is True
+    assert ledger.open_observations() == ()
 
     ledger.record_outcome("edit_video", {"ok": True, "asset_id": "v-2"})
     assert ledger.final_asset_ids == ["v-2"]
-    assert ledger.can_complete() is False
-    assert "verification:stale_or_missing" in ledger.completion_decision().blockers
+    assert ledger.open_observations()
+    assert "verification:stale_or_missing" in ledger.open_observations()
 
     ledger.record_outcome("analyze_media", {"asset_id": "v-1", "summary": "old review"})
-    assert ledger.can_complete() is False
+    assert ledger.open_observations()
 
     ledger.record_outcome("analyze_media", {"asset_id": "v-2", "summary": "new review"})
-    assert ledger.can_complete() is True
+    assert ledger.open_observations() == ()
 
 
-def test_pending_and_failed_jobs_prevent_completion() -> None:
+def test_pending_and_failed_jobs_remain_observable() -> None:
     ledger = TurnLedger("做一个视频", workflow="video_generation")
     ledger.record_outcome(
         "generate_video",
         {"ok": True, "status": "submitted", "job_id": "job-1"},
         call_id="submit-1",
     )
-    decision = ledger.completion_decision()
-    assert decision.complete is False
-    assert "pending_job:job-1:submitted" in decision.blockers
+    observations = ledger.open_observations()
+    assert "pending_job:job-1:submitted" in observations
 
     ledger.record_outcome(
         "check_job",
         {"status": "failed", "job_id": "job-1", "error_code": "provider_failed"},
         call_id="check-1",
     )
-    decision = ledger.completion_decision()
-    assert not any(blocker.startswith("failed_job:job-1") for blocker in decision.blockers)
-    assert "failure:check-1:provider_failed" in decision.blockers
+    observations = ledger.open_observations()
+    assert not any(item.startswith("failed_job:job-1") for item in observations)
+    assert "failure:check-1:provider_failed" in observations
 
 
 def test_raw_false_semantics_do_not_advance_failed_action() -> None:
@@ -192,7 +190,7 @@ def test_raw_false_semantics_do_not_advance_failed_action() -> None:
     assert ledger.last_mutation_seq == 0
     assert ledger.steps["mutate"].status == "failed"
     assert ledger.unresolved_failures["insert-1"].error_code == "bad_range"
-    assert ledger.can_complete() is False
+    assert ledger.open_observations()
 
 
 def test_legal_noop_is_not_failure_but_does_not_complete_action() -> None:
@@ -207,7 +205,7 @@ def test_legal_noop_is_not_failure_but_does_not_complete_action() -> None:
     assert record.ok is True
     assert ledger.unresolved_failures == {}
     assert ledger.last_mutation_seq == 0
-    assert ledger.can_complete() is False
+    assert ledger.open_observations()
 
 
 def test_canonical_failure_outcome_does_not_advance_ledger() -> None:
@@ -239,7 +237,7 @@ def test_pre_mutation_probe_does_not_satisfy_final_asset_criteria() -> None:
         call_id="generate-final",
     )
     assert ledger.criteria["duration"].status == "open"
-    assert ledger.can_complete() is False
+    assert ledger.open_observations()
 
 
 def test_successful_same_tool_retry_resolves_non_job_failure() -> None:
@@ -251,7 +249,7 @@ def test_successful_same_tool_retry_resolves_non_job_failure() -> None:
 
     ledger.record_outcome("file_read", {"ok": True, "content": "hello"}, call_id="read-2")
     assert ledger.unresolved_failures == {}
-    assert ledger.can_complete() is True
+    assert ledger.open_observations() == ()
 
 
 def test_success_on_different_target_does_not_erase_failure() -> None:
@@ -268,7 +266,7 @@ def test_success_on_different_target_does_not_erase_failure() -> None:
     )
 
     assert "probe-a" in ledger.unresolved_failures
-    assert ledger.can_complete() is False
+    assert ledger.open_observations()
 
 
 def test_alternative_tool_on_same_target_resolves_failed_attempt() -> None:
@@ -285,7 +283,7 @@ def test_alternative_tool_on_same_target_resolves_failed_attempt() -> None:
     )
 
     assert ledger.unresolved_failures == {}
-    assert ledger.can_complete() is True
+    assert ledger.open_observations() == ()
 
 
 def test_read_on_same_target_cannot_resolve_failed_write() -> None:
@@ -302,7 +300,7 @@ def test_read_on_same_target_cannot_resolve_failed_write() -> None:
     )
 
     assert "write-a" in ledger.unresolved_failures
-    assert ledger.can_complete() is False
+    assert ledger.open_observations()
 
 
 @pytest.mark.parametrize(
@@ -318,7 +316,7 @@ def test_read_only_project_state_requests_do_not_require_mutation(
     ledger = TurnLedger(user_text, workflow=workflow)
     assert set(ledger.steps) == {"inspect"}
     ledger.record_outcome(tool_name, {"status": "success"})
-    assert ledger.can_complete() is True
+    assert ledger.open_observations() == ()
 
 
 def test_multi_operation_video_request_requires_every_named_operation() -> None:
@@ -332,7 +330,7 @@ def test_multi_operation_video_request_requires_every_named_operation() -> None:
     ledger.record_outcome(
         "analyze_media", {"status": "success", "asset_id": "v-captioned"}
     )
-    assert "step:op:color:open" in ledger.completion_decision().blockers
+    assert "step:op:color:open" in ledger.open_observations()
 
     ledger.record_outcome(
         "color_grade",
@@ -341,14 +339,14 @@ def test_multi_operation_video_request_requires_every_named_operation() -> None:
     ledger.record_outcome(
         "analyze_media", {"status": "success", "asset_id": "v-final"}
     )
-    assert ledger.can_complete() is True
+    assert ledger.open_observations() == ()
 
 
 def test_multi_operation_timeline_request_requires_transition_after_split() -> None:
     ledger = TurnLedger("把片段拆分后加转场", workflow="timeline")
     ledger.record_outcome("timeline_split_clip", {"status": "success"})
     ledger.record_outcome("inspect_timeline", {"status": "success"})
-    assert "step:op:transition:open" in ledger.completion_decision().blockers
+    assert "step:op:transition:open" in ledger.open_observations()
 
 
 def test_edit_video_trim_cannot_claim_a_transition() -> None:
@@ -412,7 +410,7 @@ def test_explicit_multi_asset_count_requires_every_final_and_full_review() -> No
         )
     assert ledger.final_asset_ids == ["img-1", "img-2"]
     assert ledger.criteria["asset_count"].actual == 2
-    assert ledger.can_complete() is False
+    assert ledger.open_observations()
 
     ledger.record_outcome(
         "generate_image",
@@ -423,12 +421,12 @@ def test_explicit_multi_asset_count_requires_every_final_and_full_review() -> No
         "host_visual_review",
         {"status": "success", "asset_ids": ["img-1", "img-2"]},
     )
-    assert ledger.can_complete() is False
+    assert ledger.open_observations()
     ledger.record_outcome(
         "host_visual_review",
         {"status": "success", "asset_ids": ["img-3"]},
     )
-    assert ledger.can_complete() is True
+    assert ledger.open_observations() == ()
 
 
 def test_multi_deliverable_image_and_audio_requires_both_but_only_image_review() -> None:
@@ -446,9 +444,8 @@ def test_multi_deliverable_image_and_audio_requires_both_but_only_image_review()
         {"status": "success", "asset_ids": ["img-cover"]},
     )
 
-    decision = ledger.completion_decision()
-    assert decision.complete is False
-    assert "final_asset_kind:audio:missing" in decision.blockers
+    observations = ledger.open_observations()
+    assert "final_asset_kind:audio:missing" in observations
 
     ledger.record_outcome(
         "generate_audio",
@@ -461,7 +458,7 @@ def test_multi_deliverable_image_and_audio_requires_both_but_only_image_review()
 
     assert ledger.final_asset_ids == ["img-cover", "aud-bed"]
     assert "aud-bed" not in ledger.verified_final_asset_ids
-    assert ledger.can_complete() is True
+    assert ledger.open_observations() == ()
 
 
 def test_multi_deliverable_video_and_cover_preserves_each_kind_on_revision() -> None:
@@ -478,7 +475,7 @@ def test_multi_deliverable_video_and_cover_preserves_each_kind_on_revision() -> 
         "host_visual_review",
         {"status": "success", "asset_ids": ["v-main"]},
     )
-    assert "final_asset_kind:image:missing" in ledger.completion_decision().blockers
+    assert "final_asset_kind:image:missing" in ledger.open_observations()
 
     ledger.record_outcome(
         "generate_image",
@@ -493,7 +490,7 @@ def test_multi_deliverable_video_and_cover_preserves_each_kind_on_revision() -> 
         "host_visual_review",
         {"status": "success", "asset_ids": ["v-main", "img-cover-1"]},
     )
-    assert ledger.can_complete() is True
+    assert ledger.open_observations() == ()
 
     ledger.record_outcome(
         "edit_image",
@@ -509,7 +506,7 @@ def test_multi_deliverable_video_and_cover_preserves_each_kind_on_revision() -> 
         "host_visual_review",
         {"status": "success", "asset_ids": ["v-main", "img-cover-2"]},
     )
-    assert ledger.can_complete() is True
+    assert ledger.open_observations() == ()
 
 
 def test_source_clip_count_is_not_mistaken_for_output_multiplicity() -> None:
@@ -534,13 +531,13 @@ def test_objective_criteria_must_pass_for_every_requested_final_asset() -> None:
         "host_visual_review", {"asset_ids": ["v-1", "v-2"]}
     )
     assert ledger.criteria["duration"].status == "failed"
-    assert ledger.can_complete() is False
+    assert ledger.open_observations()
 
     ledger.record_outcome(
         "probe_media", {"asset_id": "v-1", "duration_sec": 7.0}
     )
     assert ledger.criteria["duration"].status == "passed"
-    assert ledger.can_complete() is True
+    assert ledger.open_observations() == ()
 
 
 def test_mutation_promotes_misrouted_read_workflow_and_requires_review() -> None:
@@ -552,11 +549,11 @@ def test_mutation_promotes_misrouted_read_workflow_and_requires_review() -> None
     assert ledger.workflow == "video_edit"
     assert ledger.workflows == ("video_edit",)
     assert ledger.expected_final_kinds == frozenset({"video"})
-    assert ledger.can_complete() is False
+    assert ledger.open_observations()
     ledger.record_outcome(
         "analyze_media", {"status": "success", "asset_id": "v-bright"}
     )
-    assert ledger.can_complete() is True
+    assert ledger.open_observations() == ()
 
 
 def test_failed_job_can_be_superseded_only_by_verified_fallback() -> None:
@@ -587,7 +584,7 @@ def test_failed_job_can_be_superseded_only_by_verified_fallback() -> None:
         call_id="review-local",
     )
     assert "veo-failed" not in ledger.unresolved_failures
-    assert ledger.can_complete() is True
+    assert ledger.open_observations() == ()
 
 
 @pytest.mark.parametrize(
@@ -597,13 +594,13 @@ def test_failed_job_can_be_superseded_only_by_verified_fallback() -> None:
         ("给素材添加标签", "annotations", "search_media", {"results": ["v_001"]}),
     ],
 )
-def test_read_only_discovery_cannot_complete_mutating_workflow(
+def test_read_only_discovery_leaves_mutating_step_open(
     user_text: str, workflow: str, tool_name: str, payload: dict[str, Any]
 ) -> None:
     ledger = TurnLedger(user_text, workflow=workflow)
     ledger.record_outcome(tool_name, {"status": "success", **payload})
-    assert ledger.can_complete() is False
-    assert "step:act:open" in ledger.completion_decision().blockers
+    assert ledger.open_observations()
+    assert "step:act:open" in ledger.open_observations()
 
 
 def test_reference_image_cannot_satisfy_video_deliverable() -> None:
@@ -620,8 +617,8 @@ def test_reference_image_cannot_satisfy_video_deliverable() -> None:
     )
 
     assert ledger.final_asset_ids == []
-    assert ledger.can_complete() is False
-    assert "final_asset:missing" in ledger.completion_decision().blockers
+    assert ledger.open_observations()
+    assert "final_asset:missing" in ledger.open_observations()
 
 
 def test_take7_short_then_take6_correct_requires_fresh_visual_review() -> None:
@@ -642,7 +639,7 @@ def test_take7_short_then_take6_correct_requires_fresh_visual_review() -> None:
         "analyze_media", {"asset_id": "v-take7", "summary": "reviewed"},
         call_id="review-take7",
     )
-    assert ledger.can_complete() is False
+    assert ledger.open_observations()
 
     ledger.record_outcome(
         "edit_video",
@@ -659,14 +656,14 @@ def test_take7_short_then_take6_correct_requires_fresh_visual_review() -> None:
         "analyze_media", {"asset_id": "v-take7", "summary": "stale review"},
         call_id="stale-review",
     )
-    assert ledger.can_complete() is False
+    assert ledger.open_observations()
 
     ledger.record_outcome(
         "analyze_media", {"asset_id": "v-take6", "summary": "fresh review"},
         call_id="fresh-review",
     )
     assert ledger.last_verification_seq > ledger.last_mutation_seq
-    assert ledger.can_complete() is True
+    assert ledger.open_observations() == ()
 
 
 def test_storyboard_draft_is_plan_mutation_evidence() -> None:
@@ -674,19 +671,19 @@ def test_storyboard_draft_is_plan_mutation_evidence() -> None:
     ledger.record_outcome("draft_shotlist", {"status": "success", "shot_count": 3})
     ledger.record_outcome("assemble_shotlist", {"status": "success", "clip_count": 3})
     ledger.record_outcome("analyze_media", {"status": "success", "summary": "reviewed"})
-    assert ledger.can_complete() is True
+    assert ledger.open_observations() == ()
 
 
 def test_conversation_requires_no_tool_activity() -> None:
     ledger = TurnLedger("你好")
     assert ledger.workflow == "conversation"
     assert ledger.steps == {}
-    assert ledger.completion_decision().complete is True
+    assert ledger.open_observations() == ()
 
 
 def test_step_mutation_is_explicit_and_unknown_step_is_rejected() -> None:
     ledger = TurnLedger("检查素材", workflow="media_inspect")
     ledger.mark_step("inspect", evidence_id="manual")
-    assert ledger.can_complete() is True
+    assert ledger.open_observations() == ()
     with pytest.raises(KeyError):
         ledger.mark_step("not-real")

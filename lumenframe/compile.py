@@ -28,6 +28,8 @@ optional feather + invert), **pixel masks** (inline alpha or image asset),
 alpha/luma **track mattes**, and **adjustment layers** (After Effects
 ``composite-below``: the effect chain runs over the flat composite of every
 layer beneath the adjustment in its comp, stacked adjustments compounding).
+``clip_to_below`` uses the immediate lower sibling's post-transform, post-mask,
+post-opacity alpha in canvas coordinates, including chained clipping layers.
 
 Known limitations (tracked): non-uniform scale collapses to ``scale_x``; anchor
 is treated as centre; transform keyframes don't recouple the rotation bounding
@@ -49,7 +51,7 @@ Resolver = Callable[[dict[str, Any], "ResolveContext"], Optional[ContentFn]]
 
 
 class CompileError(RuntimeError):
-    """Raised in strict mode when a layer's content cannot be produced."""
+    """Raised when an authored layer/effect cannot be compiled truthfully."""
 
 
 @dataclass
@@ -220,6 +222,16 @@ def _populate_stack(stack, comp: dict[str, Any], ctx: ResolveContext, resolver, 
             rotation_deg=rotation,
             content_fn=content_fn,
             position=position,
+            # ``None`` means clipping is disabled.  An empty id means clipping
+            # is enabled but there is no immediate sibling below, which the
+            # compositor intentionally treats as a transparent source.
+            clip_source_id=(
+                str(children[z - 1].get("id") or "")
+                if bool(layer.get("clip_to_below"))
+                and z > 0
+                and isinstance(children[z - 1], dict)
+                else ("" if bool(layer.get("clip_to_below")) else None)
+            ),
             keyframes=_keyframe_tracks(layer, ctx.fps),
             # Pass expressions for time-driven property animation
             expressions=layer.get("expressions") or {},
@@ -1425,8 +1437,10 @@ def _apply_effect(frame: np.ndarray, effect_type: str, params: dict[str, Any], c
     """Apply a single effect to an RGBA frame.
 
     Built-in effects are dispatched through the :data:`EFFECTS` table; effects
-    not in the table fall back to the third-party :mod:`gemia.registry`, and an
-    unknown / failing effect is silently skipped (behaviour-preserving).
+    not in the table fall back to the third-party :mod:`gemia.registry`.
+    Unknown effects and extension execution failures are explicit compile
+    failures: silently returning the unmodified frame would falsely report that
+    an authored effect was rendered.
     """
     frame = np.asarray(frame, dtype=np.float32)
     if frame.ndim != 3 or frame.shape[2] != 4:
@@ -1441,14 +1455,17 @@ def _apply_effect(frame: np.ndarray, effect_type: str, params: dict[str, Any], c
     try:
         from gemia.registry import resolve
         func = resolve(effect_type)
+    except Exception as exc:
+        raise CompileError(f"unknown effect {effect_type!r}") from exc
+
+    try:
         # Call the function with the BGR image (without alpha).
         bgr = frame[..., :3]
         alpha = frame[..., 3:4]
         processed = func(bgr, **params)
         return np.concatenate([processed, alpha], axis=2).astype(np.float32)
-    except Exception:
-        # Unknown effect or resolution failed; skip silently.
-        return frame
+    except Exception as exc:
+        raise CompileError(f"effect {effect_type!r} failed: {exc}") from exc
 
 
 def _apply_gaussian_blur_rgba(frame: np.ndarray, radius: float) -> np.ndarray:

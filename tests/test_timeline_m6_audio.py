@@ -248,6 +248,29 @@ def test_export_mixes_music_and_voiceover(tmp_path: Path) -> None:
     assert _audio_stream_of(out["export_path"]) is not None
 
 
+def test_export_audio_master_hits_delivery_gate_after_aac(tmp_path: Path) -> None:
+    from gemia.project_export import _measure_loudness
+
+    ctx = _make_ctx(tmp_path, "master")
+    _call(
+        "timeline_insert_clip",
+        {"asset_id": _register(ctx, _silent_video(tmp_path, "v.mp4", 6.0))},
+        ctx,
+    )
+    _call(
+        "timeline_insert_clip",
+        {"asset_id": _register(ctx, _wav(tmp_path, "m.wav", 6.0, freq=440))},
+        ctx,
+    )
+
+    out = _call("project_export", {"quality": "draft", "label": "master"}, ctx)
+    measured = _measure_loudness(Path(out["export_path"]), timeout_sec=30)
+
+    assert measured["status"] == "passed"
+    assert -17.0 <= measured["integrated_loudness_lufs"] <= -15.0
+    assert measured["true_peak_dbtp"] <= -1.0
+
+
 def test_embedded_video_audio_preserved_by_default(tmp_path: Path) -> None:
     ctx = _make_ctx(tmp_path, "embed")
     _call("timeline_insert_clip", {"asset_id": _register(ctx, _audio_video(tmp_path, "talk.mp4", 3.0))}, ctx)

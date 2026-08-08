@@ -169,6 +169,212 @@ def test_recall_returns_matching_skill_and_ranks(store_dir: Path) -> None:
     assert top["steps"] == ["teal/orange", "glow"]
 
 
+def test_recall_audit_guidance_reranks_and_excludes_rejected_skill(
+    store_dir: Path,
+) -> None:
+    from gemia.skill_store import DistilledSkillStore, recall_skills
+
+    store = DistilledSkillStore()
+    store.distill(
+        "Portrait crop recipe",
+        when_to_use="portrait social crop",
+        steps=["crop the portrait"],
+        tags=["portrait", "crop"],
+    )
+    store.distill(
+        "Optical stabilization",
+        when_to_use="stabilize handheld footage with optical flow",
+        steps=["analyze motion", "stabilize"],
+        tags=["stabilize", "optical"],
+    )
+
+    baseline = recall_skills(
+        "portrait",
+        store=store,
+        include_library=False,
+    )
+    assert [item["name"] for item in baseline] == ["Portrait crop recipe"]
+
+    rerouted = recall_skills(
+        "portrait",
+        store=store,
+        include_library=False,
+        guidance="prefer optical stabilization for handheld motion",
+        avoid_skills=["Portrait crop recipe"],
+    )
+    assert [item["name"] for item in rerouted] == ["Optical stabilization"]
+
+
+def test_recall_dispatcher_remembers_audit_for_same_query_only(
+    store_dir: Path, ctx: ToolContext
+) -> None:
+    from gemia.skill_store import DistilledSkillStore
+    from gemia.tools import save_skill
+
+    store = DistilledSkillStore()
+    store.distill(
+        "Portrait crop recipe",
+        when_to_use="portrait social crop",
+        steps=["crop the portrait"],
+        tags=["portrait", "crop"],
+    )
+    store.distill(
+        "Optical stabilization",
+        when_to_use="stabilize handheld footage with optical flow",
+        steps=["analyze motion", "stabilize"],
+        tags=["stabilize", "optical"],
+    )
+
+    first = _run(save_skill.dispatch_recall_skills(
+        {"query": "portrait", "include_library": False},
+        ctx,
+    ))
+    assert [item["name"] for item in first["skills"]] == ["Portrait crop recipe"]
+    assert first["routing"]["guidance_applied"] is False
+
+    audited = _run(save_skill.dispatch_recall_skills(
+        {
+            "query": "portrait",
+            "include_library": False,
+            "routing_audit": {
+                "failure_evidence": "crop succeeded but did not remove camera shake",
+                "guidance": "prefer optical stabilization for handheld motion",
+                "avoid_skills": ["Portrait crop recipe"],
+            },
+        },
+        ctx,
+    ))
+    assert [item["name"] for item in audited["skills"]] == ["Optical stabilization"]
+    assert audited["routing"]["guidance_applied"] is True
+    assert audited["routing"]["audit_revision"] == 1
+    assert audited["routing"]["previous_skills"] == ["Portrait crop recipe"]
+
+    repeated = _run(save_skill.dispatch_recall_skills(
+        {"query": "portrait", "include_library": False},
+        ctx,
+    ))
+    assert [item["name"] for item in repeated["skills"]] == ["Optical stabilization"]
+    assert repeated["routing"]["audit_revision"] == 1
+
+    unrelated = _run(save_skill.dispatch_recall_skills(
+        {"query": "crop", "include_library": False},
+        ctx,
+    ))
+    assert unrelated["routing"]["guidance_applied"] is False
+    assert [item["name"] for item in unrelated["skills"]] == ["Portrait crop recipe"]
+
+    # Exploring another query must not erase the earlier audit. Returning to
+    # the original task still avoids the disproven pile.
+    returned = _run(save_skill.dispatch_recall_skills(
+        {"query": "portrait", "include_library": False},
+        ctx,
+    ))
+    assert [item["name"] for item in returned["skills"]] == ["Optical stabilization"]
+    assert returned["routing"]["audit_revision"] == 1
+
+    reset = _run(save_skill.dispatch_recall_skills(
+        {
+            "query": "portrait",
+            "include_library": False,
+            "reset_routing_guidance": True,
+        },
+        ctx,
+    ))
+    assert reset["routing"]["guidance_applied"] is False
+    assert [item["name"] for item in reset["skills"]] == ["Portrait crop recipe"]
+
+
+def test_recall_audit_rejects_unseen_avoid_names(
+    store_dir: Path, ctx: ToolContext
+) -> None:
+    from gemia.skill_store import DistilledSkillStore
+    from gemia.tools import save_skill
+
+    DistilledSkillStore().distill(
+        "Portrait crop recipe",
+        when_to_use="portrait social crop",
+        steps=["crop the portrait"],
+        tags=["portrait"],
+    )
+    _run(save_skill.dispatch_recall_skills(
+        {"query": "portrait", "include_library": False},
+        ctx,
+    ))
+
+    with pytest.raises(ValueError, match="previous result"):
+        _run(save_skill.dispatch_recall_skills(
+            {
+                "query": "portrait",
+                "include_library": False,
+                "routing_audit": {
+                    "failure_evidence": "the route failed",
+                    "guidance": "use another method",
+                    "avoid_skills": ["Invented skill"],
+                },
+            },
+            ctx,
+        ))
+
+
+def test_first_recall_ignores_empty_schema_shaped_routing_audit(
+    store_dir: Path, ctx: ToolContext
+) -> None:
+    from gemia.skill_store import DistilledSkillStore
+    from gemia.tools import save_skill
+
+    DistilledSkillStore().distill(
+        "Brand wordmark motion",
+        when_to_use="animate a brand wordmark",
+        steps=["build the wordmark animation"],
+        tags=["brand", "motion"],
+    )
+    result = _run(save_skill.dispatch_recall_skills(
+        {
+            "query": "brand wordmark",
+            "include_library": False,
+            "routing_audit": {
+                "failure_evidence": "",
+                "guidance": "",
+                "avoid_skills": [],
+            },
+            "reset_routing_guidance": False,
+        },
+        ctx,
+    ))
+    assert result["count"] == 1
+    assert result["routing"]["guidance_applied"] is False
+
+
+def test_first_recall_ignores_populated_audit_without_prior_result(
+    store_dir: Path, ctx: ToolContext
+) -> None:
+    from gemia.skill_store import DistilledSkillStore
+    from gemia.tools import save_skill
+
+    DistilledSkillStore().distill(
+        "Brand wordmark motion",
+        when_to_use="animate a brand wordmark",
+        steps=["build the wordmark animation"],
+        tags=["brand", "motion"],
+    )
+    result = _run(save_skill.dispatch_recall_skills(
+        {
+            "query": "brand wordmark",
+            "include_library": False,
+            "routing_audit": {
+                "failure_evidence": "a different route failed",
+                "guidance": "find a relevant skill first",
+                "avoid_skills": [],
+            },
+        },
+        ctx,
+    ))
+
+    assert result["count"] == 1
+    assert result["routing"]["guidance_applied"] is False
+    assert result["routing"]["audit_revision"] == 0
+
+
 def test_recall_includes_library_and_user(store_dir: Path) -> None:
     from gemia.skill_store import DistilledSkillStore, recall_skills, _library_skills
 
@@ -376,6 +582,109 @@ def test_craft_legacy_json_is_quarantined_with_signal(
                for r in caplog.records)
 
 
+def test_dead_tool_lus_is_excluded_from_recall_with_signal(
+        store_dir: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """Charter §14 S3 (recall-side dead-reference filter): a .lus whose
+    ``tools_used`` names a verb no longer in the live tool surface points the
+    model at a dead tool — excluded from recall, never silently (a warning
+    names the file and the dead verb)."""
+    from gemia.skill_store import recall_skills
+
+    store_dir.mkdir(parents=True, exist_ok=True)
+    (store_dir / "stale-verb-skill.lus").write_text(
+        "#!lus/1\n---\n"
+        'name: "stale-verb-skill"\nversion: "1.0.0"\nlus_version: 1\n'
+        'title: "陈旧动词技能"\n'
+        'description: "When the user wants a zorptangle wobble effect, run it."\n'
+        'triggers: ["zorptangle wobble"]\ndomain: "general"\n'
+        'tools_used: ["zorptangle_wobble"]\n'
+        'parameters: {"type": "object", "properties": {}}\n'
+        'author: "lumeri-agent"\n'
+        'created_at: "2026-07-01T08:00:00+00:00"\n'
+        'updated_at: "2026-07-01T08:00:00+00:00"\n'
+        'language: "en"\n'
+        'safety: {"requires_paid_generation": false, "mutates_project": false}\n'
+        "---\n"
+        "\n## When to use\nFor a zorptangle wobble.\n"
+        "\n## Steps\n1. call zorptangle_wobble on the clip\n",
+        encoding="utf-8")
+
+    with caplog.at_level("WARNING", logger="gemia.skill_store"):
+        results = recall_skills("zorptangle wobble", include_library=False)
+    assert [r for r in results if r.get("name") == "陈旧动词技能"] == [], (
+        "a skill referencing a dead tool verb must not reach the model")
+    assert any("dead tool" in r.message and "stale-verb-skill.lus" in r.message
+               and "zorptangle_wobble" in r.message
+               for r in caplog.records), (
+        "dead-reference exclusion must leave a signal naming file + verb")
+
+
+def test_live_tool_lus_is_recalled_not_over_excluded(store_dir: Path) -> None:
+    """宁窄勿宽 (charter §14 守卫边界): a .lus whose ``tools_used`` are all LIVE
+    verbs must still be recalled — the dead-reference filter must not
+    over-exclude legitimate skills."""
+    from gemia.skill_store import recall_skills
+    from gemia.tools._schema import TOOL_NAMES
+
+    live_verb = "grade" if "grade" in TOOL_NAMES else sorted(TOOL_NAMES)[0]
+    store_dir.mkdir(parents=True, exist_ok=True)
+    (store_dir / "live-verb-skill.lus").write_text(
+        "#!lus/1\n---\n"
+        'name: "live-verb-skill"\nversion: "1.0.0"\nlus_version: 1\n'
+        'title: "在世动词技能"\n'
+        'description: "When the user wants a quibblefrotz teal look, run it."\n'
+        'triggers: ["quibblefrotz teal"]\ndomain: "general"\n'
+        f'tools_used: ["{live_verb}"]\n'
+        'parameters: {"type": "object", "properties": {}}\n'
+        'author: "lumeri-agent"\n'
+        'created_at: "2026-07-01T08:00:00+00:00"\n'
+        'updated_at: "2026-07-01T08:00:00+00:00"\n'
+        'language: "en"\n'
+        'safety: {"requires_paid_generation": false, "mutates_project": false}\n'
+        "---\n"
+        "\n## When to use\nFor a quibblefrotz teal look.\n"
+        f"\n## Steps\n1. call {live_verb} on the clip\n",
+        encoding="utf-8")
+
+    results = recall_skills("quibblefrotz teal", include_library=False)
+    assert [r for r in results if r.get("name") == "在世动词技能"], (
+        "a skill whose tools_used are all live must still be recalled")
+
+
+def test_dead_tool_filter_fails_open_when_tool_surface_unavailable(
+        store_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail-open (charter §14 S3): if the live tool surface can't be resolved
+    the dead-reference filter MUST NOT run — never nuke recall wholesale
+    (mirrors the save-side known_tools contract that keeps the store usable
+    even when the tools package is unavailable)."""
+    import gemia.skill_store as ss
+    from gemia.skill_store import recall_skills
+
+    monkeypatch.setattr(ss, "_known_tool_names", lambda: None)
+    store_dir.mkdir(parents=True, exist_ok=True)
+    (store_dir / "stale-verb-skill.lus").write_text(
+        "#!lus/1\n---\n"
+        'name: "stale-verb-skill"\nversion: "1.0.0"\nlus_version: 1\n'
+        'title: "陈旧动词技能"\n'
+        'description: "When the user wants a zorptangle wobble effect, run it."\n'
+        'triggers: ["zorptangle wobble"]\ndomain: "general"\n'
+        'tools_used: ["zorptangle_wobble"]\n'
+        'parameters: {"type": "object", "properties": {}}\n'
+        'author: "lumeri-agent"\n'
+        'created_at: "2026-07-01T08:00:00+00:00"\n'
+        'updated_at: "2026-07-01T08:00:00+00:00"\n'
+        'language: "en"\n'
+        'safety: {"requires_paid_generation": false, "mutates_project": false}\n'
+        "---\n"
+        "\n## When to use\nFor a zorptangle wobble.\n"
+        "\n## Steps\n1. call zorptangle_wobble on the clip\n",
+        encoding="utf-8")
+
+    results = recall_skills("zorptangle wobble", include_library=False)
+    assert [r for r in results if r.get("name") == "陈旧动词技能"], (
+        "with the tool surface unavailable the filter must fail open")
+
+
 def test_save_skill_with_absolute_path_fails_typed(store_dir: Path, ctx: ToolContext) -> None:
     from gemia.lus import LusValidationError
     from gemia.tools import save_skill
@@ -542,6 +851,10 @@ def test_save_skill_schema_nudges_distillation() -> None:
     desc = save["function"]["description"].lower()
     assert "distill" in desc
     recall = next(t for t in TOOL_SCHEMAS if t["function"]["name"] == "recall_skills")
+    props = recall["function"]["parameters"]["properties"]
+    assert "routing_audit" in props
+    assert props["routing_audit"]["required"] == ["failure_evidence"]
+    assert "reset_routing_guidance" in props
     rdesc = recall["function"]["description"].lower()
     assert "first" in rdesc or "reuse" in rdesc
 

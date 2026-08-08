@@ -11,6 +11,7 @@
     outline: Object.freeze({ width: 19, height: 64 }),
     tasks: Object.freeze({ width: 19, height: 64 }),
     files: Object.freeze({ width: 50, height: 38 }),
+    library: Object.freeze({ width: 38, height: 64 }),
     history: Object.freeze({ width: 50, height: 38 }),
   });
   const LIMITS = Object.freeze({
@@ -22,6 +23,8 @@
   const LEGACY_ROWS = 10;
   const ROW_FILL_LIMIT = 136;
   const FULL_WIDTH_THRESHOLD = 78;
+  const TIMELINE_REFERENCE = Object.freeze({ width: 784, height: 184 });
+  const TIMELINE_MIN_SCALE = 0.5;
 
   const number = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
   const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
@@ -50,9 +53,26 @@
     };
   }
 
+  function fullRowSize(id, size) {
+    const clamped = clampSize(id, size);
+    return clampSize(id, { ...clamped, width: Math.max(clamped.width, FULL_WIDTH_THRESHOLD) });
+  }
+
   function minimumWidth(id, containerWidth) {
     const ideal = id === "preview" ? 280 : id === "timeline" ? 360 : 176;
     return Math.min(ideal, Math.max(72, containerWidth * 0.46));
+  }
+
+  // Timeline chrome used to keep its desktop pixel sizes while the workspace
+  // module shrank, eventually collapsing the actual lanes to zero height.
+  // Use one shared factor for both axes so the timeline can only scale, never
+  // be cropped by its own fixed-size toolbar.
+  function timelineScale(width, height) {
+    const raw = Math.min(
+      Math.max(1, number(width, TIMELINE_REFERENCE.width)) / TIMELINE_REFERENCE.width,
+      Math.max(1, number(height, TIMELINE_REFERENCE.height)) / TIMELINE_REFERENCE.height,
+    );
+    return clean(clamp(raw, TIMELINE_MIN_SCALE, 1));
   }
 
   function groupRows(items) {
@@ -166,5 +186,17 @@
     return false;
   }
 
-  return { DEFAULT_SIZES, LIMITS, ROW_FILL_LIMIT, FULL_WIDTH_THRESHOLD, clampSize, flowModules, hasOverlap };
+  return {
+    DEFAULT_SIZES,
+    LIMITS,
+    ROW_FILL_LIMIT,
+    FULL_WIDTH_THRESHOLD,
+    TIMELINE_REFERENCE,
+    TIMELINE_MIN_SCALE,
+    clampSize,
+    fullRowSize,
+    timelineScale,
+    flowModules,
+    hasOverlap,
+  };
 });

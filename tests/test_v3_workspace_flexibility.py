@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -40,3 +41,26 @@ def test_stage_tab_strip_scrolls_instead_of_overflowing() -> None:
     assert "flex-wrap: nowrap; min-width: 0;" in css
     assert "overflow-x: auto; scrollbar-width: none;" in css
     assert ".stage-tab-list::-webkit-scrollbar { display: none; }" in css
+
+
+def test_timeline_chrome_and_tracks_share_the_module_scale() -> None:
+    css = (ROOT / "static/v3/v3.css").read_text(encoding="utf-8")
+    source = (ROOT / "static/v3/v3.js").read_text(encoding="utf-8")
+
+    assert "--timeline-ui-scale: 1" in css
+    assert "calc(38px * var(--timeline-ui-scale))" in css
+    assert "calc(26px * var(--timeline-ui-scale))" in css
+    assert "WorkspaceLayout.timelineScale(place.width, place.height)" in source
+    assert "const timelineTrackHeight = () => TL_TRACK_H * timelineUiScale()" in source
+
+
+def test_timeline_typography_does_not_shrink_with_module_geometry() -> None:
+    css = (ROOT / "static/v3/v3.css").read_text(encoding="utf-8")
+    source = (ROOT / "static/v3/v3.js").read_text(encoding="utf-8")
+
+    assert re.search(
+        r"(?:font|font-size)\s*:[^;\n]*var\(--timeline-ui-scale\)",
+        css,
+    ) is None
+    assert "h = ruler.clientHeight || TL_RULER_H" in source
+    assert "ruler.height = Math.max(1, Math.round(h * dpr))" in source

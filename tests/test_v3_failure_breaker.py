@@ -1,9 +1,8 @@
-"""Per-tool consecutive-failure guidance for AgentLoopV3.
+"""Immediate tool-failure direction guidance for AgentLoopV3.
 
-There is no longer a fixed cap on total tool steps per turn. The only
-host behavior for repeated failures is: if the SAME tool fails to dispatch
-``_REPEATED_FAILURE_NUDGE_THRESHOLD`` (=5) times in a row, the loop prompts
-Gemini to change approach; a successful dispatch of that tool resets its streak.
+There is no fixed cap on total tool steps per turn. Every failed tool call asks
+the model to evaluate whether a retry has evidence behind it or whether it
+should change direction. This guidance never hard-stops the turn.
 """
 from __future__ import annotations
 
@@ -15,12 +14,15 @@ from typing import Any, AsyncIterator
 import gemia.agent_loop_v3 as loop_mod
 from gemia.agent_loop_v3 import AgentLoopV3, _REPEATED_FAILURE_NUDGE_THRESHOLD
 from gemia.errors import ToolError
+from gemia.skill_store import SKILL_RECALL_GUIDANCE_STATE_KEY
 
 
 class _RepeatsBuildThenStops:
-    """Fake model that calls ``build`` with empty code until the nudge threshold,
-    then stops with text. This proves repeated failures do not hard-stop the
-    turn; the model remains in control."""
+    """Fake model that fails once, then stops with text after direction guidance.
+
+    This proves the first-failure nudge does not hard-stop the turn; the model
+    remains in control.
+    """
 
     model = "fake"
 
@@ -42,7 +44,7 @@ class _RepeatsBuildThenStops:
         yield {"kind": "finish", "reason": "tool_calls"}
 
 
-def test_repeated_failure_nudge_does_not_stop_turn(tmp_path: Path) -> None:
+def test_first_failure_direction_check_does_not_stop_turn(tmp_path: Path) -> None:
     client = _RepeatsBuildThenStops()
     events: list[dict[str, Any]] = []
     loop = AgentLoopV3(
@@ -54,27 +56,190 @@ def test_repeated_failure_nudge_does_not_stop_turn(tmp_path: Path) -> None:
 
     asyncio.run(loop.run_turn("build something broken"))
 
-    # 5 consecutive build failures → a model-facing nudge is appended, but the
-    # host does not stop AT the threshold. The fake model remains in control,
-    # emits text, then the completion ledger widens adjacent/full routes before
-    # honestly ending incomplete because the failures were never repaired.
-    assert client.calls == _REPEATED_FAILURE_NUDGE_THRESHOLD + 3
-    assert any(e.get("reason") == "incomplete_goal" for e in events)
-    assert not [e for e in events if e.get("kind") == "turn_complete"]
+    # The first build failure appends a model-facing direction check. The host
+    # does not stop; the fake model's next no-tool response ends naturally.
+    assert client.calls == _REPEATED_FAILURE_NUDGE_THRESHOLD + 1
+    assert not any(e.get("reason") == "incomplete_goal" for e in events)
+    assert [e for e in events if e.get("kind") == "turn_complete"]
     # Every attempt surfaced an error to the model — none silently dropped.
-    assert sum(1 for e in events if e.get("kind") == "tool_exec_error") == 5
+    assert sum(1 for e in events if e.get("kind") == "tool_exec_error") == 1
     nudges = [
         m for m in loop._messages
         if m.get("role") == "user"
-        and "Repeated tool failure guidance" in str(m.get("content"))
+        and "Tool failure direction check" in str(m.get("content"))
     ]
     assert len(nudges) == 1
     assert "build" in nudges[0]["content"]
 
 
+def test_failure_direction_check_can_audit_recent_skill_recall(
+    tmp_path: Path,
+) -> None:
+    loop = AgentLoopV3(
+        session_id="skill_audit_nudge",
+        output_dir=tmp_path,
+        gemini_client=_RepeatsBuildThenStops(),  # type: ignore[arg-type]
+        emit_event=lambda _event: None,
+    )
+    loop._tool_ctx.extra[SKILL_RECALL_GUIDANCE_STATE_KEY] = {
+        "version": 1,
+        "last_query": "portrait",
+        "entries": {
+            "portrait": {
+                "revision": 0,
+                "scope_query": "portrait",
+                "last_result_names": [
+                    "Portrait crop recipe",
+                    "Generic timeline",
+                ],
+            },
+        },
+    }
+
+    loop._append_repeated_failure_nudge("stabilize_video", "E_UNSUPPORTED", 1)
+
+    content = str(loop._messages[-1]["content"])
+    assert "Portrait crop recipe" in content
+    assert "routing_audit" in content
+    assert "failure_evidence" in content
+    assert "avoid_skills" in content
+
+
+def test_skill_recall_audit_survives_runtime_snapshot(tmp_path: Path) -> None:
+    entry = {
+        "revision": 2,
+        "scope_query": "portrait",
+        "failure_evidence": "crop did not stabilize motion",
+        "guidance": "prefer optical stabilization",
+        "avoid_skills": ["Portrait crop recipe"],
+        "previous_skills": ["Portrait crop recipe"],
+        "last_result_names": ["Optical stabilization"],
+    }
+    state = {
+        "version": 1,
+        "last_query": "portrait",
+        "entries": {"portrait": entry},
+    }
+    first = AgentLoopV3(
+        session_id="skill_audit_snapshot",
+        output_dir=tmp_path / "first",
+        gemini_client=_RepeatsBuildThenStops(),  # type: ignore[arg-type]
+        emit_event=lambda _event: None,
+    )
+    first._tool_ctx.extra[SKILL_RECALL_GUIDANCE_STATE_KEY] = state
+
+    restored = AgentLoopV3(
+        session_id="skill_audit_snapshot",
+        output_dir=tmp_path / "restored",
+        runtime_state=first.snapshot_runtime_state(),
+        gemini_client=_RepeatsBuildThenStops(),  # type: ignore[arg-type]
+        emit_event=lambda _event: None,
+    )
+
+    assert restored._tool_ctx.extra[SKILL_RECALL_GUIDANCE_STATE_KEY] == state
+
+
+class _AuditsSkillRecallAfterFailure:
+    model = "fake"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def stream_turn(
+        self, messages: list[dict[str, Any]], *, tools=None, temperature: float = 0.7
+    ) -> AsyncIterator[dict[str, Any]]:
+        del messages, tools, temperature
+        self.calls += 1
+        if self.calls == 1:
+            name = "recall_skills"
+            args = {"query": "portrait", "include_library": False}
+        elif self.calls == 2:
+            name = "probe_media"
+            args = {"asset_id": "v_missing"}
+        elif self.calls == 3:
+            name = "recall_skills"
+            args = {
+                "query": "portrait",
+                "include_library": False,
+                "routing_audit": {
+                    "failure_evidence": (
+                        "the crop recipe did not address missing motion metadata"
+                    ),
+                    "guidance": "prefer optical stabilization and motion analysis",
+                    "avoid_skills": ["Portrait crop recipe"],
+                },
+            }
+        else:
+            yield {"kind": "text_delta", "text": "rerouted"}
+            yield {"kind": "finish", "reason": "stop"}
+            return
+        yield {
+            "kind": "tool_call_start",
+            "index": 0,
+            "id": f"c{self.calls}",
+            "name": name,
+        }
+        yield {
+            "kind": "tool_call_args_delta",
+            "index": 0,
+            "delta": json.dumps(args),
+        }
+        yield {"kind": "finish", "reason": "tool_calls"}
+
+
+def test_agent_audits_failed_skill_route_end_to_end(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from gemia.skill_store import DistilledSkillStore
+
+    store_dir = tmp_path / "skills"
+    monkeypatch.setenv("GEMIA_SKILL_STORE_DIR", str(store_dir))
+    store = DistilledSkillStore()
+    store.distill(
+        "Portrait crop recipe",
+        when_to_use="portrait social crop",
+        steps=["crop the portrait"],
+        tags=["portrait", "crop"],
+    )
+    store.distill(
+        "Optical stabilization",
+        when_to_use="stabilize handheld footage with optical flow",
+        steps=["analyze motion", "stabilize"],
+        tags=["stabilize", "optical"],
+    )
+    client = _AuditsSkillRecallAfterFailure()
+    loop = AgentLoopV3(
+        session_id="skill_audit_e2e",
+        output_dir=tmp_path / "work",
+        gemini_client=client,  # type: ignore[arg-type]
+        emit_event=lambda _event: None,
+    )
+
+    asyncio.run(loop.run_turn("portrait"))
+
+    tool_payloads = {
+        str(message.get("tool_call_id")): json.loads(str(message["content"]))
+        for message in loop._messages
+        if message.get("role") == "tool"
+    }
+    assert [item["name"] for item in tool_payloads["c1"]["skills"]] == [
+        "Portrait crop recipe"
+    ]
+    assert [item["name"] for item in tool_payloads["c3"]["skills"]] == [
+        "Optical stabilization"
+    ]
+    assert tool_payloads["c3"]["routing"]["audit_revision"] == 1
+    assert client.calls == 4
+    assert any(
+        "routing_audit" in str(message.get("content"))
+        for message in loop._messages
+        if message.get("role") == "user"
+    )
+
+
 class _Flaky:
-    """Stateful dispatcher: raises on calls 1-4, succeeds on call 5, raises on
-    6-9. A working streak tracker (with success-reset) never reaches 5-in-a-row."""
+    """Stateful dispatcher: raises on calls 1-4, succeeds on call 5, then raises
+    on calls 6-9."""
 
     def __init__(self) -> None:
         self.n = 0
@@ -108,7 +273,9 @@ class _CallsFlaky:
         yield {"kind": "finish", "reason": "stop"}
 
 
-def test_failure_nudge_streak_resets_on_success(tmp_path: Path, monkeypatch) -> None:
+def test_immediate_failure_guidance_does_not_stop_after_success(
+    tmp_path: Path, monkeypatch
+) -> None:
     flaky = _Flaky()
     monkeypatch.setitem(loop_mod.DISPATCHER, "flaky", flaky)
 
@@ -123,15 +290,19 @@ def test_failure_nudge_streak_resets_on_success(tmp_path: Path, monkeypatch) -> 
 
     asyncio.run(loop.run_turn("exercise flaky"))
 
-    # 4 fails, 1 success (resets streak), 4 fails — never 5 in a row. The turn
-    # runs to natural completion (call #10 with no tool calls). Without the
-    # reset, the streak would hit 5 on the 6th flaky call and produce a nudge.
-    # The final four failures remain unresolved, so after the one-shot gate and
-    # full-route retry the ledger ends incomplete (the success still reset the
-    # repeated-failure streak as asserted below).
-    assert client.calls == 12
-    assert any(e.get("reason") == "incomplete_goal" for e in events)
-    assert not [e for e in events if e.get("kind") == "turn_complete"]
+    # Each of the 8 failures receives an immediate direction check. The success
+    # in the middle remains a success, and none of the guidance becomes a host
+    # completion verdict or hard stop.
+    assert client.calls == 10
+    assert not any(e.get("reason") == "incomplete_goal" for e in events)
+    assert [e for e in events if e.get("kind") == "turn_complete"]
+    nudges = [
+        message
+        for message in loop._messages
+        if message.get("role") == "user"
+        and "Tool failure direction check" in str(message.get("content"))
+    ]
+    assert len(nudges) == 8
 
 
 class _RaisesToolError:
@@ -207,8 +378,7 @@ def test_tool_error_surfaces_structured_fields(tmp_path: Path, monkeypatch) -> N
 
 
 class _RaisesAlternatingCodes:
-    """Always raises, but alternates error_code each call. A model 'adapting'
-    (different failure class) must not look like runaway."""
+    """Always raises, alternating the structured error code each call."""
 
     _codes = ["E_BAD_ARG", "E_UNSUPPORTED"]
 
@@ -221,9 +391,10 @@ class _RaisesAlternatingCodes:
         raise ToolError(f"failure #{self.n}", code=code, recovery="fix_args")
 
 
-def test_failure_nudge_soft_resets_when_error_code_changes(tmp_path: Path, monkeypatch) -> None:
-    """Strictly alternating error codes never form a 5-long same-(tool,code)
-    streak, so no repeated-failure nudge is appended even across 9 failures."""
+def test_error_code_changes_do_not_suppress_direction_check(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Every failure triggers a direction check even when error codes change."""
     monkeypatch.setitem(loop_mod.DISPATCHER, "adapt_tool", _RaisesAlternatingCodes())
     client = _CallsToolThenStops("adapt_tool", call_times=9)
     events: list[dict[str, Any]] = []
@@ -236,18 +407,18 @@ def test_failure_nudge_soft_resets_when_error_code_changes(tmp_path: Path, monke
 
     asyncio.run(loop.run_turn("keep adapting"))
 
-    # 9 tool turns + closing text + gate + full-route retry = 12; unresolved
-    # failures end incomplete, but alternating codes still never trigger the
-    # repeated-same-error guidance.
-    assert client.calls == 12
-    assert any(e.get("reason") == "incomplete_goal" for e in events)
-    assert not [e for e in events if e.get("kind") == "turn_complete"]
+    # Nine tool turns plus closing text. Changing error codes does not suppress
+    # the immediate first-failure direction check.
+    assert client.calls == 10
+    assert not any(e.get("reason") == "incomplete_goal" for e in events)
+    assert [e for e in events if e.get("kind") == "turn_complete"]
     assert sum(1 for e in events if e.get("kind") == "tool_exec_error") == 9
-    assert not [
+    nudges = [
         m for m in loop._messages
         if m.get("role") == "user"
-        and "Repeated tool failure guidance" in str(m.get("content"))
+        and "Tool failure direction check" in str(m.get("content"))
     ]
+    assert len(nudges) == 9
 
 
 class _ReturnsFailure:
@@ -278,10 +449,11 @@ def test_returned_failure_is_error_not_success(tmp_path: Path, monkeypatch) -> N
     assert errors[0]["error_code"] == "E_PROCESS_EXIT"
     assert results == []
     assert any(
-        "returned_failure" in str(message.get("content"))
+        '"error_code": "E_PROCESS_EXIT"' in str(message.get("content"))
         for message in loop._messages
-        if message.get("role") == "user"
+        if message.get("role") == "tool"
     )
+    assert [event for event in events if event.get("kind") == "turn_complete"]
 
 
 class _ReturnedFailuresAroundNoop:
@@ -314,6 +486,6 @@ def test_noop_does_not_clear_an_unresolved_failure_streak(
         message
         for message in loop._messages
         if message.get("role") == "user"
-        and "Repeated tool failure guidance" in str(message.get("content"))
+        and "Tool failure direction check" in str(message.get("content"))
     ]
-    assert len(nudges) == 1
+    assert len(nudges) == 5

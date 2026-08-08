@@ -56,6 +56,9 @@ class JobRecord:
         announced: completion already surfaced to the model (notification
             injected or the model itself polled the terminal state) — the
             watcher must not announce twice
+        request_id/reservation_id: durable links to the paid-media budget and
+            provider audit records (None for local jobs)
+        estimated_cost_usd: reservation estimate retained across restarts
     """
     job_id: str
     kind: str
@@ -74,6 +77,13 @@ class JobRecord:
     pgid: int | None = None
     started_epoch: float | None = None
     announced: bool = False
+    request_id: str | None = None
+    reservation_id: str | None = None
+    estimated_cost_usd: float = 0.0
+    budget_ledger_path: str | None = None
+    budget_run_id: str | None = None
+    prompt_sha256: str | None = None
+    source_lineage: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict, skipping submitted_mono."""
@@ -89,6 +99,8 @@ class JobRecord:
         d = dict(d)  # copy to avoid mutation
         if d.get("final_path"):
             d["final_path"] = Path(d["final_path"])
+        if d.get("source_lineage") is not None:
+            d["source_lineage"] = tuple(str(item) for item in d.get("source_lineage") or [])
         obj = cls(**d)
         obj.submitted_mono = time.monotonic()
         return obj
@@ -110,6 +122,13 @@ class JobRegistry:
         estimated_eta_sec: float,
         summary: str,
         job_id: str | None = None,
+        request_id: str | None = None,
+        reservation_id: str | None = None,
+        estimated_cost_usd: float = 0.0,
+        budget_ledger_path: str | None = None,
+        budget_run_id: str | None = None,
+        prompt_sha256: str | None = None,
+        source_lineage: tuple[str, ...] | list[str] = (),
     ) -> JobRecord:
         """Submit a new async job.
 
@@ -145,6 +164,13 @@ class JobRegistry:
             final_error=None,
             summary=summary,
             submitted_mono=time.monotonic(),
+            request_id=str(request_id) if request_id else None,
+            reservation_id=str(reservation_id) if reservation_id else None,
+            estimated_cost_usd=float(estimated_cost_usd),
+            budget_ledger_path=str(budget_ledger_path) if budget_ledger_path else None,
+            budget_run_id=str(budget_run_id) if budget_run_id else None,
+            prompt_sha256=str(prompt_sha256) if prompt_sha256 else None,
+            source_lineage=tuple(str(item) for item in source_lineage),
         )
         self._records[job_id] = record
         return record

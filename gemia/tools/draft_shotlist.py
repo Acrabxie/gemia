@@ -205,6 +205,11 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         theme, template=template, target_duration_sec=target,
         style=str(style) if style else None, lang=lang,
     )
+    evidence_fit = None
+    if bool(args.get("fit_media", False)):
+        from gemia.tools._shotlist_media_fit import fit_media_for_context
+
+        shotlist, evidence_fit = fit_media_for_context(ctx, shotlist)
 
     shot_count = sum(1 for _ in iter_shots(shotlist))
     planned = sum(float(s.get("duration_sec") or 0) for _sc, s in iter_shots(shotlist))
@@ -214,6 +219,7 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
             "drafted": True, "persisted": False, "template": template, "language": lang,
             "shot_count": shot_count, "planned_sec": round(planned, 1),
             "shotlist": shotlist,
+            "evidence_fit": evidence_fit,
             "shotlist_text": _shotlist.render_shotlist_text(shotlist),
             "summary": f"drafted {shot_count}-shot '{template}' storyboard (~{planned:.0f}s) — NOT persisted (replace=false)",
         }
@@ -227,6 +233,7 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         "shot_count": sum(1 for _ in iter_shots(stored)),
         "planned_sec": round(planned, 1),
         "shotlist_text": _shotlist.render_shotlist_text(stored),
+        "evidence_fit": evidence_fit,
         "summary": (
             f"drafted a {shot_count}-shot '{template}' storyboard (~{planned:.0f}s target {target:.0f}s) "
             "and set it as the shotlist — now fill each shot (search_frames/search_media/generate), "

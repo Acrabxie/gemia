@@ -18,8 +18,8 @@ def test_workspace_keeps_preview_and_side_modules_in_one_board() -> None:
 def test_default_modules_are_simultaneous_and_persisted() -> None:
     source = (ROOT / "static/v3/v3.js").read_text(encoding="utf-8")
 
-    assert 'const DEFAULT_MODULES = ["timeline", "outline", "tasks"]' in source
-    assert 'lumeri:v3:module-layout' in source
+    assert 'isQuantaSurface ? ["quanta", "tasks", "library"] : ["timeline", "outline", "tasks"]' in source
+    assert '`${surfaceStoragePrefix}:module-layout`' in source
     assert 'data-panel-body="${k}"' in source
     assert 'stageTabs.filter((k) => PANEL_MODULES.has(k)).forEach(refreshPanel)' in source
     assert 'previewStage.dataset.tab = panel ? "panel" : "preview"' not in source
@@ -46,5 +46,5 @@ def test_modular_layout_uses_continuous_auto_filling_flow() -> None:
     assert 'Math.round((e.clientX - resizeState.startX)' not in source
     assert 'data-module-drag="${k}"' in source
     assert 'data-resize-axis="both"' in source
-    assert 'lumeri:v3:workspace-order' in source
-    assert 'lumeri:v3:workspace-sizes' in source
+    assert '`${surfaceStoragePrefix}:workspace-order`' in source
+    assert '`${surfaceStoragePrefix}:workspace-sizes`' in source

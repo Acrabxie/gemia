@@ -20,7 +20,19 @@ class GeminiMediaClient:
         image_model: str | None = None,
         video_model: str | None = None,
     ) -> None:
-        self.api_key = (api_key or get_config_value("gemini_api_key", "GEMINI_API_KEY")).strip()
+        try:
+            from gemia import cloud_accounts
+
+            cloud_mode = cloud_accounts.enabled()
+        except Exception:
+            cloud_mode = os.environ.get("LUMERI_CLOUD_ACCOUNTS", "").strip().lower() in {"1", "true", "yes"}
+        if cloud_mode:
+            raise RuntimeError(
+                "Unattended Gemini media creation is unavailable in cloud-account mode."
+            )
+        self.api_key = (
+            api_key or get_config_value("gemini_api_key", "GEMINI_API_KEY")
+        ).strip()
         if not self.api_key:
             raise RuntimeError("GEMINI_API_KEY is required for native Gemini media generation.")
         self.image_model = strongest_media_model(

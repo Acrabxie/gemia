@@ -31,7 +31,7 @@ def test_trim_range_shorthand_and_offsets_are_both_enforced() -> None:
         "analyze_media", {"asset_id": "v-wrong-range", "summary": "reviewed"}
     )
     assert ledger.steps["op:trim"].status == "open"
-    assert ledger.can_complete() is False
+    assert ledger.open_observations()
 
     ledger.record_outcome(
         "edit_video",
@@ -214,7 +214,7 @@ def test_source_image_pack_is_not_an_image_deliverable() -> None:
     )
 
     assert ledger.expected_final_kinds == frozenset({"video"})
-    assert ledger.can_complete() is True
+    assert ledger.open_observations() == ()
 
 
 def test_transform_target_overrides_misrouted_primary_source_kind() -> None:
@@ -244,7 +244,7 @@ def test_multi_deliverable_count_is_tracked_per_kind() -> None:
         "host_visual_review", {"status": "success", "asset_ids": ["img-1"]}
     )
     assert ledger.criteria["asset_count:image"].actual == 1
-    assert ledger.can_complete() is False
+    assert ledger.open_observations()
 
     ledger.record_outcome(
         "generate_image",

@@ -34,6 +34,8 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     # its timeline/shotlist siblings, so import their dispatchers at call time.
     from gemia.tools import shotlist as _shotlist
     from gemia.tools import timeline as _timeline
+    from gemia.tools._library_session import account_id_for, ensure_session_asset
+    from gemia.media_library import get_asset
 
     project = _project(ctx)
     rebuild = bool(args.get("rebuild", False))
@@ -61,6 +63,14 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     for shot in shots:
         shot_id = str(shot.get("id") or "")
         asset_id = str(shot.get("asset_id") or "")
+        library_asset_id = str(shot.get("library_asset_id") or "")
+        if (not asset_id or not ctx.registry.contains(asset_id)) and library_asset_id:
+            account_id = account_id_for(ctx) or str(project.load().get("account_id") or "")
+            project_id = str(ctx.extra.get("project_id") or "").strip()
+            asset = get_asset(account_id, library_asset_id, project_id=project_id) if account_id and project_id else None
+            resolved = ensure_session_asset(ctx, asset) if asset else None
+            if resolved:
+                asset_id = resolved
         if not asset_id:
             skipped.append({"shot_id": shot_id, "reason": "unfilled (no asset_id — search_media or generate it)"})
             continue
@@ -68,18 +78,47 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
             skipped.append({"shot_id": shot_id, "reason": "already placed"})
             continue
         if not ctx.registry.contains(asset_id):
-            skipped.append({"shot_id": shot_id, "reason": f"asset {asset_id!r} not in session registry"})
+            skipped.append({"shot_id": shot_id, "reason": f"asset {asset_id!r} not in session registry and persistent library asset could not be resolved"})
             continue
 
         duration = max(0.1, float(shot.get("duration_sec") or 3.0))
         record = ctx.registry.get(asset_id)
-        insert_args: dict[str, Any] = {"asset_id": asset_id, "track_id": "V1"}
+        if record.kind not in {"video", "image", "lottie"}:
+            skipped.append({
+                "shot_id": shot_id,
+                "reason": f"unsupported visual shot asset kind {record.kind!r}",
+            })
+            continue
+        insert_args: dict[str, Any] = {
+            "asset_id": asset_id,
+            "track_id": "OV1" if record.kind == "lottie" else "V1",
+        }
         if record.kind == "video":
-            insert_args["source_in"] = 0.0
-            insert_args["source_out"] = duration  # trim to the shot's planned length
+            source_in = (
+                max(float(shot["source_in"]), 0.0)
+                if shot.get("source_in") is not None
+                else 0.0
+            )
+            source_out = (
+                float(shot["source_out"])
+                if shot.get("source_out") is not None
+                else source_in + duration
+            )
+            if source_out <= source_in:
+                skipped.append({"shot_id": shot_id, "reason": "invalid evidence source range"})
+                continue
+            insert_args["source_in"] = source_in
+            insert_args["source_out"] = source_out
+            duration = source_out - source_in
         else:  # image / lottie: hold for the planned duration
             insert_args["duration"] = duration
 
+        evidence = shot.get("evidence") if isinstance(shot.get("evidence"), dict) else {}
+        insert_args["_provenance"] = {
+            "shot_id": shot_id,
+            "evidence_id": evidence.get("evidence_id"),
+            "annotation_id": evidence.get("annotation_id"),
+        }
         media = await _timeline.dispatch_insert(insert_args, ctx)
         clip_id = media.get("clip_id")
         start = media.get("start") or 0.0
@@ -87,15 +126,26 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         # On-screen title/caption aligned over this shot.
         if shot.get("on_screen_text"):
             await _timeline.dispatch_insert(
-                {"text": {"content": str(shot["on_screen_text"])}, "at_time": start, "duration": duration},
+                {
+                    "text": {"content": str(shot["on_screen_text"])},
+                    "at_time": start,
+                    "duration": duration,
+                    "_provenance": {"shot_id": shot_id},
+                },
                 ctx,
             )
 
+        update_fields: dict[str, Any] = {"clip_id": clip_id, "status": "placed"}
+        if asset_id != str(shot.get("asset_id") or ""):
+            update_fields["asset_id"] = asset_id
         await _shotlist.dispatch_update_shot(
-            {"shot_id": shot_id, "fields": {"clip_id": clip_id, "status": "placed"}}, ctx
+            {"shot_id": shot_id, "fields": update_fields}, ctx
         )
         placed.append({
             "shot_id": shot_id, "clip_id": clip_id, "duration_sec": duration,
+            "source_in": insert_args.get("source_in"),
+            "source_out": insert_args.get("source_out"),
+            "evidence_id": (shot.get("evidence") or {}).get("evidence_id"),
             "transition_after": shot.get("transition_after"),
         })
 

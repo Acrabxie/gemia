@@ -110,7 +110,7 @@ def test_multi_kind_specs_apply_to_their_own_deliverable() -> None:
         "host_visual_review", {"asset_ids": ["v", "img"]}
     )
 
-    assert ledger.can_complete() is True
+    assert ledger.open_observations() == ()
 
 
 def test_same_kind_slot_specs_stay_bound_to_one_asset() -> None:
@@ -128,7 +128,7 @@ def test_same_kind_slot_specs_stay_bound_to_one_asset() -> None:
         "probe_media", {"asset_id": "v2", "duration_sec": 7, "width": 1600, "height": 900}
     )
     wrong.record_outcome("host_visual_review", {"asset_ids": ["v1", "v2"]})
-    assert wrong.can_complete() is False
+    assert wrong.open_observations()
 
     correct = TurnLedger(prompt, workflow="video_generation")
     for asset_id in ("v1", "v2"):
@@ -142,7 +142,7 @@ def test_same_kind_slot_specs_stay_bound_to_one_asset() -> None:
         "probe_media", {"asset_id": "v2", "duration_sec": 7, "width": 900, "height": 1600}
     )
     correct.record_outcome("host_visual_review", {"asset_ids": ["v1", "v2"]})
-    assert correct.can_complete() is True
+    assert correct.open_observations() == ()
 
 
 def test_verifier_cannot_promote_explicit_intermediate_to_cover() -> None:
@@ -166,7 +166,7 @@ def test_verifier_cannot_promote_explicit_intermediate_to_cover() -> None:
     )
 
     assert ledger.final_asset_ids == ["v-final"]
-    assert "final_asset_kind:image:missing" in ledger.completion_decision().blockers
+    assert "final_asset_kind:image:missing" in ledger.open_observations()
 
 
 def test_reference_is_nondestructive_but_composite_replaces_its_base() -> None:
@@ -287,7 +287,7 @@ def test_explicit_subtitle_and_title_text_are_exact() -> None:
     assert title.steps["op:insert"].status == "open"
 
 
-def test_gif_is_an_image_deliverable_and_can_complete() -> None:
+def test_gif_is_recorded_as_an_image_deliverable_with_no_open_observations() -> None:
     ledger = TurnLedger("将视频导出为 GIF")
     ledger.record_outcome(
         "export",
@@ -300,4 +300,4 @@ def test_gif_is_an_image_deliverable_and_can_complete() -> None:
     ledger.record_outcome("host_visual_review", {"asset_id": "img-gif"})
 
     assert ledger.expected_final_kinds == frozenset({"image"})
-    assert ledger.can_complete() is True
+    assert ledger.open_observations() == ()

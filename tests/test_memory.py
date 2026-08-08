@@ -272,12 +272,10 @@ def test_config_override_reflected_in_active(tmp_path, monkeypatch) -> None:
     assert active["is_default_model"] is False
 
 
-def test_strongest_model_lock_overrides_runtime_selection(tmp_path, monkeypatch) -> None:
+def test_manual_weaker_model_is_not_blocked_by_legacy_strongest_keys(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     _clear_model_env(monkeypatch)
     _clear_selection_env(monkeypatch)
-    monkeypatch.setenv("LUMERI_V3_MODEL", "weaker-env-model")
-    monkeypatch.setenv("LUMERI_V3_EFFORT", "low")
     from gemia import memory
 
     memory = importlib.reload(memory)
@@ -287,33 +285,35 @@ def test_strongest_model_lock_overrides_runtime_selection(tmp_path, monkeypatch)
             "lumeri_v3_strongest_model": "gpt-5.6-sol",
             "lumeri_v3_strongest_provider": "openai",
             "lumeri_v3_strongest_effort": "max",
-            "lumeri_v3_model": "weaker-config-model",
-            "lumeri_v3_effort": "low",
+            "lumeri_v3_provider": "openai",
+            "lumeri_v3_model": "gpt-5.6-sol",
+            "lumeri_v3_effort": "high",
         }
     )
 
-    active = memory.active_model_selection("planner")
-    assert active["locked"] is True
-    assert active["model"] == "gpt-5.6-sol"
+    active = memory.apply_model_selection({"model": "gpt-5.5", "effort": "low"})
+    assert active["model"] == "gpt-5.5"
     assert active["provider"] == "openai"
-    assert active["effort"] == "max"
-    with pytest.raises(ValueError, match="locked to strongest"):
-        memory.apply_model_selection({"model": "default", "effort": "low"})
+    assert active["effort"] == "low"
+    assert "locked" not in active
 
 
-def test_strongest_model_lock_controls_client_resolution(tmp_path, monkeypatch) -> None:
+def test_saved_setup_provider_wins_over_stale_daemon_environment(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     _clear_model_env(monkeypatch)
     _clear_selection_env(monkeypatch)
-    monkeypatch.setenv("LUMERI_V3_PROVIDER", "gemini")
-    monkeypatch.setenv("LUMERI_V3_MODEL", "weaker-env-model")
-    monkeypatch.setenv("LUMERI_V3_EFFORT", "low")
+    monkeypatch.setenv("LUMERI_V3_PROVIDER", "openai")
+    monkeypatch.setenv("LUMERI_V3_MODEL", "gpt-5.6-sol")
+    monkeypatch.setenv("LUMERI_V3_EFFORT", "max")
     from gemia import memory
 
     memory = importlib.reload(memory)
     memory.write_user_config(
         {
-            "openai_api_key": "test-key",
+            "vertex_project": "project-1",
+            "lumeri_v3_provider": "vertex",
+            "lumeri_v3_model": "google/gemini-2.5-pro",
+            "lumeri_v3_effort": "high",
             "lumeri_v3_force_strongest": True,
             "lumeri_v3_strongest_model": "gpt-5.6-sol",
             "lumeri_v3_strongest_provider": "openai",
@@ -323,7 +323,7 @@ def test_strongest_model_lock_controls_client_resolution(tmp_path, monkeypatch) 
 
     from gemia.gemini_client import GeminiClientV3
 
-    client = GeminiClientV3(model="weaker-constructor-model")
-    assert client.provider == "openai"
-    assert client.model == "gpt-5.6-sol"
-    assert client.reasoning_effort == "max"
+    client = GeminiClientV3(proxy="")
+    assert client.provider == "vertex"
+    assert client.model == "google/gemini-2.5-pro"
+    assert client.reasoning_effort == "high"

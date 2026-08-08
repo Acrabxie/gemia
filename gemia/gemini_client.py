@@ -33,8 +33,6 @@ from typing import Any, AsyncIterator, Iterator
 
 import certifi
 
-from gemia.memory import strongest_model_lock
-
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +46,72 @@ _DEFAULT_GEMINI_MODEL    = "gemini-2.0-flash"
 _DEFAULT_CLAUDE_MODEL    = "claude-sonnet-4-6"
 _DEFAULT_OPENROUTER_MODEL = _DEFAULT_MODEL
 _DEFAULT_OPENAI_MODEL    = "gpt-5.5"
+_OPENAI_SUBSCRIPTION_BASE_URL = "http://127.0.0.1:7808/v1/chat/completions"
+_OPENAI_SUBSCRIPTION_MODE = "subscription"
 
 # Auto-probe priority: first provider with credentials wins
 _PROVIDER_PRIORITY = ("vertex", "gemini", "claude", "openrouter", "openai")
+
+
+class _MiniMaxThinkTagFilter:
+    """Hide MiniMax ``<think>`` blocks while retaining the raw wire reply.
+
+    MiniMax streams its reasoning inside the regular OpenAI-compatible
+    ``content`` field.  The filter is deliberately stateful because SSE chunks
+    can split either tag.  Callers retain the unfiltered delta separately only
+    for the immediate tool-call continuation that MiniMax requires.
+    """
+
+    _OPEN = "<think>"
+    _CLOSE = "</think>"
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._inside_think = False
+
+    @staticmethod
+    def _partial_tag_suffix_len(value: str, tag: str) -> int:
+        folded = value.casefold()
+        for size in range(min(len(value), len(tag) - 1), 0, -1):
+            if folded.endswith(tag[:size]):
+                return size
+        return 0
+
+    def feed(self, text: str) -> str:
+        self._pending += text
+        visible: list[str] = []
+        while self._pending:
+            tag = self._CLOSE if self._inside_think else self._OPEN
+            marker_at = self._pending.casefold().find(tag)
+            if marker_at >= 0:
+                if self._inside_think:
+                    self._inside_think = False
+                else:
+                    visible.append(self._pending[:marker_at])
+                    self._inside_think = True
+                self._pending = self._pending[marker_at + len(tag):]
+                continue
+
+            keep = self._partial_tag_suffix_len(self._pending, tag)
+            consumed = self._pending[:-keep] if keep else self._pending
+            if not self._inside_think:
+                visible.append(consumed)
+            self._pending = self._pending[-keep:] if keep else ""
+            # A possible split tag stays buffered for the next SSE chunk; it
+            # cannot be processed further until those bytes arrive.
+            break
+        return "".join(visible)
+
+    def finish(self) -> str:
+        """Flush ordinary text retained only to detect a split tag."""
+        tail = "" if self._inside_think else self._pending
+        self._pending = ""
+        return tail
+
+
+def _is_minimax_openai_endpoint(url: str) -> bool:
+    endpoint = str(url or "").casefold()
+    return "api.minimaxi.com" in endpoint or "api.minimax.io" in endpoint
 
 
 def _read_config_key(field: str) -> str:
@@ -178,20 +239,43 @@ _ADC_PATH = Path.home() / ".config" / "gcloud" / "application_default_credential
 _vertex_token_cache: dict[str, Any] = {"access": None, "exp": 0.0}
 
 
-def _probe_provider() -> str | None:
+def _config_text(config: dict[str, Any] | None, field: str) -> str:
+    if config is None:
+        return _read_config_key(field)
+    value = config.get(field, "")
+    return str(value or "")
+
+
+def _config_or_env(
+    config: dict[str, Any] | None,
+    field: str,
+    env_field: str,
+) -> str:
+    """Profiles are authoritative; legacy configs may still fall back to env."""
+    value = _config_text(config, field)
+    if value or (config and config.get("brain_profile_isolated")):
+        return value
+    return str(os.environ.get(env_field) or "")
+
+
+def _probe_provider(config: dict[str, Any] | None = None) -> str | None:
     """Return the first provider whose credentials exist, or None."""
+    isolated = bool(config and config.get("brain_profile_isolated"))
     if (
-        (os.environ.get("VERTEX_PROJECT") or _read_config_key("vertex_project"))
+        (
+            _config_text(config, "vertex_project")
+            or ("" if isolated else os.environ.get("VERTEX_PROJECT"))
+        )
         and _ADC_PATH.exists()
     ):
         return "vertex"
-    if os.environ.get("GEMINI_API_KEY") or _read_config_key("gemini_api_key"):
+    if _config_text(config, "gemini_api_key") or ("" if isolated else os.environ.get("GEMINI_API_KEY")):
         return "gemini"
-    if os.environ.get("ANTHROPIC_API_KEY") or _read_config_key("anthropic_api_key"):
+    if _config_text(config, "anthropic_api_key") or ("" if isolated else os.environ.get("ANTHROPIC_API_KEY")):
         return "claude"
-    if os.environ.get("OPENROUTER_API_KEY") or _read_config_key("openrouter_api_key"):
+    if _config_text(config, "openrouter_api_key") or ("" if isolated else os.environ.get("OPENROUTER_API_KEY")):
         return "openrouter"
-    if os.environ.get("OPENAI_API_KEY") or _read_config_key("openai_api_key"):
+    if _config_text(config, "openai_api_key") or ("" if isolated else os.environ.get("OPENAI_API_KEY")):
         return "openai"
     return None
 
@@ -390,57 +474,113 @@ class GeminiClientV3:
         api_url: str = _DEFAULT_URL,
         proxy: str | None = None,
         timeout: float = 120.0,
+        config: dict[str, Any] | None = None,
+        cloud_provider_override: str | None = None,
     ) -> None:
+        cloud_mode = os.environ.get("LUMERI_CLOUD_ACCOUNTS", "").strip().lower() in {
+            "1", "true", "yes",
+        }
+        try:
+            from gemia import cloud_accounts
+
+            cloud_mode = cloud_accounts.enabled()
+        except Exception as exc:
+            if cloud_mode:
+                raise RuntimeError("Cloud account credential resolver is unavailable") from exc
+        config_from_disk = config is None
+        if config_from_disk:
+            try:
+                loaded = json.loads(
+                    (Path.home() / ".gemia" / "config.json").read_text()
+                )
+                config = loaded if isinstance(loaded, dict) else {}
+            except (OSError, json.JSONDecodeError):
+                config = {}
+        if config_from_disk and not cloud_mode:
+            try:
+                from gemia.local_config import merge_with_secret_config
+
+                config = merge_with_secret_config(config)
+            except Exception:
+                # A partial upgrade or unreadable public file must not hide the
+                # legacy compatibility configuration.
+                config = dict(config)
+        if cloud_mode:
+            try:
+                if cloud_provider_override:
+                    config = cloud_accounts.runtime_model_config(
+                        config,
+                        provider_override=cloud_provider_override,
+                    )
+                else:
+                    config = cloud_accounts.runtime_model_config(config)
+            except Exception as exc:
+                raise RuntimeError("Cloud account credential resolver is unavailable") from exc
+        try:
+            from gemia.brain_config import resolve_runtime_config
+
+            config = resolve_runtime_config(config)
+        except Exception as exc:
+            if cloud_mode:
+                raise RuntimeError("Cloud account model configuration is invalid") from exc
+            # Legacy fallback remains available during partial upgrades.
+            config = dict(config)
+        isolated = bool(config.get("brain_profile_isolated"))
         proxy_value = (
             proxy
             if proxy is not None
-            else os.environ.get("OPENROUTER_PROXY")
-            or _read_config_key("proxy")
+            else _config_text(config, "proxy")
+            or ("" if isolated else os.environ.get("OPENROUTER_PROXY"))
             or ""
         ).strip()
         self.proxy = proxy_value or None
         self.timeout = float(timeout)
 
-        strongest_lock = strongest_model_lock("planner")
-
-        # Provider resolution: a strongest-model lock wins over every env/config
-        # override and disables auto-probe fallback to a weaker provider.
+        # Setup's persisted provider is authoritative. This deliberately wins
+        # over stale daemon environment defaults, while a temporary Setup test
+        # can pass an explicit config snapshot without mutating process env.
         self.provider = (
-            (str(strongest_lock.get("provider") or "").strip().lower() or "openrouter")
-            if strongest_lock.get("enabled")
-            else (
-                (os.environ.get("LUMERI_V3_PROVIDER") or _read_config_key("lumeri_v3_provider") or "").strip().lower()
-                or _probe_provider()
-                or "openrouter"
-            )
+            (
+                _config_or_env(
+                    config, "lumeri_v3_provider", "LUMERI_V3_PROVIDER"
+                )
+                or ""
+            ).strip().lower()
+            or _probe_provider(config)
+            or "openrouter"
         )
 
-        # Shared model override (highest priority across all providers)
+        # A caller may choose another model inside the resolved provider. Setup's
+        # saved model otherwise wins over stale daemon environment defaults.
         model_override = (
-            str(strongest_lock.get("model") or "").strip()
-            if strongest_lock.get("enabled")
-            else (
-                model
-                or os.environ.get("LUMERI_V3_MODEL")
-                or _read_config_key("lumeri_v3_model")
-            )
+            model
+            or _config_or_env(config, "lumeri_v3_model", "LUMERI_V3_MODEL")
         )
 
         if self.provider == "vertex":
             project = (
-                os.environ.get("VERTEX_PROJECT") or _read_config_key("vertex_project")
+                _config_or_env(config, "vertex_project", "VERTEX_PROJECT")
+                or ""
             ).strip()
             if not project:
                 raise RuntimeError("VERTEX_PROJECT required for vertex provider (env or config.json:vertex_project).")
-            # Brain location is independent of media (Veo/Lyria/Nano Banana live in
+            # Brain location is independent of media (Veo/Lyria live in
             # us-central1; gemini-3.x text models live on 'global'). A brain-specific
             # override lets the orchestrator use 'global' while vertex_location stays
             # us-central1 for media.
             location = (
-                os.environ.get("LUMERI_V3_LOCATION")
-                or _read_config_key("lumeri_v3_location")
-                or os.environ.get("VERTEX_LOCATION")
-                or _read_config_key("vertex_location")
+                _config_text(config, "lumeri_v3_location")
+                or _config_text(config, "vertex_location")
+                or (
+                    ""
+                    if config.get("brain_profile_isolated")
+                    else os.environ.get("LUMERI_V3_LOCATION")
+                )
+                or (
+                    ""
+                    if config.get("brain_profile_isolated")
+                    else os.environ.get("VERTEX_LOCATION")
+                )
                 or "global"
             ).strip()
             host = (
@@ -457,7 +597,8 @@ class GeminiClientV3:
 
         elif self.provider == "gemini":
             self.api_key = (
-                os.environ.get("GEMINI_API_KEY") or _read_config_key("gemini_api_key")
+                _config_or_env(config, "gemini_api_key", "GEMINI_API_KEY")
+                or ""
             ).strip()
             if not self.api_key:
                 raise RuntimeError("GEMINI_API_KEY required for gemini provider (env or config.json:gemini_api_key).")
@@ -466,37 +607,72 @@ class GeminiClientV3:
 
         elif self.provider == "claude":
             self.api_key = (
-                os.environ.get("ANTHROPIC_API_KEY") or _read_config_key("anthropic_api_key")
+                _config_or_env(
+                    config, "anthropic_api_key", "ANTHROPIC_API_KEY"
+                )
+                or ""
             ).strip()
             if not self.api_key:
                 raise RuntimeError("ANTHROPIC_API_KEY required for claude provider (env or config.json:anthropic_api_key).")
             self.api_url = "https://api.anthropic.com/v1/messages"
             self.model = model_override or _DEFAULT_CLAUDE_MODEL
 
-        elif self.provider == "openai":
-            self.api_key = (
-                os.environ.get("OPENAI_API_KEY") or _read_config_key("openai_api_key")
-            ).strip()
-            if not self.api_key:
-                raise RuntimeError("OPENAI_API_KEY required for openai provider (env or config.json:openai_api_key).")
-            # Base URL is config-readable (not env-only) so the openai path can
-            # be pinned to a local bridge — e.g. the codex-shim that fronts a
-            # ChatGPT subscription — from ~/.gemia/config.json alone, without
-            # needing the daemon's env. The shim authenticates with its own
-            # managed token and ignores this api_key, but a non-empty value is
-            # still required above.
+        elif self.provider in {"openai", "openai_subscription", "custom"}:
             self.api_url = (
-                os.environ.get("LUMERI_OPENAI_BASE_URL")
-                or _read_config_key("lumeri_openai_base_url")
-                or "https://api.openai.com/v1/chat/completions"
+                _config_text(config, "lumeri_openai_base_url")
+                or (
+                    ""
+                    if config.get("brain_profile_isolated")
+                    else os.environ.get("LUMERI_OPENAI_BASE_URL")
+                )
+                or (
+                    _OPENAI_SUBSCRIPTION_BASE_URL
+                    if self.provider == "openai_subscription"
+                    else "https://api.openai.com/v1/chat/completions"
+                )
             )
+            auth_mode = (
+                _config_text(config, "lumeri_openai_auth_mode")
+                or (
+                    ""
+                    if config.get("brain_profile_isolated")
+                    else os.environ.get("LUMERI_OPENAI_AUTH_MODE")
+                )
+                or (
+                    _OPENAI_SUBSCRIPTION_MODE
+                    if self.provider == "openai_subscription"
+                    else ""
+                )
+                or ""
+            ).strip().lower()
+            using_subscription_bridge = (
+                auth_mode == _OPENAI_SUBSCRIPTION_MODE
+                and self.api_url.rstrip("/") == _OPENAI_SUBSCRIPTION_BASE_URL
+            )
+            # Preserve the logical provider identity for host-side capability
+            # gates even though the transport remains OpenAI-compatible.
+            self.using_subscription_bridge = using_subscription_bridge
+            self.fast_mode = bool(config.get("lumeri_fast_mode"))
+            if using_subscription_bridge:
+                # The loopback bridge owns OAuth. Never read or forward a saved
+                # OpenAI API key while subscription mode is active.
+                self.api_key = "unused"
+            else:
+                self.api_key = (
+                    _config_or_env(config, "openai_api_key", "OPENAI_API_KEY")
+                    or ""
+                ).strip()
+                if not self.api_key:
+                    raise RuntimeError("OPENAI_API_KEY required for openai provider (env or config.json:openai_api_key).")
             self.model = model_override or _DEFAULT_OPENAI_MODEL
 
         else:  # openrouter (default)
             self.api_key = (
-                api_key
-                or os.environ.get("OPENROUTER_API_KEY")
-                or _read_config_key("openrouter_api_key")
+                ("" if cloud_mode else api_key)
+                or _config_or_env(
+                    config, "openrouter_api_key", "OPENROUTER_API_KEY"
+                )
+                or ""
             ).strip()
             if not self.api_key:
                 raise RuntimeError(
@@ -505,8 +681,16 @@ class GeminiClientV3:
                     "OPENROUTER_API_KEY, OPENAI_API_KEY "
                     "(env or ~/.gemia/config.json)."
                 )
-            self.model = model_override or _read_config_key("openrouter_model") or _DEFAULT_OPENROUTER_MODEL
-            self.api_url = api_url
+            self.model = (
+                model_override
+                or (
+                    ""
+                    if config.get("brain_profile_isolated")
+                    else _config_text(config, "openrouter_model")
+                )
+                or _DEFAULT_OPENROUTER_MODEL
+            )
+            self.api_url = _DEFAULT_URL if cloud_mode else api_url
 
         # Orchestration/tool-path temperature (RC5): low by default. The agent
         # loop passes no temperature, so this becomes the effective default.
@@ -516,12 +700,14 @@ class GeminiClientV3:
         # config.json:lumeri_v3_effort or env LUMERI_V3_EFFORT). Empty = leave the
         # provider on its own default. Applied to reasoning-capable models below.
         self.reasoning_effort = (
-            str(strongest_lock.get("effort") or "").strip().lower()
-            if strongest_lock.get("enabled")
-            else (
-                os.environ.get("LUMERI_V3_EFFORT") or _read_config_key("lumeri_v3_effort") or ""
-            ).strip().lower()
-        )
+            _config_text(config, "lumeri_v3_effort")
+            or (
+                ""
+                if config.get("brain_profile_isolated")
+                else os.environ.get("LUMERI_V3_EFFORT")
+            )
+            or ""
+        ).strip().lower()
         # Tri-state: None preserves each provider's compatibility default;
         # explicit true/false is sent only when tools are present. This flag
         # allows a model to PROPOSE multiple independent calls in one response;
@@ -570,6 +756,19 @@ class GeminiClientV3:
             "stream": True,
             "temperature": temp,
         }
+        if getattr(self, "using_subscription_bridge", False):
+            try:
+                from gemia.local_config import fast_mode_preference
+
+                fast_mode = fast_mode_preference(
+                    default=bool(getattr(self, "fast_mode", False))
+                )
+            except Exception:
+                fast_mode = bool(getattr(self, "fast_mode", False))
+            if fast_mode:
+                # Fast Mode is the subscription bridge's priority transport
+                # tier.  It is deliberately independent of reasoning effort.
+                body["service_tier"] = "priority"
         if tools:
             body["tools"] = tools
             if self.provider != "claude" and self.parallel_tool_calls is not None:
@@ -614,6 +813,21 @@ class GeminiClientV3:
             yield item
 
     def _stream_blocking(self, body: dict[str, Any]) -> Iterator[dict[str, Any]]:
+        minimax_thinking = (
+            _MiniMaxThinkTagFilter()
+            if _is_minimax_openai_endpoint(self.api_url)
+            else None
+        )
+
+        def flush_minimax_tail() -> Iterator[dict[str, Any]]:
+            if minimax_thinking is None:
+                return
+            tail = minimax_thinking.finish()
+            if tail:
+                # The raw bytes were already carried by prior hidden deltas.
+                # Avoid appending this split-tag flush twice to raw history.
+                yield {"kind": "text_delta", "text": tail, "raw_text": ""}
+
         bearer = (
             _vertex_access_token(self.proxy)
             if self.provider == "vertex"
@@ -701,15 +915,31 @@ class GeminiClientV3:
                     continue
                 payload = line[5:].lstrip()
                 if payload == b"[DONE]":
+                    yield from flush_minimax_tail()
                     return
                 try:
                     chunk = json.loads(payload.decode("utf-8"))
                 except json.JSONDecodeError:
                     continue
                 for event in _parse_chunk(chunk):
+                    if minimax_thinking is not None and event.get("kind") == "text_delta":
+                        raw_text = str(event.get("text") or "")
+                        visible_text = minimax_thinking.feed(raw_text)
+                        # Keep raw provider text available to the loop for the
+                        # one follow-up that settles tool calls, but never render
+                        # or persist reasoning in normal session history.
+                        yield {
+                            **event,
+                            "text": visible_text,
+                            "raw_text": raw_text,
+                        }
+                        continue
+                    if minimax_thinking is not None and event.get("kind") == "finish":
+                        yield from flush_minimax_tail()
                     yield event
                     if event.get("kind") == "error":
                         return
+            yield from flush_minimax_tail()
 
 
     def _stream_blocking_claude(self, body_openai: dict[str, Any]) -> Iterator[dict[str, Any]]:

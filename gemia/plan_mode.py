@@ -39,10 +39,15 @@ PLAN_ALLOWED_TOOLS = frozenset({
     "grade",               # deterministic recipe only; does not mutate media/doc
     "get_shotlist",
     "get_lumenframe",
+    "get_design_state",
     "get_media_annotations",
     "get_safe_areas",
     "get_timeline",
+    "get_segment",
     "list_dir",
+    "list_cloud_guides",
+    "load_cloud_guide",
+    "list_point_libraries",
     "camera",              # deterministic transform recipe only
     "compose",             # deterministic framing recipe only
     "edit_grammar",        # deterministic cut plan only
@@ -63,7 +68,7 @@ PLAN_ALLOWED_TOOLS = frozenset({
 # Everything that edits, generates, registers assets, writes files/memory,
 # exports, or executes code.
 PLAN_BLOCKED_TOOLS = frozenset({
-    "add_overlay", "adjust_media", "animate_captions", "annotate_media",
+    "add_overlay", "adjust_media", "animate_captions", "annotate_media", "prepare_roughcut",
     "arrange_timeline", "assemble_quanta", "assemble_shotlist",
     "build", "color_grade", "composite", "copy_in",
     "draft_quanta", "draft_shotlist",
@@ -77,21 +82,28 @@ PLAN_BLOCKED_TOOLS = frozenset({
     "lumen_comp_to_timeline", "lumen_patch",
     "lumen_render", "lumen_render_range", "lumen_seek",
     "vector_motion",  # create/adjust write the lumenframe doc (catalog rides along)
+    "point_library",  # a package may create or mutate; host fails closed for planning
+    "install_point_library",
+    "rollback_point_library",
+    "publish_point_library",
     "kinetic_type",   # create/adjust add/rebuild an html title layer in the doc
     # grade/camera/compose/edit_grammar/rhythm_edit compute a recipe/plan only
     # (no doc mutation) → safe to run while planning, so intentionally NOT blocked.
-    "mix_audio", "move_file", "organize_files",
+    "mix_audio", "move_file", "organize_files", "file_delete",
     "paint_mask_effect", "paint_overlay",
+    "patch_design_state",
     "project_export", "project_export_otio", "project_import_otio",
     "narrate", "refine_quantum", "refine_shot", "remember", "render_preview",
-    "run_shell", "save_skill", "set_quanta", "set_shotlist", "smart_reframe",
+    "run_shell", "save_skill", "publish_cloud_guide", "set_quanta", "set_shotlist", "smart_reframe",
     "spawn_subtasks", "subtitle",
+    "stock_media",
     "timeline_add_track", "timeline_add_transition", "timeline_delete_clip",
     "timeline_insert_clip", "timeline_move_clip", "timeline_set_clip_effects",
     "timeline_set_clip_time", "timeline_set_track", "timeline_split_clip",
     "timeline_trim_clip", "timeline_undo",
+    "segment_edit",
     "transform_geometry", "update_quantum", "update_shot", "write_file",
-    "write_media_annotation",
+    "write_media_annotation", "verify_delivery",
 })
 
 # A turn that keeps hammering blocked tools is not planning — it is stuck.

@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from gemia.project_store import ProjectHandle
+from gemia.project_store import ProjectHandle, ProjectStore
 from gemia.tools import DISPATCHER
 from gemia.tools._context import AssetRegistry, ToolContext
 
@@ -104,3 +104,42 @@ def test_mutations_are_undoable(tmp_path):
     _call("timeline_undo", {"steps": 1}, ctx)
     hook = _call("get_shotlist", {}, ctx)["shotlist"]["scenes"][0]["shots"][0]
     assert hook["asset_id"] is None and hook["status"] == "draft"
+
+
+def test_fitted_shot_survives_update_and_new_store_load(tmp_path):
+    ctx = _ctx(tmp_path)
+    fitted = {
+        "scenes": [{"shots": [{
+            "id": "hook",
+            "description": "answer",
+            "duration_sec": 3,
+            "source": "search",
+            "asset_id": "session_asset",
+            "library_asset_id": "library_asset",
+            "source_in": 12.0,
+            "source_out": 15.0,
+            "status": "filled",
+            "evidence": {
+                "evidence_id": "library_asset:ann_1",
+                "annotation_id": "ann_1",
+                "library_asset_id": "library_asset",
+                "label": "approved answer",
+                "note": "keep this wording",
+                "tags": ["approved"],
+                "source": "user",
+                "confidence": 0.8,
+                "metadata": {"evidence": {"decision": "prefer", "version": 1}},
+                "algorithm_version": "evidence-fit-v1",
+            },
+        }]}],
+    }
+    _call("set_shotlist", {"shotlist": fitted}, ctx)
+    _call("update_shot", {"shot_id": "hook", "fields": {"notes": "unrelated edit"}}, ctx)
+
+    reloaded = ProjectStore(tmp_path / "project").load("v3-shotlist01")
+    shot = reloaded["shotlist"]["scenes"][0]["shots"][0]
+    assert shot["library_asset_id"] == "library_asset"
+    assert (shot["source_in"], shot["source_out"]) == (12.0, 15.0)
+    assert shot["evidence"]["annotation_id"] == "ann_1"
+    assert shot["evidence"]["note"] == "keep this wording"
+    assert shot["evidence"]["metadata"]["evidence"]["decision"] == "prefer"

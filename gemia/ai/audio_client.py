@@ -74,9 +74,16 @@ class AudioClient:
         self.dry_run = dry_run
         self.ssl_verify = os.environ.get("GEMIA_SSL_VERIFY", "1") != "0"
 
+        try:
+            from gemia import cloud_accounts
+
+            cloud_key = cloud_accounts.credential_for_provider("gemini")
+        except Exception:
+            cloud_key = "" if os.environ.get("LUMERI_CLOUD_ACCOUNTS", "").strip().lower() in {"1", "true", "yes"} else None
         gemini_key = (
-            os.environ.get("GEMINI_API_KEY", "")
-            or _read_config_key("gemini_api_key")
+            cloud_key
+            if cloud_key is not None
+            else os.environ.get("GEMINI_API_KEY", "") or _read_config_key("gemini_api_key")
         )
         self._backend = "gemini_native"
         self._api_key = gemini_key

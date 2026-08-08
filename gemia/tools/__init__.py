@@ -10,8 +10,8 @@ Implemented:
     - batch 0 + 1 (pure ffmpeg): analyze_media, edit_video, color_grade,
       add_overlay, export, composite, arrange_timeline, mix_audio,
       transform_geometry, edit_image, extract_frame
-    - batch 2.1 (sync provider, real money): generate_image (Nano Banana 2
-      via Vertex)
+    - batch 2.1 (subscription provider, quota-backed): generate_image (GPT
+      Image 2 via the local OpenAI subscription bridge)
     - batch 2.2/2.3 (provider media): generate_video (Veo LRO via Vertex),
       generate_audio (Lyria predict via Vertex)
     - batch 3 (v4 build): web_search / web_open / fetch (host-side internet),
@@ -39,6 +39,7 @@ from gemia.tools import add_overlay as _add_overlay
 from gemia.tools import adjust_media as _adjust_media
 from gemia.tools import align_audio as _align_audio
 from gemia.tools import detect_beats as _detect_beats
+from gemia.tools import design_state as _design_state
 from gemia.tools import analyze_media as _analyze_media
 from gemia.tools import animate_captions as _animate_captions
 from gemia.tools import arrange_timeline as _arrange_timeline
@@ -70,12 +71,16 @@ from gemia.tools import mix_audio as _mix_audio
 from gemia.tools import narrate as _narrate
 from gemia.tools import paint as _paint
 from gemia.tools import probe_media as _probe_media
+from gemia.tools import roughcut as _roughcut
 from gemia.tools import remember as _remember
 from gemia.tools import run_shell as _run_shell
 from gemia.tools import safe_areas as _safe_areas
 from gemia.tools import save_skill as _save_skill
+from gemia.tools import skill_cloud as _skill_cloud
 from gemia.tools import search_library as _search_library
 from gemia.tools import vector_motion as _vector_motion
+from gemia.tools import point_library as _point_library
+from gemia.tools import verify_delivery as _verify_delivery
 from gemia.tools import grade as _grade
 from gemia.tools import kinetic_type as _kinetic_type
 from gemia.tools import edit_grammar as _edit_grammar
@@ -83,6 +88,7 @@ from gemia.tools import camera as _camera
 from gemia.tools import compose as _compose
 from gemia.tools import rhythm_edit as _rhythm_edit
 from gemia.tools import search_media as _search_media
+from gemia.tools import stock_media as _stock_media
 from gemia.tools import draft_quanta as _draft_quanta
 from gemia.tools import draft_shotlist as _draft_shotlist
 from gemia.tools import quanta as _quanta
@@ -136,6 +142,7 @@ _REAL: dict[str, Dispatcher] = {
     "composite":                 _composite.dispatch,
     "copy_in":                   _files.dispatch_copy_in,
     "detect_beats":              _detect_beats.dispatch,
+    "get_design_state":          _design_state.dispatch_get,
     "draft_quanta":              _draft_quanta.dispatch,
     "draft_shotlist":            _draft_shotlist.dispatch,
     "edit_audio":                _edit_audio.dispatch,
@@ -160,6 +167,7 @@ _REAL: dict[str, Dispatcher] = {
     "get_quanta":                _quanta.dispatch_get,
     "get_shotlist":              _shotlist.dispatch_get,
     "get_timeline":              _timeline.dispatch_get,
+    "get_segment":               _timeline.dispatch_get_segment,
     "inspect_lottie":            _lottie.dispatch_inspect,
     "inspect_timeline":          _inspect_timeline.dispatch,
     "kill_job":                  _build.dispatch_kill,
@@ -189,6 +197,12 @@ _REAL: dict[str, Dispatcher] = {
     "lumen_speed_ramp":          _layer.dispatch_lumen_speed_ramp,
     "lumen_time_remap":          _layer.dispatch_lumen_time_remap,
     "vector_motion":             _vector_motion.dispatch,
+    "point_library":              _point_library.dispatch,
+    "install_point_library":      _point_library.dispatch_install,
+    "list_point_libraries":       _point_library.dispatch_list,
+    "rollback_point_library":     _point_library.dispatch_rollback,
+    "publish_point_library":      _point_library.dispatch_publish,
+    "verify_delivery":           _verify_delivery.dispatch,
     "grade":                     _grade.dispatch,
     "kinetic_type":              _kinetic_type.dispatch,
     "edit_grammar":              _edit_grammar.dispatch,
@@ -201,7 +215,9 @@ _REAL: dict[str, Dispatcher] = {
     "organize_files":            _files.dispatch_organize_files,
     "paint_mask_effect":         _paint.dispatch_mask_effect,
     "paint_overlay":             _paint.dispatch_overlay,
+    "patch_design_state":        _design_state.dispatch_patch,
     "probe_media":               _probe_media.dispatch,
+    "prepare_roughcut":          _roughcut.dispatch,
     "project_export":            _timeline.dispatch_project_export,
     "project_export_otio":       _timeline.dispatch_export_otio,
     "project_import_otio":       _timeline.dispatch_import_otio,
@@ -212,10 +228,14 @@ _REAL: dict[str, Dispatcher] = {
     "remember":                  _remember.dispatch,
     "render_preview":            _timeline.dispatch_render_preview,
     "run_shell":                 _run_shell.dispatch,
+    "publish_cloud_guide":       _skill_cloud.dispatch_publish_cloud_guide,
+    "list_cloud_guides":         _skill_cloud.dispatch_list_cloud_guides,
+    "load_cloud_guide":          _skill_cloud.dispatch_load_cloud_guide,
     "save_skill":                _save_skill.dispatch_save_skill,
     "search_frames":             _search_frames.dispatch,
     "search_library":            _search_library.dispatch,
     "search_media":              _search_media.dispatch,
+    "stock_media":               _stock_media.dispatch,
     "set_quanta":                _quanta.dispatch_set,
     "set_shotlist":              _shotlist.dispatch_set,
     "smart_reframe":             _smart_reframe.dispatch,
@@ -231,6 +251,7 @@ _REAL: dict[str, Dispatcher] = {
     "timeline_set_track":        _timeline.dispatch_set_track,
     "timeline_split_clip":       _timeline.dispatch_split,
     "timeline_trim_clip":        _timeline.dispatch_trim,
+    "segment_edit":              _timeline.dispatch_segment_edit,
     "timeline_undo":             _timeline.dispatch_undo,
     "transform_geometry":        _transform_geometry.dispatch,
     "update_quantum":            _quanta.dispatch_update_quantum,

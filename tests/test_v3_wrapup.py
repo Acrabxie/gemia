@@ -1,19 +1,16 @@
 """Graceful non-success wrap-up for AgentLoopV3 (opencode pattern #5).
 
-When the budget is exhausted, the doom-loop guard fires, or the model stream
-errors out, ``_drive_turn`` used to emit a bare turn_error and return — the user
-got an unexplained stop. This adds an ADDITIVE graceful wrap-up: at each of those
-non-success exit points, *in addition to* the existing turn_error event, the loop emits a short
-``turn_wrapup`` event whose ``message`` explains 'stopped because X; here's what
-was / wasn't done', synthesized LOCALLY (no extra model call) from the turn's
-tool / asset counts.
+When the budget is exhausted or the doom-loop guard fires, ``_drive_turn``
+emits a short
+``turn_wrapup`` event whose ``message`` explains the actual stop reason in one
+natural sentence, synthesized LOCALLY (no extra model call). Tool / asset counts
+stay as structured event telemetry instead of becoming a canned status report.
 
 Pinned here:
-  * a fake client that emits a model stream error → ``turn_wrapup`` is emitted
-    with the stop reason, alongside the existing ``turn_error``;
+  * a retryable model stream error reconnects six times with increasing delay,
+    then emits one ``turn_error`` and no explanatory ``turn_wrapup``;
   * a normal successful turn does NOT emit a spurious ``turn_wrapup``;
-  * an exception raised inside wrap-up synthesis does not break the turn (the
-    original turn_error still returns cleanly).
+  * non-retryable model errors fail immediately.
 """
 from __future__ import annotations
 
@@ -44,10 +41,14 @@ class _StreamErrors:
 class _PartialThenErrors:
     model = "fake"
 
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def stream_turn(
         self, messages: list[dict[str, Any]], *, tools=None, temperature: float = 0.7
     ) -> AsyncIterator[dict[str, Any]]:
         del messages, tools, temperature
+        self.calls += 1
         yield {"kind": "text_delta", "text": "starting"}
         yield {
             "kind": "tool_call_start",
@@ -59,9 +60,15 @@ class _PartialThenErrors:
         yield {"kind": "error", "error": "upstream failed mid-frame"}
 
 
-def test_wrapup_emitted_on_stream_error(tmp_path: Path) -> None:
-    """When the model stream errors, a ``turn_wrapup`` event is emitted with
-    the stop reason — IN ADDITION to the existing ``turn_error``."""
+def test_stream_error_retries_six_times_then_emits_only_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(loop_mod.asyncio, "sleep", fake_sleep)
     client = _StreamErrors()
     events: list[dict[str, Any]] = []
     loop = AgentLoopV3(
@@ -73,28 +80,74 @@ def test_wrapup_emitted_on_stream_error(tmp_path: Path) -> None:
 
     asyncio.run(loop.run_turn("build something broken"))
 
-    # The existing turn_error is still emitted (not replaced).
+    assert client.calls == 7  # initial attempt + six reconnects
+    assert delays == [2.0, 4.0, 8.0, 16.0, 32.0, 64.0]
+    resets = [e for e in events if e.get("kind") == "model_stream_reset"]
+    assert [event["retry"] for event in resets] == [1, 2, 3, 4, 5, 6]
+    assert [event["delay_sec"] for event in resets] == delays
+    assert {event["error_class"] for event in resets} == {"stream_failure"}
+
     turn_errors = [e for e in events if e.get("kind") == "turn_error"]
     assert len(turn_errors) == 1
+    assert turn_errors[0]["reason"] == "stream_error"
     assert "simulated stream failure" in turn_errors[0]["error"]
+    assert not [e for e in events if e.get("kind") == "turn_wrapup"]
 
-    # The ADDITIVE wrap-up event is emitted with the stop reason and a message.
-    wrapups = [e for e in events if e.get("kind") == "turn_wrapup"]
-    assert len(wrapups) == 1, "expected exactly one graceful wrap-up event"
-    wrap = wrapups[0]
-    assert wrap["reason"] == "stream_error"
-    # The message explains the stop AND what was / wasn't done.
-    msg = wrap["message"]
-    assert "我先停在这里" in msg
-    assert "模型连接" in msg
-    assert wrap["tools_failed"] == 0
-    assert wrap["tools_succeeded"] == 0
-    assert wrap["assets_produced"] == 0
 
-    # Ordering: the wrap-up comes AFTER the turn_error (explains it).
-    ti_err = next(i for i, e in enumerate(events) if e.get("kind") == "turn_error")
-    ti_wrap = next(i for i, e in enumerate(events) if e.get("kind") == "turn_wrapup")
-    assert ti_wrap > ti_err
+class _RecoversAfterThreeDisconnects:
+    model = "fake"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def stream_turn(
+        self, messages: list[dict[str, Any]], *, tools=None, temperature: float = 0.7
+    ) -> AsyncIterator[dict[str, Any]]:
+        del messages, tools, temperature
+        self.calls += 1
+        if self.calls <= 3:
+            yield {"kind": "text_delta", "text": "discard this partial"}
+            yield {"kind": "error", "error": "connection reset"}
+            return
+        yield {"kind": "text_delta", "text": "recovered response"}
+        yield {"kind": "finish", "reason": "stop"}
+
+
+def test_stream_reconnect_recovers_without_final_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(loop_mod.asyncio, "sleep", fake_sleep)
+    client = _RecoversAfterThreeDisconnects()
+    events: list[dict[str, Any]] = []
+    loop = AgentLoopV3(
+        session_id="stream_recovers",
+        output_dir=tmp_path,
+        gemini_client=client,  # type: ignore[arg-type]
+        emit_event=events.append,
+    )
+
+    asyncio.run(loop.run_turn("build something"))
+
+    assert client.calls == 4
+    assert delays == [2.0, 4.0, 8.0]
+    assert len([e for e in events if e.get("kind") == "model_stream_reset"]) == 3
+    assert {
+        e["error_class"]
+        for e in events
+        if e.get("kind") == "model_stream_reset"
+    } == {"connection_reset"}
+    assert not [e for e in events if e.get("kind") == "turn_error"]
+    assert [e for e in events if e.get("kind") == "turn_complete"]
+    assert any(
+        event.get("kind") == "model_text_delta"
+        and event.get("delta") == "recovered response"
+        for event in events
+    )
 
 
 def test_partial_text_then_error_never_dispatches_or_completes(
@@ -107,22 +160,63 @@ def test_partial_text_then_error_never_dispatches_or_completes(
         dispatched = True
         return {"ok": True}
 
+    async def no_wait(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(loop_mod.asyncio, "sleep", no_wait)
     monkeypatch.setitem(loop_mod.DISPATCHER, "partial_tool", forbidden_dispatch)
     events: list[dict[str, Any]] = []
+    client = _PartialThenErrors()
     loop = AgentLoopV3(
         session_id="wrapup_partial_error",
         output_dir=tmp_path,
-        gemini_client=_PartialThenErrors(),  # type: ignore[arg-type]
+        gemini_client=client,  # type: ignore[arg-type]
         emit_event=events.append,
     )
 
     asyncio.run(loop.run_turn("make an asset"))
 
     assert dispatched is False
+    assert client.calls == 7
+    assert len([e for e in events if e.get("kind") == "model_stream_reset"]) == 6
     assert len([e for e in events if e.get("kind") == "turn_error"]) == 1
-    assert len([e for e in events if e.get("kind") == "turn_wrapup"]) == 1
+    assert not [e for e in events if e.get("kind") == "turn_wrapup"]
     assert not [e for e in events if e.get("kind") == "turn_complete"]
     assert not [e for e in events if e.get("kind") == "tool_exec_start"]
+
+
+class _AuthErrors:
+    model = "fake"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def stream_turn(
+        self, messages: list[dict[str, Any]], *, tools=None, temperature: float = 0.7
+    ) -> AsyncIterator[dict[str, Any]]:
+        del messages, tools, temperature
+        self.calls += 1
+        yield {"kind": "error", "error": "HTTP 401: invalid API key"}
+
+
+def test_non_retryable_stream_error_fails_immediately(tmp_path: Path) -> None:
+    client = _AuthErrors()
+    events: list[dict[str, Any]] = []
+    loop = AgentLoopV3(
+        session_id="wrapup_auth_error",
+        output_dir=tmp_path,
+        gemini_client=client,  # type: ignore[arg-type]
+        emit_event=events.append,
+    )
+
+    asyncio.run(loop.run_turn("build something"))
+
+    assert client.calls == 1
+    assert not [e for e in events if e.get("kind") == "model_stream_reset"]
+    turn_errors = [e for e in events if e.get("kind") == "turn_error"]
+    assert len(turn_errors) == 1
+    assert turn_errors[0]["error"] == "HTTP 401: invalid API key"
+    assert not [e for e in events if e.get("kind") == "turn_wrapup"]
 
 
 class _AlwaysSucceeds:
@@ -186,46 +280,8 @@ def test_no_wrapup_on_successful_turn(tmp_path: Path, monkeypatch) -> None:
     assert not [e for e in events if e.get("kind") == "turn_wrapup"]
 
 
-def test_wrapup_synthesis_exception_does_not_break_turn(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """If the wrap-up message synthesis raises, the turn must not break: the
-    original stream error is still emitted, no exception escapes, and no wrap-up
-    event leaks. This proves the try/except contract — wrap-up failures are
-    swallowed."""
-
-    def _boom(*args: Any, **kwargs: Any) -> str:
-        raise RuntimeError("synthesis blew up")
-
-    # Make the LOCAL synthesis explode at the exact point the wrap-up runs.
-    monkeypatch.setattr(
-        AgentLoopV3, "_synthesize_wrapup_message", staticmethod(_boom)
-    )
-
-    client = _StreamErrors()
-    events: list[dict[str, Any]] = []
-    loop = AgentLoopV3(
-        session_id="wrapup_boom",
-        output_dir=tmp_path,
-        gemini_client=client,  # type: ignore[arg-type]
-        emit_event=events.append,
-    )
-
-    # Must NOT raise — the wrap-up try/except swallows the synthesis failure.
-    asyncio.run(loop.run_turn("build something broken"))
-
-    # The existing turn_error is still emitted (the loop still stopped cleanly
-    # via its normal stream-error path).
-    turn_errors = [e for e in events if e.get("kind") == "turn_error"]
-    assert len(turn_errors) == 1
-    # The wrap-up emission was attempted but its synthesis raised, so no
-    # turn_wrapup event leaks (it was swallowed before emit).
-    assert not [e for e in events if e.get("kind") == "turn_wrapup"]
-
-
 def test_synthesize_wrapup_message_pure_helper() -> None:
-    """Unit-level proof that the LOCAL synthesis builds a sensible explanatory
-    summary from the stop reason + counts, with no model call involved."""
+    """The LOCAL fallback names the stop naturally without a report template."""
     # Doom loop, work partially done.
     msg = AgentLoopV3._synthesize_wrapup_message(
         "doom_loop",
@@ -234,11 +290,11 @@ def test_synthesize_wrapup_message_pure_helper() -> None:
         assets_produced=1,
         tool_name="echo_tool",
     )
-    assert "同一步骤连续重复" in msg
+    assert "陷入了重复" in msg
     assert "echo_tool" not in msg
-    assert "产出了 1 个素材" in msg
-    assert "完成了 2 个执行步骤" in msg
-    assert "有 5 个步骤没有完成" in msg
+    assert "已完成：" not in msg
+    assert "仍待处理：" not in msg
+    assert "你让我继续" not in msg
 
     # Budget exhaustion, nothing done.
     msg2 = AgentLoopV3._synthesize_wrapup_message(
@@ -248,8 +304,7 @@ def test_synthesize_wrapup_message_pure_helper() -> None:
         assets_produced=0,
     )
     assert "执行预算已经用完" in msg2
-    assert "还没有形成可交付的修改" in msg2
-    assert "没有记录到执行失败" in msg2
+    assert "未完成的部分没有被算作成功" in msg2
 
     # Doom-loop reporting stays human-facing and does not leak tool names.
     msg3 = AgentLoopV3._synthesize_wrapup_message(
@@ -259,15 +314,27 @@ def test_synthesize_wrapup_message_pure_helper() -> None:
         assets_produced=0,
         tool_name="echo_tool",
     )
-    assert "同一步骤连续重复" in msg3
+    assert "陷入了重复" in msg3
     assert "echo_tool" not in msg3
 
-    # Stream error path.
-    msg4 = AgentLoopV3._synthesize_wrapup_message(
-        "stream_error",
-        tools_succeeded=1,
-        tools_failed=0,
+    # Unknown mechanical stops use a generic fallback; there is no host-owned
+    # incomplete-goal verdict or fixed "cannot count as complete" sentence.
+    msg5 = AgentLoopV3._synthesize_wrapup_message(
+        "unknown_stop",
+        tools_succeeded=15,
+        tools_failed=4,
         assets_produced=0,
     )
-    assert "模型连接" in msg4
-    assert "完成了 1 个执行步骤" in msg4
+    assert msg5 == "这轮执行没有完整结束。"
+    assert "还不能算完成" not in msg5
+    assert "我先停在这里" not in msg5
+    assert "你让我继续" not in msg5
+
+    source = Path(loop_mod.__file__).read_text(encoding="utf-8")
+    assert "执行过程中模型连接中断了，未完成的部分没有被算作成功。" not in source
+
+    static_root = Path(loop_mod.__file__).resolve().parent.parent / "static" / "v3"
+    frontend = (static_root / "v3.js").read_text(encoding="utf-8")
+    preview = (static_root / "preview.html").read_text(encoding="utf-8")
+    assert "Error: ${errorReason}" in frontend
+    assert "Error: ${errorReason}" in preview

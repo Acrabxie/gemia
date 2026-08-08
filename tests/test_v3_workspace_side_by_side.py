@@ -38,6 +38,17 @@ def test_horizontal_module_drop_pairs_width_weights() -> None:
     assert "function ensureSideBySide(" in source
 
 
+def test_vertical_module_drop_forces_rows_and_uses_vertical_cue() -> None:
+    source = (ROOT / "static/v3/v3.js").read_text(encoding="utf-8")
+    css = (ROOT / "static/v3/v3.css").read_text(encoding="utf-8")
+
+    assert "else ensureStacked(draggedModule, dropTarget)" in source
+    assert "function ensureStacked(" in source
+    assert 'target.dataset.dropAxis = dropHorizontal ? "horizontal" : "vertical"' in source
+    assert '.workspace-module[data-drop-axis="vertical"].is-drop-before' in css
+    assert '.workspace-module[data-drop-axis="vertical"].is-drop-after' in css
+
+
 def test_stage_tabs_are_draggable_for_reorder() -> None:
     source = (ROOT / "static/v3/v3.js").read_text(encoding="utf-8")
     css = (ROOT / "static/v3/v3.css").read_text(encoding="utf-8")

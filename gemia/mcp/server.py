@@ -3,7 +3,7 @@
 ``build_server()`` returns a low-level ``mcp.server.Server`` exposing the
 curated Phase 1 toolset (18 tools: 13 read/timeline 1:1 verbs + 5 MCP-native
 lifecycle/import tools). Every 1:1 verb call is routed through
-``SessionRunner.run_verb`` — the single choke point that re-applies the plan
+``SessionRunner.execute_capability`` — the single choke point that re-applies the plan
 gate then the budget gate in agent-loop order against the SAME ``BudgetGuard``
 instance, and mirrors ``tool_exec_*`` SSE events with an additive
 ``origin: "mcp"`` field (D7).
@@ -45,6 +45,7 @@ from gemia.mcp.toolset import (
     MCP_NATIVE_PLAN_SAFE,
     MCP_NATIVE_TOOLS,
     MCP_READ_ONLY,
+    MCP_TOOLSET,
     PHASE1_TOOLSET,
     internal_verb_description,
     mcp_input_schema,
@@ -65,7 +66,7 @@ _INSTALL_HINT = (
 
 # Server identity advertised in the MCP initialize handshake.
 SERVER_NAME = "lumeri"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "1.0.0"
 
 
 def _require_mcp():  # -> module `mcp`
@@ -208,7 +209,7 @@ def build_server(manager: SessionManager | None = None):
         args = dict(arguments or {})
         if name in MCP_NATIVE_TOOLS:
             return await _handle_native(mgr, name, args)
-        # 1:1 verb → the single choke point.
+        # 1:1 verb → mechanical adapter over the shared choke point.
         session_id = args.pop("session_id", None)
         if not isinstance(session_id, str) or not session_id:
             raise ValueError("missing required parameter: session_id")
@@ -219,7 +220,12 @@ def build_server(manager: SessionManager | None = None):
         emit_progress = _make_progress_forwarder(server, types)
         try:
             return await asyncio.to_thread(
-                runner.run_verb, name, args, emit_progress=emit_progress
+                runner.execute_capability,
+                name,
+                args,
+                origin="mcp",
+                allowed_names=MCP_TOOLSET,
+                emit_progress=emit_progress,
             )
         except VerbGateError as exc:
             # Surface the structured gate payload as a tool error (isError:true).

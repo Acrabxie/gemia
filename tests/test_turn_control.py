@@ -3,7 +3,6 @@ from __future__ import annotations
 import pytest
 
 from gemia.turn_control import (
-    E_CLARIFICATION_LIMIT,
     E_CLARIFICATION_POLICY,
     ClarificationDecisionKind,
     ClarificationGuard,
@@ -63,7 +62,7 @@ def test_safe_conversation_requires_full_match() -> None:
     "text",
     [
         # The reported regression: a capability question was forced through the
-        # actionable ledger and hard-errored as "no objective progress".
+        # action tool surface and hard-errored as "no objective progress".
         "你有vector motion啦？",
         "你有 vector motion 吗？",
         "你有没有转场功能？",
@@ -81,9 +80,9 @@ def test_safe_conversation_requires_full_match() -> None:
     ],
 )
 def test_capability_and_existence_questions_are_information(text: str) -> None:
-    # These end honestly with prose, not a goal mutation — they must NOT route
-    # to the actionable ledger (which would demand a tool mutation and stop the
-    # turn as incomplete when only reads happened).
+    # These end honestly with prose, not a goal mutation. INFORMATION keeps
+    # their tool surface empty; completion itself is owned by whether the model
+    # actually committed to execution with a tool call.
     assert classify_turn_intent(text) is TurnIntent.INFORMATION
 
 
@@ -172,10 +171,10 @@ def test_first_blocking_reason_may_ask(reason: ClarificationReason) -> None:
     assert result.question == "Which source should I use?"
     assert result.error_code is None
     assert guard.asks_used == 1
-    assert guard.can_ask is False
+    assert guard.can_ask is True
 
 
-def test_second_real_ask_is_denied_with_structured_limit_error() -> None:
+def test_later_genuinely_blocking_decision_is_still_allowed() -> None:
     guard = ClarificationGuard()
     guard.decide(ClarificationReason.MISSING_SOURCE, question="source?")
 
@@ -185,12 +184,12 @@ def test_second_real_ask_is_denied_with_structured_limit_error() -> None:
         defaults={"choice": "A"},
     )
 
-    assert result.decision is ClarificationDecisionKind.DENY
-    assert result.error_code == E_CLARIFICATION_LIMIT
+    assert result.decision is ClarificationDecisionKind.ASK
+    assert result.error_code is None
     assert result.reason is ClarificationReason.USER_REQUESTED_CHOICE
     assert result.question == "A or B?"
     assert result.defaults == {"choice": "A"}
-    assert guard.asks_used == 1
+    assert guard.asks_used == 2
 
 
 def test_creative_preference_uses_explicit_defaults_without_asking() -> None:
@@ -229,7 +228,7 @@ def test_creative_preference_without_defaults_is_policy_denied() -> None:
     assert guard.asks_used == 0
 
 
-def test_default_resolution_does_not_bypass_or_consume_real_ask_limit() -> None:
+def test_default_resolution_does_not_consume_a_blocking_ask() -> None:
     guard = ClarificationGuard()
     guard.evaluate(ClarificationReason.MISSING_SOURCE, question="source?")
 
@@ -237,11 +236,11 @@ def test_default_resolution_does_not_bypass_or_consume_real_ask_limit() -> None:
         ClarificationReason.CREATIVE_PREFERENCE,
         defaults={"style": "clean"},
     )
-    limited = guard.evaluate(ClarificationReason.IRREVERSIBLE_ACTION)
+    later = guard.evaluate(ClarificationReason.IRREVERSIBLE_ACTION)
 
     assert creative.decision is ClarificationDecisionKind.DEFAULT
-    assert limited.error_code == E_CLARIFICATION_LIMIT
-    assert guard.asks_used == 1
+    assert later.decision is ClarificationDecisionKind.ASK
+    assert guard.asks_used == 2
 
 
 def test_reset_starts_a_new_turn() -> None:

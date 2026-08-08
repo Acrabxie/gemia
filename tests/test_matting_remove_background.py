@@ -14,9 +14,9 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from gemia.picture import matting
 from gemia.tools import edit_image
 from gemia.tools._context import AssetRegistry, ToolContext
-from gemia.picture import matting
 
 
 def _ctx(tmp_path: Path) -> ToolContext:
@@ -48,6 +48,16 @@ def test_schema_lists_remove_background() -> None:
     ei = next(s for s in TOOL_SCHEMAS if s["function"]["name"] == "edit_image")
     enum = ei["function"]["parameters"]["properties"]["operation"]["enum"]
     assert "remove_background" in enum
+
+
+def test_model_candidates_include_packaged_data_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    packaged_data = tmp_path / "packaged-data"
+    monkeypatch.delenv("LUMERI_MATTING_MODEL", raising=False)
+    monkeypatch.setattr(matting, "data_dir", lambda: packaged_data)
+
+    assert packaged_data / "u2net_human_seg.onnx" in matting._model_candidates()
 
 
 def test_remove_background_transparent_cutout(tmp_path: Path) -> None:

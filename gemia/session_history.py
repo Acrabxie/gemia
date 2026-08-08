@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import tempfile
@@ -12,7 +13,7 @@ from urllib.parse import unquote, urlparse
 
 from gemia.artifacts import is_document_artifact_output, is_media_output
 
-SESSION_SCHEMA_VERSION = 1
+SESSION_SCHEMA_VERSION = 2
 SESSION_ROOT = Path.home() / ".gemia" / "sessions"
 CURRENT_SESSION_PATH = SESSION_ROOT / "current.json"
 SNAPSHOT_ROOT = SESSION_ROOT / "history"
@@ -30,10 +31,22 @@ def empty_session(account_id: str | None = None) -> dict[str, Any]:
         "version": SESSION_SCHEMA_VERSION,
         "account_id": account_id,
         "session_id": "current",
+        # ``session_id`` above remains the snapshot/UI id for backward
+        # compatibility.  The v3 runtime id must be stored separately because
+        # load_session_snapshot() replaces session_id with the snapshot file
+        # name.  Conflating the two was why history could restore chat but not
+        # the real project/SSE session.
+        "v3_session_id": None,
+        "project_id": None,
+        "run_id": None,
+        "project_revision": 0,
+        "production_state": None,
+        "chat_only": True,
         "title": "Gemia Session",
         "created_at": now,
         "updated_at": now,
         "messages": [],
+        "timeline_markers": [],
         "project_state": None,
         "project": None,
         "server_video_path": None,
@@ -73,12 +86,18 @@ def list_session_snapshots(limit: int = 30, account_id: str | None = None) -> li
     """Return recent snapshot metadata without full chat/project payloads."""
     _ensure_roots(account_id)
     items: list[dict[str, Any]] = []
+    seen_linked_sessions: set[tuple[str, str, str]] = set()
     snapshots = snapshot_root(account_id)
     for path in sorted(snapshots.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
+        linked_identity = _linked_snapshot_identity(payload)
+        if linked_identity is not None:
+            if linked_identity in seen_linked_sessions:
+                continue
+            seen_linked_sessions.add(linked_identity)
         items.append(
             {
                 "id": path.stem,
@@ -87,6 +106,12 @@ def list_session_snapshots(limit: int = 30, account_id: str | None = None) -> li
                 "updated_at": str(payload.get("updated_at") or ""),
                 "message_count": len(payload.get("messages") or []),
                 "clip_count": _clip_count(payload.get("project") or payload.get("project_state")),
+                "v3_session_id": _optional_str(payload.get("v3_session_id")),
+                "project_id": _optional_str(payload.get("project_id")),
+                "run_id": _optional_str(payload.get("run_id")),
+                "project_revision": _non_negative_int(payload.get("project_revision")),
+                "production_state": _optional_str(payload.get("production_state")),
+                "chat_only": bool(payload.get("chat_only", not payload.get("project_id"))),
             }
         )
         if len(items) >= max(int(limit), 1):
@@ -141,8 +166,18 @@ def _normalize_session(payload: dict[str, Any], account_id: str | None = None) -
     session["version"] = SESSION_SCHEMA_VERSION
     session["account_id"] = account_id
     session["session_id"] = str(session.get("session_id") or "current")
+    session["v3_session_id"] = _optional_str(session.get("v3_session_id"))
+    session["project_id"] = _optional_str(session.get("project_id"))
+    session["run_id"] = _optional_str(session.get("run_id"))
+    session["project_revision"] = _non_negative_int(session.get("project_revision"))
+    session["production_state"] = _optional_str(session.get("production_state"))
+    # Old snapshots without a project remain readable as chat only.  A durable
+    # project reference must never masquerade as chat-only: its complete
+    # session/project/run tuple is validated by the fail-closed resume path.
+    session["chat_only"] = not bool(session["project_id"])
     session["title"] = _session_title(session)
     session["messages"] = _messages(session.get("messages"))
+    session["timeline_markers"] = _timeline_markers(session.get("timeline_markers"))
     session["creative_runtime_task_id"] = _optional_str(session.get("creative_runtime_task_id"))
     session["messages"] = _settle_transient_status_messages(
         session["messages"],
@@ -191,16 +226,124 @@ def _messages(value: Any) -> list[dict[str, Any]]:
         if role not in {"user", "status"} or not isinstance(content, str):
             continue
         migrated_content = _migrate_legacy_artifact_message(content[:8000]) if role == "status" else content[:8000]
-        messages.append(
+        message = {
+            "id": str(item.get("id") or f"restored_{len(messages)}"),
+            "role": role,
+            "content": migrated_content,
+            "statusType": _optional_str(item.get("statusType")),
+            "timestamp": int(item.get("timestamp") or 0),
+        }
+        skill_space = _skill_space_refs(item.get("skillSpace")) if role == "user" else []
+        if skill_space:
+            message["skillSpace"] = skill_space
+        workspace_context = _workspace_context_refs(item.get("workspaceContext")) if role == "user" else []
+        if workspace_context:
+            message["workspaceContext"] = workspace_context
+        messages.append(message)
+    return messages
+
+
+def _skill_space_refs(value: Any) -> list[dict[str, str]]:
+    """Persist only immutable, display-safe Skill Space references."""
+    if not isinstance(value, list):
+        return []
+    refs: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for item in value[:12]:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").strip().lower()
+        artifact_id = str(item.get("id") or "").strip()
+        version = str(item.get("version") or "").strip()
+        digest = str(item.get("content_sha256") or "").strip().lower()
+        if kind not in {"skill", "workflow"}:
+            continue
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", artifact_id):
+            continue
+        if not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", version):
+            continue
+        if digest and not re.fullmatch(r"[a-f0-9]{64}", digest):
+            continue
+        key = (kind, artifact_id, version, digest)
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append(
             {
-                "id": str(item.get("id") or f"restored_{len(messages)}"),
-                "role": role,
-                "content": migrated_content,
-                "statusType": _optional_str(item.get("statusType")),
-                "timestamp": int(item.get("timestamp") or 0),
+                "kind": kind,
+                "id": artifact_id,
+                "version": version,
+                "title": str(item.get("title") or artifact_id).strip()[:120],
+                "publisher": str(item.get("publisher") or "").strip()[:120],
+                "visibility": str(item.get("visibility") or "private").strip()[:16],
+                "access": str(item.get("access") or "owned").strip()[:16],
+                "content_sha256": digest,
             }
         )
-    return messages
+    return refs
+
+
+def _workspace_context_refs(value: Any) -> list[dict[str, Any]]:
+    """Persist only explicit, current-Project references dragged by the creator."""
+    if not isinstance(value, list):
+        return []
+    allowed_kinds = {"timeline_clip", "canvas_layer", "outline_scene", "outline_shot"}
+    identifier = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}")
+    refs: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in value[:12]:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").strip().lower()
+        ref_id = str(item.get("id") or "").strip()
+        key = (kind, ref_id)
+        if kind not in allowed_kinds or not identifier.fullmatch(ref_id) or key in seen:
+            continue
+        seen.add(key)
+        ref: dict[str, Any] = {
+            "kind": kind,
+            "id": ref_id,
+            "label": str(item.get("label") or ref_id).strip()[:160],
+        }
+        for field in ("asset_id", "track_id", "scene_id", "layer_type"):
+            safe = str(item.get(field) or "").strip()
+            if safe and identifier.fullmatch(safe):
+                ref[field] = safe
+        surface = str(item.get("surface") or "").strip().lower()
+        if surface in {"timeline", "preview", "outline"}:
+            ref["surface"] = surface
+        for field in ("start", "duration", "frame"):
+            try:
+                number = float(item.get(field))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(number) and number >= 0:
+                ref[field] = round(number, 6)
+        refs.append(ref)
+    return refs
+
+
+def _timeline_markers(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    markers: list[dict[str, Any]] = []
+    for item in value[:500]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            time_seconds = float(item.get("time"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(time_seconds) or time_seconds < 0:
+            continue
+        markers.append(
+            {
+                "time": round(time_seconds, 3),
+                "label": str(item.get("label") or "")[:160],
+                "color": str(item.get("color") or "")[:32],
+            }
+        )
+    return markers
 
 
 def _settle_transient_status_messages(messages: list[dict[str, Any]], task_id: str | None) -> list[dict[str, Any]]:
@@ -531,9 +674,37 @@ def _session_title(session: dict[str, Any]) -> str:
 
 
 def _write_snapshot(session: dict[str, Any], account_id: str | None = None) -> None:
+    linked_identity = _linked_snapshot_identity(session)
+    if linked_identity is not None:
+        snapshots = snapshot_root(account_id)
+        for path in sorted(
+            snapshots.glob("*.json"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        ):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if _linked_snapshot_identity(payload) == linked_identity:
+                # A durable v3 session/run is one history item.  Auto-save and
+                # resume update that item in place instead of manufacturing a
+                # new timestamped duplicate on every browser reload.
+                _atomic_write_json(path, session)
+                return
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     slug = _slug(session.get("title") or "session")
     _atomic_write_json(snapshot_root(account_id) / f"{timestamp}-{slug}.json", session)
+
+
+def _linked_snapshot_identity(payload: Any) -> tuple[str, str, str] | None:
+    if not isinstance(payload, dict):
+        return None
+    identity = tuple(
+        str(payload.get(key) or "").strip()
+        for key in ("v3_session_id", "project_id", "run_id")
+    )
+    return identity if all(identity) else None
 
 
 def _prune_snapshots(account_id: str | None = None) -> None:
@@ -604,6 +775,13 @@ def _optional_str(value: Any) -> str | None:
         return None
     text = str(value)
     return text if text else None
+
+
+def _non_negative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _slug(value: Any) -> str:

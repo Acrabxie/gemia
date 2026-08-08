@@ -4,6 +4,7 @@
 任意网络出网的工具必须从模型工具面剔除；创作类工具保持完整。
 """
 from gemia.agent_loop_v3 import _REMOTE_DENY_TOOLS, _strip_remote_denied
+from gemia.tool_router import PRIVATE_SYSTEM_TOOLS
 from gemia.tools import DISPATCHER
 
 
@@ -17,21 +18,27 @@ def test_deny_set_covers_host_reaching_tools():
         "read_file", "list_dir", "write_file",
         "copy_in", "move_file", "organize_files",
         "fetch", "web_search", "web_open",
+        "recall_skills",
     ]:
         assert name in _REMOTE_DENY_TOOLS, name
+    assert PRIVATE_SYSTEM_TOOLS <= _REMOTE_DENY_TOOLS
 
 
 def test_strip_removes_denied_keeps_creative():
     names = [
         "run_shell", "read_file", "list_dir", "write_file", "organize_files",
         "fetch", "web_search", "web_open",
+        *sorted(PRIVATE_SYSTEM_TOOLS),
         "generate_video", "edit_video", "lumen_patch", "vector_motion",
         "timeline_split_clip", "probe_media",
     ]
     kept = {s["function"]["name"] for s in _strip_remote_denied([_schema(n) for n in names])}
     # host-reaching tools gone
-    for gone in ("run_shell", "read_file", "list_dir", "write_file",
-                 "organize_files", "fetch", "web_search", "web_open"):
+    for gone in (
+        "run_shell", "read_file", "list_dir", "write_file",
+        "organize_files", "fetch", "web_search", "web_open",
+        *sorted(PRIVATE_SYSTEM_TOOLS),
+    ):
         assert gone not in kept, gone
     # creative tools untouched
     for stay in ("generate_video", "edit_video", "lumen_patch",

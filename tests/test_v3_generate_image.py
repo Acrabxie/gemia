@@ -1,13 +1,12 @@
-"""Smoke + integration tests for generate_image (Nano Banana 2 via Vertex).
+"""Smoke + integration tests for generate_image via OpenAI subscription.
 
 Two layers:
-  - **Mocked**: stub `GoogleGenAIClient.generate_image` so we exercise the
+  - **Mocked**: stub `OpenAIImageClient.generate_image` so we exercise the
     dispatcher, base64-decode-to-file path, asset registration, metadata
     scrubbing (no base64 in result), and DISPATCHER registration WITHOUT
     hitting the network.
-  - **Live**: real API call gated behind ``LUMERI_RUN_LIVE_STUDIO=1`` env
-    var so CI never burns Acrab's $300 credit. Sets a small ``max_usd``
-    on BudgetGuard to ensure we don't accidentally fire a chain of calls.
+  - **Live**: real API call gated behind an explicit environment variable so
+    CI never spends the local subscription quota.
 
 A separate test verifies BudgetGuard correctly intercepts a
 generate_image request that would exceed the per-session cap.
@@ -21,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from gemia.ai.google_genai_client import GoogleGenAIClient, VertexAPIError, VertexAuthMissingError
+from gemia.ai.openai_image_client import OpenAIImageAPIError, OpenAIImageClient
 from gemia.budget_guard import BudgetGuard, _TOOL_COSTS
 from gemia.tools import DISPATCHER
 from gemia.tools import generate_image as generate_image_tool
@@ -42,7 +41,10 @@ def _ctx(tmp_path: Path) -> ToolContext:
         output_dir=tmp_path,
         registry=AssetRegistry(),
         emit_progress=lambda _u: None,
-        extra={},
+        extra={
+            "provider": "openai_subscription",
+            "openai_subscription_image_endpoint": "http://127.0.0.1:7808/v1/images/generations",
+        },
     )
 
 
@@ -56,8 +58,9 @@ def test_generate_image_is_no_longer_a_stub() -> None:
     )
 
 
-def test_cost_table_has_real_nano_banana_2_price() -> None:
-    # Doc 07 confirmed $0.101 for a 2K Nano Banana 2 image.
+def test_cost_table_keeps_image_budget_guard_price() -> None:
+    # Keep the existing paid-media safety estimate until the subscription
+    # quota meter gets its own accounting unit.
     assert _TOOL_COSTS["generate_image"]["usd"] == pytest.approx(0.101)
 
 
@@ -66,7 +69,7 @@ def test_cost_table_has_real_nano_banana_2_price() -> None:
 
 def _stub_client(monkeypatch, *, image_bytes: bytes = _TINY_PNG_BYTES,
                  mime_type: str = "image/png", model_text: str | None = None) -> dict:
-    """Replace GoogleGenAIClient.generate_image with a stub that returns
+    """Replace OpenAIImageClient.generate_image with a stub that returns
     fixed bytes. Returns a dict the test can inspect for "what was called"."""
     seen: dict = {}
 
@@ -75,7 +78,7 @@ def _stub_client(monkeypatch, *, image_bytes: bytes = _TINY_PNG_BYTES,
         return {
             "image_bytes": image_bytes,
             "mime_type": mime_type,
-            "model": kwargs.get("model", "gemini-3.1-flash-image"),
+            "model": kwargs.get("model", "gpt-image-2"),
             "raw_response_meta": {
                 "model": kwargs.get("model"),
                 "finish_reason": "STOP",
@@ -85,16 +88,8 @@ def _stub_client(monkeypatch, *, image_bytes: bytes = _TINY_PNG_BYTES,
             },
         }
 
-    def fake_init(self, **kwargs):
-        self.project = "test-project"
-        self.location = kwargs.get("location", "global")
-        self.api_version = "v1beta1"
-        self.base_url = "https://example.invalid/v1beta1/projects/test/locations/global/publishers/google/models"
-        self.proxy = None
-        self.timeout_sec = 60.0
-
-    monkeypatch.setattr(GoogleGenAIClient, "__init__", fake_init)
-    monkeypatch.setattr(GoogleGenAIClient, "generate_image", fake_generate_image)
+    monkeypatch.setattr(OpenAIImageClient, "__init__", lambda self, **kwargs: None)
+    monkeypatch.setattr(OpenAIImageClient, "generate_image", fake_generate_image)
     return seen
 
 
@@ -121,9 +116,8 @@ def test_dispatcher_decodes_base64_and_writes_png_to_workdir(
 
     # Args passed through correctly
     assert seen["prompt"] == "a cyberpunk city skyline at night"
-    assert seen["aspect_ratio"] == "16:9"
-    assert seen["model"] == "gemini-3.1-flash-image-preview"
-    assert seen["image_size"] == "2K"
+    assert seen["model"] == "gpt-image-2"
+    assert seen["size"] == "1536x1024"
 
 
 def test_dispatcher_result_never_contains_base64(monkeypatch, tmp_path: Path) -> None:
@@ -211,31 +205,24 @@ def test_dispatcher_rejects_empty_prompt(monkeypatch, tmp_path: Path) -> None:
         asyncio.run(generate_image_tool.dispatch({"prompt": "   "}, ctx))
 
 
-def test_dispatcher_propagates_vertex_auth_missing(monkeypatch, tmp_path: Path) -> None:
-    def fake_init(self, **kwargs):
-        raise VertexAuthMissingError("VERTEX_PROJECT is not set.")
-    monkeypatch.setattr(GoogleGenAIClient, "__init__", fake_init)
+def test_dispatcher_rejects_non_subscription_provider(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
-    with pytest.raises(VertexAuthMissingError, match="VERTEX_PROJECT"):
+    ctx.extra["provider"] = "vertex"
+    with pytest.raises(RuntimeError, match="only when the selected provider is openai_subscription"):
         asyncio.run(generate_image_tool.dispatch({"prompt": "x"}, ctx))
 
 
-def test_dispatcher_propagates_vertex_5xx_unchanged(monkeypatch, tmp_path: Path) -> None:
+def test_dispatcher_propagates_subscription_bridge_5xx_unchanged(monkeypatch, tmp_path: Path) -> None:
     """Provider 5xx must not be retried or hidden — model gets the traceback."""
     async def fake_call(self, **_kwargs):
-        raise VertexAPIError("Vertex HTTP 503 on generateContent",
-                             status=503, body_tail="server overloaded")
+        raise OpenAIImageAPIError("subscription image bridge HTTP 503",
+                                  status=503)
 
-    monkeypatch.setattr(GoogleGenAIClient, "__init__",
-                        lambda self, **kw: setattr(self, "project", "test")
-                        or setattr(self, "location", "global")
-                        or setattr(self, "proxy", None)
-                        or setattr(self, "timeout_sec", 60.0)
-                        or setattr(self, "base_url", "https://x"))
-    monkeypatch.setattr(GoogleGenAIClient, "generate_image", fake_call)
+    monkeypatch.setattr(OpenAIImageClient, "__init__", lambda self, **kwargs: None)
+    monkeypatch.setattr(OpenAIImageClient, "generate_image", fake_call)
 
     ctx = _ctx(tmp_path)
-    with pytest.raises(VertexAPIError, match="503"):
+    with pytest.raises(OpenAIImageAPIError, match="503"):
         asyncio.run(generate_image_tool.dispatch({"prompt": "x"}, ctx))
 
 
@@ -264,14 +251,14 @@ def test_budget_guard_allows_generate_image_when_under_cap() -> None:
 
 
 @pytest.mark.skipif(
-    os.environ.get("LUMERI_RUN_LIVE_VERTEX") != "1",
-    reason="live Vertex call disabled; set LUMERI_RUN_LIVE_VERTEX=1 to enable",
+    os.environ.get("LUMERI_RUN_LIVE_OPENAI_SUBSCRIPTION") != "1",
+    reason="live OpenAI subscription call disabled; set LUMERI_RUN_LIVE_OPENAI_SUBSCRIPTION=1 to enable",
 )
 def test_live_generate_image_writes_real_png(tmp_path: Path) -> None:
-    """Real call against Vertex Nano Banana 2.
+    """Real call against GPT Image 2 through the local subscription bridge.
 
-    Costs ~$0.10 per run. Gated by env var so CI/test suite stays cheap.
-    Requires Vertex ADC + ``vertex_project`` in ``~/.gemia/config.json``."""
+    Gated by env var so CI/test suite stays cheap. Requires an active local
+    Codex subscription bridge on port 7808."""
     ctx = _ctx(tmp_path)
     result = asyncio.run(
         generate_image_tool.dispatch(

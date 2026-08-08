@@ -8,14 +8,30 @@
 <link rel="stylesheet" href="/video/v3.css" />
 </head>
 <body>
-<header class="app-header">
+<section class="app-auth-gate" id="auth-gate" data-state="checking" aria-label="Lumeri" aria-live="polite">
+  <div class="app-auth-gate-content">
+    <img class="app-auth-gate-mark" src="/video/lumeri-mark.svg" alt="" width="72" height="52" />
+    <p class="app-auth-gate-brand">Lumeri Video</p>
+    <h1 id="auth-gate-title">Lumeri Video</h1>
+    <p class="app-auth-gate-message" id="auth-gate-message"></p>
+    <button type="button" class="auth-primary app-auth-gate-action" id="auth-gate-action" hidden>继续登录</button>
+    <div class="app-auth-gate-status" id="auth-gate-status" hidden>
+      <span>确认码</span>
+      <strong id="auth-gate-code"></strong>
+      <a id="auth-gate-link" href="https://accounts.lumeri.io" target="_blank" rel="noopener noreferrer">打开登录页面</a>
+    </div>
+    <p class="auth-error app-auth-gate-error" id="auth-gate-error" hidden></p>
+  </div>
+</section>
+
+<header class="app-header" id="app-header" hidden inert aria-hidden="true">
   <span class="brand">
     <img class="brand-logo" src="/video/lumeri-mark.svg" alt="Lumeri" width="26" height="19" />
     <h1>Lumeri Video</h1>
   </span>
 </header>
 
-<main class="app-main">
+<main class="app-main" id="app-main" hidden inert aria-hidden="true">
   <!-- LEFT · modular editing desk: preview + side modules + shared timeline -->
   <section class="preview-stage" id="preview-stage">
     <div class="stage-tabbar" id="stage-tabs" role="tablist" aria-label="工作区视图">
@@ -39,7 +55,7 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="12" rx="2.5"/><path d="M10.4 8.6l3.8 2.4-3.8 2.4z"/></svg>
             <span class="label">预览</span>
           </span>
-          <span class="workspace-module-meta">实时画布</span>
+          <span class="workspace-module-meta">时间线播放</span>
         </div>
 
         <div class="empty-state" id="empty-state">
@@ -49,7 +65,37 @@
         </div>
 
         <div class="stage-scroll" id="stage-scroll">
-          <div class="asset-grid" id="asset-grid"></div>
+          <section class="direct-canvas-shell" id="direct-canvas-shell" aria-label="素材画布" hidden>
+            <div class="direct-canvas-space" id="direct-canvas-space" tabindex="0" role="application" aria-label="所选素材，可用方向键微移" aria-describedby="direct-canvas-help" aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown">
+              <video id="direct-canvas-video" class="direct-canvas-media" muted playsinline preload="metadata" hidden></video>
+              <img id="direct-canvas-image" class="direct-canvas-media" alt="" hidden />
+              <img id="direct-canvas-layer-preview" class="direct-canvas-media" alt="" hidden />
+              <div class="direct-selection-box" id="direct-selection-box" role="group" aria-labelledby="direct-selection-name" hidden>
+                <span class="direct-selection-name" id="direct-selection-name" draggable="true" data-context-drag="preview-selection" aria-live="polite" aria-atomic="true"></span>
+                <button type="button" class="direct-handle corner nw" data-canvas-handle="scale" aria-label="等比缩放"></button>
+                <button type="button" class="direct-handle corner ne" data-canvas-handle="scale" aria-label="等比缩放"></button>
+                <button type="button" class="direct-handle corner sw" data-canvas-handle="scale" aria-label="等比缩放"></button>
+                <button type="button" class="direct-handle corner se" data-canvas-handle="scale" aria-label="等比缩放"></button>
+                <span class="direct-rotate-stem" aria-hidden="true"></span>
+                <button type="button" class="direct-handle rotate" data-canvas-handle="rotate" aria-label="旋转"></button>
+              </div>
+              <span class="direct-guide direct-guide-x" id="direct-guide-x" hidden></span>
+              <span class="direct-guide direct-guide-y" id="direct-guide-y" hidden></span>
+              <form class="micro-inspector canvas-micro-inspector" id="canvas-micro-inspector" aria-label="空间微调" hidden>
+                <label>X <input inputmode="decimal" data-edit-field="x" aria-label="水平位置 X" /></label>
+                <label>Y <input inputmode="decimal" data-edit-field="y" aria-label="垂直位置 Y" /></label>
+                <label>缩放 <input inputmode="decimal" data-edit-field="scale" aria-label="等比缩放百分比" /></label>
+                <label>旋转 <input inputmode="decimal" data-edit-field="rotation" aria-label="旋转角度" /></label>
+                <button type="button" class="micro-expand" data-open-properties title="展开属性" aria-label="展开属性">属性</button>
+              </form>
+              <span class="direct-canvas-help" id="direct-canvas-help">方向键微移 1 像素，按住 Shift 微移 10 像素。</span>
+            </div>
+          </section>
+          <section class="delivery-review-master" id="delivery-review-master" aria-label="正式审片母版" hidden>
+            <video id="delivery-review-video" controls preload="metadata" playsinline></video>
+          </section>
+          <p class="timeline-preview-empty" id="timeline-preview-empty">时间线暂无可播放内容</p>
+          <div class="asset-grid" id="asset-grid" hidden></div>
         </div>
         <div class="module-resize-edge module-resize-edge-x" data-module-resize="preview" data-resize-axis="x" role="separator" tabindex="0" aria-label="调整预览宽度"></div>
         <div class="module-resize-edge module-resize-edge-y" data-module-resize="preview" data-resize-axis="y" role="separator" tabindex="0" aria-label="调整预览高度"></div>
@@ -76,6 +122,40 @@
         <div class="module-resize-edge module-resize-corner" data-module-resize="timeline" data-resize-axis="both" role="separator" tabindex="0" aria-label="同时调整时间线宽度和高度"></div>
       </section>
     </div>
+
+    <!-- Clip focus workspace. The final review master stays available behind
+         this surface; opening a Clip never replaces the structural timeline. -->
+    <section class="segment-workspace" id="segment-workspace" hidden aria-label="片段细化工作台">
+      <header class="segment-workspace-head">
+        <div class="segment-workspace-title-wrap">
+          <button type="button" class="segment-back" id="segment-back" title="返回主时间线" aria-label="返回主时间线"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-l"/></svg></button>
+          <div>
+            <span class="segment-eyebrow">片段细化</span>
+            <h2 id="segment-title">所选素材</h2>
+          </div>
+        </div>
+        <div class="segment-workspace-actions">
+          <span class="segment-presence" id="segment-presence" role="status" aria-live="polite">可以细化</span>
+          <button type="button" class="segment-window-btn" id="segment-window-btn" title="在独立窗口细化"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-expand"/></svg><span>独立窗口</span></button>
+          <button type="button" class="segment-save-btn" id="segment-save-btn" title="保存并交还（⌘S）" aria-label="保存并交还"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-save"/></svg><span>保存并交还</span></button>
+        </div>
+      </header>
+      <div class="segment-workspace-body">
+        <section class="segment-canvas-pane" aria-label="片段画布">
+          <div class="segment-canvas" id="segment-canvas" tabindex="0">
+            <div class="segment-canvas-grid" aria-hidden="true"></div>
+            <div class="segment-canvas-object" id="segment-canvas-object"><span id="segment-canvas-label">素材</span></div>
+          </div>
+          <div class="segment-canvas-toolbar"><span id="segment-canvas-kind">视频</span><span class="segment-selection-readout" id="segment-selection-readout">选择一个对象开始</span></div>
+        </section>
+        <aside class="segment-inspector-pane" aria-label="片段结构">
+          <section class="segment-tree-panel"><div class="segment-panel-head"><h3>图层</h3><span>对象</span></div><div id="segment-layers" class="segment-tree-list"></div></section>
+          <section class="segment-tree-panel"><div class="segment-panel-head"><h3>状态</h3><span id="segment-state-count">0</span></div><div id="segment-states" class="segment-tree-list"></div><div class="segment-state-actions"><button type="button" id="segment-state-add" title="新增状态">＋ 状态</button><button type="button" id="segment-state-copy" title="复制状态">复制</button><button type="button" id="segment-state-delete" title="删除状态">删除</button><button type="button" id="segment-state-up" title="状态上移">↑</button><button type="button" id="segment-state-down" title="状态下移">↓</button></div></section>
+          <section class="segment-properties-panel"><div class="segment-panel-head"><h3>属性</h3><span id="segment-revision-label">第 0 版</span></div><form id="segment-properties-form"><label>停留时间 <input name="dwell_sec" type="number" min="0.1" step="0.1" /></label><label>推进方式 <select name="advance"><option value="manual">等待</option><option value="auto">自动</option></select></label><div class="segment-state-visibility" id="segment-state-visibility" hidden><span>此状态显示图层</span><div id="segment-state-visibility-list"></div></div><label>内部开始 <input name="material_start" type="number" min="0" step="0.1" /></label><label>内部时长 <input name="material_duration" type="number" min="0.1" step="0.1" /></label><label>X <input name="x" type="number" step="1" /></label><label>Y <input name="y" type="number" step="1" /></label><label>缩放 <input name="scale" type="number" min="0.01" step="0.01" /></label><label>旋转 <input name="rotation" type="number" step="1" /></label><label class="segment-visibility-toggle"><input name="visible" type="checkbox" checked /> 当前图层可见</label></form></section>
+        </aside>
+      </div>
+      <footer class="segment-workspace-foot"><div class="segment-inner-timeline" id="segment-inner-timeline" aria-label="片段内部时间线"></div><div class="segment-agent-note" id="segment-agent-note">Lumeri 会避开你正在编辑的对象。</div></footer>
+    </section>
   </section>
 
   <!-- RIGHT · chat rail: session head, history, cohesive input -->
@@ -84,28 +164,90 @@
       <!-- connection dot + session id kept for JS wiring but no longer shown (user request) -->
       <span class="status-pill" id="connection-pill" role="status" title="offline" aria-label="offline" hidden></span>
       <span class="session-id" id="session-id-label" hidden>—</span>
+      <button type="button" id="project-btn" class="project-btn" title="收起 Projects 与会话" aria-label="收起 Projects 与会话" aria-controls="project-sidebar" aria-expanded="true">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-folder"/></svg>
+        <span id="project-name-label">Project</span>
+      </button>
       <span class="rail-head-spacer"></span>
-      <button type="button" id="new-session-btn" class="rail-btn icon-btn" title="新会话" aria-label="新会话"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-new-chat"/></svg></button>
-      <button type="button" id="account-btn" class="account-btn rail-btn icon-btn" title="登录 / 账户" aria-label="登录 / 账户"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-user"/></svg></button>
-      <button type="button" id="history-toggle-btn" class="rail-btn icon-btn" title="会话历史" aria-label="会话历史" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-menu"/></svg></button>
-    </div>
-
-    <!-- session history drawer: slides in from the right edge -->
-    <div id="history-drawer" class="history-drawer" hidden>
-      <div class="history-drawer-body" id="history-drawer-body">
-        <p class="placeholder">加载中…</p>
+      <button type="button" id="account-btn" class="account-btn rail-btn icon-btn" title="登录 / 账户" aria-label="登录 / 账户" aria-haspopup="menu" aria-controls="account-menu" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-user"/></svg></button>
+      <div id="account-menu" class="account-menu" role="menu" aria-label="账户菜单" hidden>
+        <div class="account-menu-profile">
+          <div id="account-menu-avatar" class="account-menu-avatar" aria-hidden="true"></div>
+          <div class="account-menu-identity">
+            <span id="account-menu-name" class="account-menu-name"></span>
+            <span id="account-menu-email" class="account-menu-email"></span>
+          </div>
+        </div>
+        <div class="account-menu-divider" role="separator"></div>
+        <button type="button" class="account-menu-item" data-account-action="settings" role="menuitem">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-sliders"/></svg>
+          <span>Settings</span>
+        </button>
+        <button type="button" class="account-menu-item" data-account-action="setup" role="menuitem">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-spark"/></svg>
+          <span>Setup</span>
+        </button>
+        <button type="button" class="account-menu-item" data-account-action="help" role="menuitem">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-help"/></svg>
+          <span>Help &amp; commands</span>
+        </button>
+        <div class="account-menu-divider" role="separator"></div>
+        <button type="button" class="account-menu-item account-menu-logout" data-account-action="logout" role="menuitem">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-logout"/></svg>
+          <span>Log out</span>
+        </button>
       </div>
     </div>
 
-    <div class="rail-history" id="rail-history">
-      <div class="timeline" id="timeline" hidden></div>
-      <div class="rail-empty" id="rail-empty">
-        <p class="rail-empty-hint">试试这样开始</p>
-        <button type="button" class="suggest-chip" data-suggest="做一支 30 秒的产品宣传片，冰蓝色调，节奏干净利落">30 秒产品宣传片</button>
-        <button type="button" class="suggest-chip" data-suggest="把素材库里的视频剪成 15 秒竖版短片">剪一支 15 秒竖版</button>
-        <button type="button" class="suggest-chip" data-suggest="给当前成片配上中文字幕">给成片配中文字幕</button>
-        <button type="button" class="suggest-chip" data-suggest="从素材里找出最好的三个镜头，拼成一段预览">挑出最好的镜头</button>
+    <!-- Durable production truth. Hidden for legacy/chat-only sessions only
+         when there is genuinely no production run to report. -->
+    <section class="production-strip" id="production-strip" aria-live="polite" hidden>
+      <div class="production-summary">
+        <span class="production-state" id="production-state-label">尚未开始生产</span>
+        <span class="production-revision" id="production-revision-label">r0</span>
+        <span class="production-budget" id="production-budget-label">$0.00 / $15.00</span>
       </div>
+      <div class="production-mix" id="production-mix-label" hidden></div>
+      <div class="production-blockers" id="production-blockers" hidden></div>
+      <div class="production-review" id="production-review" hidden>
+        <div class="production-review-range">
+          <label>从 <input id="review-start-sec" type="number" min="0" step="0.1" inputmode="decimal" placeholder="秒" /></label>
+          <label>到 <input id="review-end-sec" type="number" min="0" step="0.1" inputmode="decimal" placeholder="秒" /></label>
+        </div>
+        <textarea id="review-note" rows="2" placeholder="写下要修改的内容；填写时间可只返修这一段"></textarea>
+        <fieldset class="production-approval-checks" id="production-approval-checks">
+          <legend>只有完整观看后才能确认发布</legend>
+          <label class="review-watch-confirm"><input id="review-watched-full-video" type="checkbox" /> 已按正常速度完整观看 120 秒</label>
+          <div class="review-creative-checks" aria-label="人工创作验收">
+            <label><input type="checkbox" data-review-dimension="story" />叙事</label>
+            <label><input type="checkbox" data-review-dimension="pacing" />节奏</label>
+            <label><input type="checkbox" data-review-dimension="visual" />视觉</label>
+            <label><input type="checkbox" data-review-dimension="sound" />声音</label>
+            <label><input type="checkbox" data-review-dimension="publishable" />可发布</label>
+          </div>
+        </fieldset>
+        <div class="production-review-actions">
+          <button type="button" id="request-changes-btn" class="review-secondary">要求修改</button>
+          <button type="button" id="approve-production-btn" class="review-primary">可以发布</button>
+        </div>
+        <span class="production-review-status" id="production-review-status" role="status"></span>
+      </div>
+    </section>
+
+    <div class="rail-history-shell">
+      <div class="rail-history" id="rail-history">
+        <div class="timeline" id="timeline" hidden></div>
+        <div class="rail-empty" id="rail-empty">
+          <p class="rail-empty-hint">试试这样开始</p>
+          <button type="button" class="suggest-chip" data-suggest="做一支 30 秒的产品宣传片，冰蓝色调，节奏干净利落">30 秒产品宣传片</button>
+          <button type="button" class="suggest-chip" data-suggest="把素材库里的视频剪成 15 秒竖版短片">剪一支 15 秒竖版</button>
+          <button type="button" class="suggest-chip" data-suggest="给当前成片配上中文字幕">给成片配中文字幕</button>
+          <button type="button" class="suggest-chip" data-suggest="从素材里找出最好的三个镜头，拼成一段预览">挑出最好的镜头</button>
+        </div>
+      </div>
+      <button type="button" id="chat-scroll-bottom" class="chat-scroll-bottom" title="滚动到底部" aria-label="滚动到底部" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-d"/></svg>
+      </button>
     </div>
 
     <!-- plan approval bar: filled by v3.js while plan mode is on -->
@@ -152,39 +294,58 @@
         </button>
       </div>
 
-      <input type="file" id="upload-input" hidden />
+      <input type="file" id="upload-input" multiple hidden />
       <button type="button" id="plus-btn" class="plus-btn" aria-haspopup="menu" aria-expanded="false" title="添加" aria-label="添加">
         <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-plus"/></svg>
       </button>
+      <div id="skill-space-selection" class="skill-space-selection" aria-label="本会话已选择的 Skill" hidden></div>
+      <div id="composer-context" class="composer-context" aria-label="拖入的当前工程上下文" hidden></div>
       <textarea
         id="prompt-input"
         rows="1"
         placeholder="描述你想要的视频，或输入 / 唤起命令…"
       ></textarea>
       <div class="composer-actions">
-        <button type="button" id="voice-input-btn" class="voice-input-btn" aria-label="语音输入" title="语音输入">
+        <button type="button" id="send-btn" class="send-btn" disabled aria-label="语音输入" title="语音输入">
           <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-mic"/></svg>
-        </button>
-        <button type="button" id="send-btn" class="send-btn" disabled aria-label="发送">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-send"/></svg>
         </button>
       </div>
       <span id="voice-input-status" class="voice-input-status" role="status" aria-live="polite" hidden></span>
     </footer>
   </aside>
+
+  <!-- Persistent right-side Project navigation: projects own their sessions. -->
+  <aside class="project-sidebar" id="project-sidebar" aria-label="Projects 与会话">
+    <div class="project-sidebar-head">
+      <span class="project-sidebar-title">Projects</span>
+      <span class="project-sidebar-spacer"></span>
+      <button type="button" id="new-project-btn" class="project-sidebar-action icon-btn" title="新建 Project" aria-label="新建 Project"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-folder-plus"/></svg></button>
+      <button type="button" id="new-session-btn" class="project-sidebar-action icon-btn" title="新会话" aria-label="新会话"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-new-chat"/></svg></button>
+    </div>
+    <div class="project-sidebar-body" id="project-sidebar-body" aria-live="polite">
+      <p class="project-sidebar-placeholder">正在载入 Projects…</p>
+    </div>
+  </aside>
+
 </main>
 
-<!-- Assets tray: summoned media library (moved here, ids kept) -->
+<!-- Assets tray: media and non-media project assets -->
 <div id="assets-tray" class="assets-tray" hidden>
   <div class="assets-tray-panel">
     <div class="assets-tray-head">
-      <h2 class="pane-heading">媒体库</h2>
+      <h2 class="pane-heading">素材库</h2>
       <div class="assets-tray-actions">
         <button type="button" id="library-refresh-btn" class="library-small-btn icon-btn" title="刷新" aria-label="刷新"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-refresh"/></svg></button>
+        <button type="button" id="library-roughcut-btn" class="library-small-btn icon-btn" title="粗剪准备" aria-label="粗剪准备"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-wand"/></svg></button>
         <button type="button" id="library-annotate-btn" class="library-small-btn icon-btn" title="标注视频" aria-label="标注视频"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-wand"/></svg></button>
         <button type="button" id="assets-tray-close" class="library-small-btn icon-btn" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button>
       </div>
     </div>
+    <div class="library-sections" role="tablist" aria-label="素材类型">
+      <button type="button" class="library-section active" role="tab" aria-selected="true" data-library-section="media">媒体素材</button>
+      <button type="button" class="library-section" role="tab" aria-selected="false" data-library-section="non-media">非媒体素材</button>
+    </div>
+    <div id="roughcut-job-status" class="roughcut-job-status" role="status" aria-live="polite" hidden></div>
     <div class="media-library-grid" id="media-library-grid">
       <p class="placeholder">登录后可用</p>
     </div>
@@ -202,6 +363,16 @@
       <div class="auth-brand">
         <img src="/video/lumeri-mark.svg" alt="" width="40" height="29" />
         <h2 id="auth-title">登录 Lumeri Video</h2>
+      </div>
+
+      <div id="auth-cloud-flow" class="auth-cloud-flow" hidden>
+        <p>在浏览器中使用 Google 或邮箱验证码登录。</p>
+        <button type="button" id="auth-cloud-start" class="auth-primary">继续登录</button>
+        <div id="auth-cloud-status" class="auth-cloud-status" hidden>
+          <span>确认码</span>
+          <strong id="auth-cloud-code"></strong>
+          <a id="auth-cloud-open" href="https://accounts.lumeri.io" target="_blank" rel="noopener">打开登录页面</a>
+        </div>
       </div>
 
       <button type="button" id="auth-google-btn" class="auth-google" hidden>
@@ -252,6 +423,11 @@
 </div>
 
 <script src="/video/workspace-layout.js" defer></script>
+<script src="/video/api-client.js" defer></script>
+<script src="/video/auth-gate.js" defer></script>
+<script src="/video/v3-markdown.js" defer></script>
+<script src="/video/v3-settings.js" defer></script>
+<script src="/video/v3-auth.js" defer></script>
 <script src="/video/v3.js" defer></script>
 </body>
 </html>

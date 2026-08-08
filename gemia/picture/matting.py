@@ -34,6 +34,8 @@ from typing import Any
 import cv2
 import numpy as np
 
+from gemia.compat import data_dir
+
 # --- ImageNet-style normalization used by the U2Net family (rembg-compatible)
 _MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -48,6 +50,8 @@ def _model_candidates() -> list[Path]:
     cands: list[Path] = []
     if env:
         cands.append(Path(env).expanduser())
+    cands.append(data_dir() / "u2net_human_seg.onnx")
+    cands.append(data_dir() / "u2net.onnx")
     repo_root = Path(__file__).resolve().parents[2]
     cands.append(repo_root / "models" / "u2net_human_seg.onnx")
     cands.append(repo_root / "models" / "u2net.onnx")

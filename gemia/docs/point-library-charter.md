@@ -227,7 +227,7 @@ Shape A 的正当理由**限于**：新的**文档状态 mutation / 新持久字
 **MUST（拆为两个不变量）**：
 - **(a) 逐字（per-handle verbatim）**：任何**单个**可寻址 token（layer/shape id、handle、name、catalog key、archetype 名）在展示中**不得**被截断、加省略号、或以 display-only/美化别名出现——**单个 id 内部无 `[:12]`、无 `…`**。往返性质：展示里出现的每个 token 原样贴回作参数都能解析。
 - **(b) 完整（completeness）**：模型可寻址的**每个实体**，要么**被完整展示**，要么**可经一个显式的、无损的枚举 op 触达**（如 `lumen_seek` 全量列出）。**列表级摘要（list-level summarization）允许**——当且仅当它**配有该无损枚举路径**。
-**与既有 host 行为的和解**：现网已测的 `test_v3_predelivery_gate.py::test_visual_list_truncated_and_coverage_noted`【已存在】要求可视列表以"等共 10 个"摘要——这是 **(b) 许可的列表级摘要**，是**被认可的范式**；它不违反 (a)（未截断任何单个 id）。**规则**：per-identifier 截断**禁止**；list-level 摘要**允许且必须**伴随全量枚举 op。
+**host 显示面规则**：per-identifier 截断**禁止**；list-level 摘要**允许且必须**伴随全量枚举 op。该规则不再依赖已移除的 pre-delivery completion gate。
 **作用域扩展到 host 显示面**：原始 12 字符截断发生在 **host 的 layer-tree 显示**（`v3_routes.py`/`layer.py`），在"库展示给模型"范围之外。故 P9 **同时约束库所骑的 host 显示/树面**（layer tree、`lumen_seek`）——一个完美的库仍会经 host 显示路径复现该 bug。
 **可测形式**：
 - 库级 round-trip：`tests/test_<lib>_addressability_roundtrip.py`【待落地】——收割 `create`/`adjust`/`catalog` 输出里 emit 的每个 handle，原样喂回作参数，断言全部解析、无 `E_NOT_FOUND`；断言无单个 id 含 `…`/被截断。
@@ -237,14 +237,14 @@ Shape A 的正当理由**限于**：新的**文档状态 mutation / 新持久字
 **Rationale**：agent 会把工具输出里的句柄复制进下一次调用；任何有损单-id 显示都保证派生的每次 delete/edit 都 `E_NOT_FOUND`；而"只展示部分实体、无枚举路径"则让其余实体不可达。工具的输出**就是**其输入契约的一部分。
 **产品原则映射**：正确性性质，非外观。
 
-### P10 · 可验证交付物 + ledger 协作 + 可恢复错误 —— 直接根治失败模式 3
+### P10 · 可验证交付物 + 中性活动记录 + 可恢复错误 —— 直接根治失败模式 3
 **MUST（按形态分档）**：
 - **Shape A（完整契约）**：库工具必须 (a) 注册一个**可验证的最终交付物/资产句柄（asset handle）**；(b) 把模型指向一条**验证路径**（`lumen_seek` / `lumen_render_range` / `render` / 视觉核对），每次成功回复以 `next` 字段收尾；(c) 只发**结构化、可恢复**错误（typed code ＋ recoverable flag）。
 - **Shape B（弱化契约）**：Shape B 经通用 `apply_<lib>` op 上线，无 per-library 响应对象。其交付契约为：**apply op 的 op-level 结果回传所创建 layer(s) 的 asset handle（layer id）**，且**在共享 `describe_ops()` 的该库 bracketed 段内写明一行验证提示**（如"apply 后用 `lumen_seek`/`render` 核对该 overlay"）。Shape B **不要求** per-call `next` 字段（它没有那条通道）。G7/G12 对 Shape B 以此弱化契约评判。
-**失败降级是 host-ledger 契约（重要澄清）**：一个"未解决且 recoverable 的失败降级为诚实的部分回答、而非硬卡 completion ledger"这一行为**由 host 的 turn-ledger 拥有**（`loop._turn_ledger.completion_decision`；佐证：现存 `test_v3_completion_gate.py::test_completion_gate_disabled_still_cannot_bypass_host_ledger`【已存在】）。**库无法仅凭自身返回值中的 `recoverable` 标志改变 host 的 blocker 逻辑**。故 P10 的表述是：**库负责"喂"给 ledger（最终资产 + 验证指针 + typed/recoverable 错误），host 负责据此"降级"。** 二者是协作契约。
+**失败降级是模型解释契约（重要澄清）**：库负责提供最终资产、验证指针和 typed/recoverable 错误；host 只记录这些事实，不再以 completion ledger 覆盖模型的收尾判断。未解决的失败由模型基于工具结果诚实说明；host 不追加 `incomplete_goal` 或固定文案。
 **可测形式**：
 - 库侧：`tests/test_<verb>_tool.py`【部分待落地】断言终态成功含 asset handle **且**（Shape A）`next` 验证指针（现网 `vector_motion.py:135,213` 已 emit `next`，但**无测试**断言，须补 `test_success_carries_asset_and_next`【待落地】）；`test_errors_are_typed_and_recoverable`【待落地】断言所有错误带 typed code + recoverable flag。
-- host 侧：`test_recoverable_library_failure_degrades_to_partial`【待落地】——证明一个**未解决的 recoverable** 库失败被投影为诚实部分回答，而非 `incomplete_goal` blocker。
+- host 侧：`test_recoverable_library_failure_degrades_to_partial`【已存在】——证明 recoverable 库失败会交给模型诚实说明，模型无工具回复后自然 `turn_complete`，host 不发 `incomplete_goal`/`turn_wrapup`。
 **Rationale**：不产出可验证最终资产、或其失败硬卡 turn 账本的创作库，会摧毁模型诚实收尾的能力。验证也闭合了地板的环：模型能**看见**资产越过了地板。
 **产品原则映射**：诚实优先。
 
@@ -692,16 +692,16 @@ G1 __ G2 __ G3 __ G4 __ G5 __ G6 __ G7 __ G8 __ G9 __ G10 __ G11 __ G12 __ G13 _
 **确切检查**：
 - 库级 round-trip `test_<lib>_addressability_roundtrip`【待落地】：每 emitted handle 喂回解析、无 `E_NOT_FOUND`、单 id 无 `…`。
 - **host 级** round-trip `test_layer_tree_handles_round_trip`【待落地】：对 host layer-tree/`lumen_seek` 展示 id 喂回——截断的 12 字符 id 无法解析 → RED。
-- 列表完整性 `test_truncated_list_has_full_enumeration_path`【待落地】：与现存 `test_v3_predelivery_gate.py::test_visual_list_truncated_and_coverage_noted`【已存在】和解——per-id 截断禁止，list 摘要须配枚举 op。
-**当前状态**：**已达态。** `tests/test_addressability_roundtrip.py`【已存在】落地 host 级 round-trip——对含长 id（>12 字符）的文档渲染 `_compact_tree_summary`（同一函数喂 `get_lumenframe` 结果与提示注入）并经 `dispatch_get`→`dispatch_delete_layer` 全链，断言展示 id 逐字出现且可解析可删除；对抗验证：重新引入 `[:12]` 截断 → 全 id 缺失 → RED。（列表完整性仍和解于现存 `test_v3_predelivery_gate.py::test_visual_list_truncated_and_coverage_noted`。）
+- 列表完整性 `test_truncated_list_has_full_enumeration_path`【待落地】：per-id 截断禁止，list 摘要须配枚举 op。
+**当前状态**：**部分已达态。** `tests/test_addressability_roundtrip.py`【已存在】落地 host 级 round-trip——对含长 id（>12 字符）的文档渲染 `_compact_tree_summary`（同一函数喂 `get_lumenframe` 结果与提示注入）并经 `dispatch_get`→`dispatch_delete_layer` 全链，断言展示 id 逐字出现且可解析可删除；对抗验证：重新引入 `[:12]` 截断 → 全 id 缺失 → RED。列表级全量枚举测试仍待落地。
 
 ### 失败模式 3 · LEDGER INTERACTION（账本交互）
-**事实**：turn-ledger 在一个编辑 turn 硬报 `host acceptance ledger remains incomplete`，因未解决工具失败阻断 completion，丢弃模型诚实的部分解释。根因：创作库须产出可验证 final asset 并与 completion ledger 协作，且 recovery 后的失败应降级为诚实部分答案。
+**历史事实**：turn-ledger 曾在编辑 turn 硬报 `host acceptance ledger remains incomplete`，阻断模型的诚实部分解释。根因是 host 把活动记录当成了 completion 裁判器；该控制流已移除，ledger 现在只保留工具事实和资产投影。
 **守护原则**：P10 + §5A.11/§5T.4（结构化错误）。
 **确切检查 + 归属澄清**：
 - 库侧 `test_success_carries_asset_and_next` + `test_errors_are_typed_and_recoverable`【待落地】：终态成功含 asset handle + `next`（现网 `vector_motion.py:135,213` 已 emit 但**无测试**断言）；错误 typed+recoverable。
-- **host 侧** `test_recoverable_library_failure_degrades_to_partial`【待落地】：证明未解决的 **recoverable** 库失败被投影为诚实部分答案。**关键澄清**：降级是 **host turn-ledger 的契约**（`loop._turn_ledger.completion_decision`；佐证现存 `test_v3_completion_gate.py::test_completion_gate_disabled_still_cannot_bypass_host_ledger`【已存在】）；库**仅"喂"** typed/recoverable 错误 + 最终资产，**无法仅凭自身返回值改变 host blocker 逻辑**。故 P10 是库/host 协作契约，不是库单方能保的行为。
-**当前状态**：**已达态。** 库侧 `tests/test_library_ledger_contract.py`【已存在】断言 `vector_motion` 终态成功携 `layer_id`（asset handle）+ `next`（指向 `lumen_seek`/`lumen_render` 验证），且六类坏输入均返回 typed 结构化错误（`E_ARG`/`E_NOT_FOUND`，`applied:False`）而非抛异常、fixable 者带 `recovery:'fix_args'`。host 侧 `tests/test_v3_ledger_partial_disclosure.py::test_recoverable_library_failure_degrades_to_partial`【已存在】驱动真实 `AgentLoopV3`：一个 mutating 工具 recoverable 失败后模型诚实说明→断言该说明**被交付**（`model_text_delta`）且回合仍诚实标 `incomplete_goal`（不伪造完成）；对抗验证：无活（turn_did_work=False）时诚实文字不交付，证明交付受 loop 的 `accum.text and turn_did_work` emit 控制、去掉即 RED。
+- **host 侧** `test_recoverable_library_failure_degrades_to_partial`【已存在】：证明 typed/recoverable 错误完整进入工具结果，模型的诚实部分答案被交付，host 不改写或追加 completion 判决。
+**当前状态**：**已达态。** 库侧 `tests/test_library_ledger_contract.py`【已存在】断言 `vector_motion` 终态成功携 `layer_id`（asset handle）+ `next`（指向 `lumen_seek`/`lumen_render` 验证），且六类坏输入均返回 typed 结构化错误。host 侧回归证明：模型诚实说明被交付并自然 `turn_complete`，无 `completion_check`、`incomplete_goal` 或 `turn_wrapup`。
 
 ---
 
@@ -744,9 +744,9 @@ IR 携带 `version` 字段。新增词汇是**加法**：加进 registry+catalog
 ## §12 相关文件与测试索引（绝对路径；**明确区分【已存在】/【待落地】**，供 meta-check 直接实现）
 
 **Shape A 安装点**：`/Volumes/Extreme SSD/lumeri/gemia/tools/_schema.py`（`_tool→TOOL_SCHEMAS`，`TOOL_NAMES :1914`）· `gemia/tools/__init__.py`（`_REAL`/`DISPATCHER :222`，`_make_stub :103-109`）· `gemia/budget_guard.py`（`_TOOL_COSTS`，默认 `(0.0,5.0) :177` — **拟改 raise-on-miss**）· `gemia/plan_mode.py`（`PLAN_ALLOWED_TOOLS`/`PLAN_BLOCKED_TOOLS`，`is_plan_safe`）· `gemia/tool_router.py`（`TOOL_PACKS`/`WORKFLOW_KEYWORDS`/`ADJACENT_PACKS`/`catalog_coverage()`）· `gemia/prompts/system_v3.md`（`:431`）
-**Shape A 门测试 — 已存在**：`tests/test_plan_mode.py::test_every_registered_tool_is_classified`（`:40`）· `tests/test_tool_router.py`（`catalog_coverage()==(∅,∅) :30`）· `tests/test_vector_motion_tool.py`（`:95-124`，`test_vector_motion_has_explicit_budget_entry :113`；坏 id `E_NOT_FOUND :294`）· `tests/test_vector_creative.py::test_build_scene_is_deterministic_per_seed`（`:314`，`svg1==svg2`）· `tests/test_v3_predelivery_gate.py::test_visual_list_truncated_and_coverage_noted` · `tests/test_v3_completion_gate.py::test_completion_gate_disabled_still_cannot_bypass_host_ledger`
+**Shape A 门测试 — 已存在**：`tests/test_plan_mode.py::test_every_registered_tool_is_classified`（`:40`）· `tests/test_tool_router.py`（`catalog_coverage()==(∅,∅) :30`）· `tests/test_vector_motion_tool.py`（`:95-124`，`test_vector_motion_has_explicit_budget_entry :113`；坏 id `E_NOT_FOUND :294`）· `tests/test_vector_creative.py::test_build_scene_is_deterministic_per_seed`（`:314`，`svg1==svg2`）· `tests/test_v3_predelivery_gate.py::test_visual_output_does_not_trigger_a_synthetic_review_round` · `tests/test_v3_completion_gate.py::test_open_activity_record_cannot_override_model_stop`
 **Shape A 安装门 — 已落地（2026-07-15，已对抗验证）**：`tests/test_tool_catalog_contract.py`（Layer A：dispatcher非stub / router-pack / plan恰一类 / budget行或`BUDGET_DEFAULT_TOOLS`白名单 / `len==len(set)` / 白名单有界）· `tests/test_library_verb_manifest.py`（Layer B：扫 `gemia/tools/*.py` 模块级 `dispatch` 孤儿）
-**FM2/FM3/meta 门 — 已落地（2026-07-15，已对抗验证）**：`tests/test_addressability_roundtrip.py`（FM2 可寻址 round-trip：`_compact_tree_summary` 长 id 逐字 + `dispatch_get`→`dispatch_delete_layer` 全链）· `tests/test_library_ledger_contract.py`（FM3 库侧：`vector_motion` 成功带 `layer_id`+`next`、六类 typed 错误、`recovery:'fix_args'`）· `tests/test_v3_ledger_partial_disclosure.py`（FM3 host 侧：`_FailsThenExplainsHonestly` 驱动真实 loop，诚实部分被交付 + `incomplete_goal` 不伪造完成）· `tests/test_charter_integrity.py`（§13.1(5)：宪章标【已存在】的测试文件必真存在 + 五项生效门文件存在）
+**FM2/FM3/meta 门 — 已落地（2026-07-15，已对抗验证）**：`tests/test_addressability_roundtrip.py`（FM2 可寻址 round-trip：`_compact_tree_summary` 长 id 逐字 + `dispatch_get`→`dispatch_delete_layer` 全链）· `tests/test_library_ledger_contract.py`（FM3 库侧：`vector_motion` 成功带 `layer_id`+`next`、六类 typed 错误、`recovery:'fix_args'`）· `tests/test_v3_ledger_partial_disclosure.py`（FM3 host 侧：`_FailsThenExplainsHonestly` 驱动真实 loop，诚实部分被交付，host 无 completion verdict）· `tests/test_charter_integrity.py`（§13.1(5)：宪章标【已存在】的测试文件必真存在 + 五项生效门文件存在）
 **Shape A 门测试 — 待落地（TO BE CREATED）**：`tests/test_<verb>_tool.py::{test_success_carries_asset_and_next, test_errors_are_typed_and_recoverable}` · host `test_recoverable_library_failure_degrades_to_partial` · `test_<lib>_addressability_roundtrip` · `test_layer_tree_handles_round_trip` · `test_truncated_list_has_full_enumeration_path` · `test_no_raw_numbers` · `test_no_floor_disabling_default` · `test_<lib>_taste_floor_property` + `test_taste_floor_test_is_nontrivial` · `test_<lib>_determinism_subprocess` + `test_no_wallclock_no_env_static` · `test_no_new_render_symbols` · `test_layering_import_contract`（importlinter）· `test_global_token_uniqueness` · `test_novel_inband_brief_yields_distinct_behaviour` · `test_stub_and_prose_whitelists_are_bounded`
 **Shape A 引擎参考实现（`lumenframe/vector/*`）**：`api.py`（唯一 director、`random.Random(seed)`+`reset_ids`、打分表、plan 组装、`adjust_scene`；`next` emit `:135,213`）· `params.py`（`ResolvedParams` 七轴表、`resolve()` 守卫）· `behaviors/__init__.py`（`@behavior`、`BEHAVIORS`/`BEHAVIOR_CATALOG`、`describe_behaviors()`、`apply_behavior`）· `scene.py`（IR、`TRACK_PROPS`、`validate_scene`、`threading.local` id 计数器、`scene_signature`）· `svg.py`（render-safety）· `render.py`（`scene_to_html_layer`、`validate_html_layer`、`AdapterReport(honored/dropped)`、`props.vector_brief`）· `choreography.py`（`phase_windows()`、`INTENT_ARCS`、`assign_roles`）· `motion.py`（track builders）· `docs/vector-motion-plan.md`（架构契约，人评审）
 **Shape B（`lumenframe/*`）**：`<lib>/<name>.py`（纯 `(**params)->list[op_dict]`）· `elements/__init__.py`（`ELEMENTS`/`ELEMENT_CATALOG`/`SHARED_PARAMS :97-99`）· `templates/__init__.py`（`TEMPLATES`/`TEMPLATE_CATALOG`/`SHARED_PARAMS :80-82`）· `templates/theme.py`（`PALETTES['lumeri']['accent']`、`nx/ny`、type scale）· `ops.py`（`_op_apply_template :2046-2073`、`_op_apply_element :2076-2105`，`TypeError→LayerPatchError('E_ARG')`，`@register_op(..., source='core')`）· `catalog.py`（`describe_ops() :280-326`）
@@ -812,7 +812,7 @@ RATIFIED 之后：仍标 **【待落地】** 的是**每库自带**验收门（�
 **S2 · 流程归技能**：跨域 workflow、外部服务用法、本机/用户偏好、踩坑经验（Pitfalls）是技能的**合法长期居民**，**MUST NOT** 硬塞成库——P6 单域闭包 + §0.4 六点契约不满足者不得入库（强行入库即 AP1/AP30）。技能是长尾知识的唯一容器；现网 `pixabay-pexels`、`audio_ducking_setup`、`batch_rough_cut` 即为范式。
 
 **S3 · 技能引用库的创作语言，不绕过库**：技能步骤涉及已关闭域时 **MUST** 说库动词 + 创意语言（"调 `grade` op create，look teal_orange，warmth 0.7"），**MUST NOT** 携带数字配方（由 S1 门拦截）或指向已失效的 legacy primitives。
-**可测形式**：save 侧 = S1 门【已存在】；recall 侧 craft/坏文件隔离（含 legacy JSON 通道）【已存在，见 S1 读侧语义】；recall 侧**失效引用**过滤（召回时按 `TOOL_NAMES` 校验 `tools_used`/steps、对 legacy SKILL.md 来源降权或排除）**【待落地 · 已立为独立修复任务】**——在其落地前，S3 的失效引用半边以指导效力存在（§0.8 草案纪律）。
+**可测形式**：save 侧 = S1 门【已存在】；recall 侧 craft/坏文件隔离（含 legacy JSON 通道）【已存在，见 S1 读侧语义】；recall 侧 **.lus `tools_used` 失效引用**过滤（召回选中时按 `TOOL_NAMES` 校验，死引用者隔离出召回并留具名 WARNING 信号、工具面不可解析时 fail-open）**【已存在】**——`gemia/skill_store.py::_materialize_recall_view` + `tests/test_skill_distill.py`（`test_dead_tool_lus_is_excluded_from_recall_with_signal` 死引用隔离 / `test_live_tool_lus_is_recalled_not_over_excluded` 活工具放行，宁窄勿宽双测试）。**legacy SKILL.md 来源**（其 primitives 是 v2 点分路径，与 v3 `TOOL_NAMES` 天然不相交的 namespace）的**降权或排除**仍**【待落地】**：正确判定需先确定 v2 primitive 在 v3 是否仍被路由，盲用 `TOOL_NAMES` 校验会把全部内置库技能误判为死引用而抹除（违反本节守卫边界）；据 §14.3 纪律，这是"该 legacy namespace 需一次迁移或裁决"的信号，不是扩校验的理由。在该半边落地前，它以指导效力存在（§0.8 草案纪律）。
 
 ### §14.2 仲裁细则
 

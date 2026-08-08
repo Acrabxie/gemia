@@ -1,14 +1,13 @@
-"""Deterministic per-turn execution ledger for Lumeri v3.
+"""Deterministic per-turn tool-activity record for Lumeri v3.
 
 The ledger is intentionally independent from the agent loop.  It can consume
 today's raw tool-result dictionaries and a future structured ``ToolOutcome``
 object through the same duck-typed adapter.  Its job is to preserve the facts
 that prose history tends to lose: what the user asked for, what mutated, what
-was verified afterwards, which jobs are still live, and which objective
-acceptance criteria remain unsatisfied.
+was verified afterwards, which jobs are still live, and which requested facts
+have not yet been observed.
 
-No method in this module executes a tool.  Completion is a derived decision,
-not a model-authored claim.
+No method in this module executes a tool or decides whether the model may stop.
 """
 from __future__ import annotations
 
@@ -40,7 +39,9 @@ VISUAL_VERIFICATION_TOOLS = frozenset({
     "host_visual_review",
 })
 
-OBJECTIVE_VERIFICATION_TOOLS = frozenset({"probe_media", "analyze_media"})
+OBJECTIVE_VERIFICATION_TOOLS = frozenset(
+    {"probe_media", "analyze_media", "verify_delivery"}
+)
 
 # Only host-derived media/project facts may satisfy deterministic acceptance
 # criteria.  Production tools can truthfully report that an operation ran, but
@@ -56,7 +57,7 @@ MUTATION_TOOLS = frozenset({
     "composite", "color_grade", "adjust_media", "paint_overlay",
     "paint_mask_effect", "add_overlay", "arrange_timeline", "mix_audio",
     "edit_audio", "transform_geometry", "smart_reframe", "assemble_shotlist",
-    "set_shotlist", "update_shot", "refine_shot", "annotate_media",
+    "set_shotlist", "update_shot", "refine_shot", "annotate_media", "prepare_roughcut",
     "write_media_annotation", "draft_shotlist", "export", "file_write", "file_copy",
     "file_move", "file_delete", "build", "save_skill", "remember",
     "log_note", "lumen_patch", "lumen_add_layer", "lumen_set_transform",
@@ -75,6 +76,7 @@ MUTATION_TOOLS = frozenset({
     "timeline_undo", "project_export", "project_export_otio",
     "project_import_otio", "write_file", "copy_in", "move_file",
     "organize_files", "align_audio", "run_shell",
+    "patch_design_state",
 })
 
 
@@ -870,16 +872,6 @@ class FailureRecord:
     job_id: str | None = None
     target_key: str | None = None
     blocking: bool = True
-
-
-@dataclass(frozen=True)
-class CompletionDecision:
-    status: str
-    blockers: tuple[str, ...]
-
-    @property
-    def complete(self) -> bool:
-        return self.status == "complete"
 
 
 def _read(value: Any, key: str, default: Any = _MISSING) -> Any:
@@ -1795,7 +1787,10 @@ def _workflow_steps(workflow: str, request: str) -> dict[str, LedgerStep]:
     if workflow in _READ_ONLY_WORKFLOWS:
         return {"inspect": LedgerStep("inspect", "Inspect the requested source")}
     if workflow == "files" and re.search(
-        r"(?:读取|查看|列出|检查|read\b|list\b|inspect\b)", request, re.I
+        r"(?:读取|查看|列出|检查|找到|找出|找一下|查找|寻找|搜索|检索|"
+        r"read\b|list\b|inspect\b|find\b|locate\b|search\b)",
+        request,
+        re.I,
     ) and not re.search(
         r"(?:写入|创建|复制|移动|删除|整理|write\b|copy\b|move\b|delete\b|organize\b)",
         request,
@@ -1803,7 +1798,10 @@ def _workflow_steps(workflow: str, request: str) -> dict[str, LedgerStep]:
     ):
         return {"inspect": LedgerStep("inspect", "Read or inspect the requested files")}
     if workflow == "annotations" and re.search(
-        r"(?:搜索|查询|查看|获取|search\b|get\b|list\b)", request, re.I
+        r"(?:搜索|查询|查看|获取|找到|找出|找一下|查找|寻找|检索|"
+        r"search\b|get\b|list\b|find\b|locate\b)",
+        request,
+        re.I,
     ) and not re.search(
         r"(?:添加|写入|标注|更新|add\b|write\b|annotate\b|update\b)", request, re.I
     ):
@@ -2136,6 +2134,11 @@ class TurnLedger:
 
         self._record_job_state(job_id, status, record)
         if not ok:
+            # A failed ancillary read/diagnostic call remains feedback without
+            # being marked as a blocking failure. When the read itself is the
+            # requested work (a pure inspect turn), preserve it as unresolved
+            # evidence for the model to interpret.
+            read_is_requested_work = "inspect" in self.steps
             failure = FailureRecord(
                 call_id=call,
                 tool_name=tool,
@@ -2144,7 +2147,8 @@ class TurnLedger:
                 seq=self.sequence,
                 job_id=job_id,
                 target_key=resolved_target,
-                blocking=bool(blocking_failure),
+                blocking=bool(blocking_failure)
+                and (tool not in _READ_ACTION_TOOLS or read_is_requested_work),
             )
             self.unresolved_failures[call] = failure
             self._mark_action_failed(tool, call)
@@ -2271,8 +2275,8 @@ class TurnLedger:
         if not job_id:
             return
         if job_id.startswith(_BACKGROUND_SHELL_JOB_PREFIX):
-            # Background shell jobs never gate turn completion — the session
-            # watcher owns their lifecycle (SSE update + notice + resume).
+            # The session watcher owns background shell job lifecycle and
+            # reports it through an SSE update, notice, and resume turn.
             return
         if status in PENDING_JOB_STATES:
             self.pending_jobs[job_id] = status
@@ -2582,28 +2586,33 @@ class TurnLedger:
             if evidence_id not in criterion.evidence_ids:
                 criterion.evidence_ids.append(evidence_id)
 
-    def completion_decision(self) -> CompletionDecision:
-        if self.workflow == "conversation":
-            return CompletionDecision("complete", ())
+    def open_observations(self) -> tuple[str, ...]:
+        """Return unobserved request facts for diagnostics only.
 
-        blockers: list[str] = []
+        These observations are never a completion verdict and must not gate a
+        model-authored response.
+        """
+        if self.workflow == "conversation":
+            return ()
+
+        observations: list[str] = []
         for step in self.steps.values():
             if step.required and step.status != "done":
-                blockers.append(f"step:{step.id}:{step.status}")
+                observations.append(f"step:{step.id}:{step.status}")
         for criterion in self.criteria.values():
             if criterion.status != "passed":
-                blockers.append(f"criterion:{criterion.id}:{criterion.status}")
+                observations.append(f"criterion:{criterion.id}:{criterion.status}")
         for job_id, status in self.pending_jobs.items():
             prefix = "failed_job" if status in FAILED_JOB_STATES else "pending_job"
-            blockers.append(f"{prefix}:{job_id}:{status}")
+            observations.append(f"{prefix}:{job_id}:{status}")
         for call_id, failure in self.unresolved_failures.items():
             if failure.blocking:
-                blockers.append(f"failure:{call_id}:{failure.error_code}")
+                observations.append(f"failure:{call_id}:{failure.error_code}")
         if self.requires_final_asset and not self.final_asset_ids:
-            blockers.append("final_asset:missing")
+            observations.append("final_asset:missing")
         if self.requires_final_asset:
             for kind in sorted(self.expected_final_kinds - self.final_asset_kind_set):
-                blockers.append(f"final_asset_kind:{kind}:missing")
+                observations.append(f"final_asset_kind:{kind}:missing")
         if (
             self.requires_visual_verification
             and self.last_mutation_seq
@@ -2617,11 +2626,8 @@ class TurnLedger:
                 )
             )
         ):
-            blockers.append("verification:stale_or_missing")
-        return CompletionDecision("complete" if not blockers else "incomplete", tuple(blockers))
-
-    def can_complete(self) -> bool:
-        return self.completion_decision().complete
+            observations.append("verification:stale_or_missing")
+        return tuple(observations)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2649,7 +2655,7 @@ class TurnLedger:
             },
             "superseded_failure_ids": list(self.superseded_failure_ids),
             "compact_history": list(self.compact_history),
-            "completion": asdict(self.completion_decision()),
+            "open_observations": list(self.open_observations()),
         }
 
     def add_compact_history(self, summaries: Iterable[str]) -> None:
@@ -2658,22 +2664,6 @@ class TurnLedger:
             if text:
                 self.compact_history.append(text[:500])
         self.compact_history = self.compact_history[-40:]
-
-    def to_prompt_text(self) -> str:
-        decision = self.completion_decision()
-        open_steps = [step.id for step in self.steps.values() if step.status != "done"]
-        open_criteria = [item.id for item in self.criteria.values() if item.status != "passed"]
-        return (
-            f"Turn ledger: workflow={self.workflow}; workflows={self.workflows}; "
-            f"required_final_kinds={sorted(self.required_final_kinds)}; "
-            f"sequence={self.sequence}; "
-            f"open_steps={open_steps}; open_criteria={open_criteria}; "
-            f"final_assets={self.final_asset_ids}; final_kinds={self.final_asset_kinds}; "
-            f"pending_jobs={self.pending_jobs}; "
-            f"completion={decision.status}; blockers={list(decision.blockers)}; "
-            f"compact_history={self.compact_history[-12:]}"
-        )
-
 
 # Background shell jobs (run_shell run_in_background=true) are owned by the
 # session watcher: completion arrives as a host notice + auto-resume turn,
@@ -2777,7 +2767,6 @@ def _criterion_matches(criterion: AcceptanceCriterion, actual: Any) -> bool:
 
 __all__ = [
     "AcceptanceCriterion",
-    "CompletionDecision",
     "FAILED_JOB_STATES",
     "FailureRecord",
     "FINISHED_JOB_STATES",

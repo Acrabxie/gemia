@@ -48,12 +48,22 @@ class VeoClient:
     """
 
     def __init__(self) -> None:
-        self.api_key = os.environ.get("OPENROUTER_API_KEY")
+        try:
+            from gemia import cloud_accounts
+
+            cloud_key = cloud_accounts.credential_for_provider("openrouter")
+        except Exception:
+            cloud_key = "" if os.environ.get("LUMERI_CLOUD_ACCOUNTS", "").strip().lower() in {"1", "true", "yes"} else None
+        self.api_key = cloud_key if cloud_key is not None else os.environ.get("OPENROUTER_API_KEY")
         if not self.api_key:
             raise RuntimeError(
                 "Set OPENROUTER_API_KEY for Veo video generation."
             )
-        self.base_url = os.environ.get("OPENROUTER_VEO_URL", _DEFAULT_BASE_URL).rstrip("/")
+        self.base_url = (
+            _DEFAULT_BASE_URL
+            if cloud_key is not None
+            else os.environ.get("OPENROUTER_VEO_URL", _DEFAULT_BASE_URL)
+        ).rstrip("/")
         self.model = strongest_media_model(
             "video", "openrouter", (os.environ.get("VEO_MODEL"), _DEFAULT_MODEL)
         )

@@ -84,7 +84,8 @@ def _post(loop: AgentLoopV3, sid: str, op_body: dict) -> _PostHandler:
     runner = SimpleNamespace(
         agent=loop,
         session_id=sid,
-        run_project_edit=lambda fn, timeout=30.0: fn(),
+        cached_project_revision=0,
+        run_project_edit=lambda fn, **_kwargs: fn(),
     )
     ok = v3_routes._session_timeline_op(handler, runner)
     assert ok is True
@@ -120,6 +121,45 @@ def test_move_applies_and_emits_sse_with_user_provenance(tmp_path) -> None:
     assert _clip(loop, "c1")["provenance"]["source"] == "user_direct_edit"
 
 
+def test_replayed_client_operation_is_idempotent_even_with_stale_revision(tmp_path) -> None:
+    loop, events = _loop(tmp_path, "de-idempotent")
+    _seed_video_clip(loop)
+    events.clear()
+    body = {
+        "op": "move", "clip_id": "c1", "start": 2.0,
+        "client_op_id": "gesture-1", "expected_project_revision": 0,
+    }
+
+    first = _post(loop, "de-idempotent", body)
+    seq = loop.project.store.load_meta(loop.project.project_id)["patch_seq"]
+    replay = _post(loop, "de-idempotent", body)
+
+    assert first.status == 200
+    assert replay.status == 200
+    assert replay.body_json["duplicate"] is True
+    assert loop.project.store.load_meta(loop.project.project_id)["patch_seq"] == seq
+    assert len([event for event in events if event.get("kind") == "timeline_op"]) == 1
+
+
+def test_move_can_change_to_another_compatible_track(tmp_path) -> None:
+    loop, _ = _loop(tmp_path, "de-move-track")
+    _seed_video_clip(loop)
+    loop.project.apply_ops(
+        [{"op": "add_track", "kind": "video", "track_id": "V2"}],
+        label="test-add-track",
+    )
+
+    h = _post(
+        loop,
+        "de-move-track",
+        {"op": "move", "clip_id": "c1", "start": 2.0, "track_id": "V2"},
+    )
+
+    assert h.status == 200
+    assert _clip(loop, "c1")["track_id"] == "V2"
+    assert abs(_clip(loop, "c1")["start"] - 2.0) < 1e-3
+
+
 def test_trim_applies(tmp_path) -> None:
     loop, _ = _loop(tmp_path, "de-trim")
     _seed_video_clip(loop, duration=5.0)
@@ -128,6 +168,26 @@ def test_trim_applies(tmp_path) -> None:
     c = _clip(loop, "c1")
     assert abs(c["source_in"] - 1.0) < 1e-3 and abs(c["source_out"] - 4.0) < 1e-3
     assert abs(c["duration"] - 3.0) < 1e-3
+
+
+def test_trim_head_moves_and_trims_as_one_history_step(tmp_path) -> None:
+    loop, _ = _loop(tmp_path, "de-trim-head")
+    _seed_video_clip(loop, start=2.0, duration=5.0)
+    before_seq = loop.project.store.load_meta(loop.project.project_id)["patch_seq"]
+
+    h = _post(loop, "de-trim-head", {
+        "op": "trim_head", "clip_id": "c1", "start": 3.0, "source_in": 1.0,
+    })
+
+    assert h.status == 200
+    clip = _clip(loop, "c1")
+    assert clip["start"] == 3.0
+    assert clip["source_in"] == 1.0
+    assert loop.project.store.load_meta(loop.project.project_id)["patch_seq"] == before_seq + 1
+    loop.project.undo(1)
+    restored = _clip(loop, "c1")
+    assert restored["start"] == 2.0
+    assert restored["source_in"] == 0.0
 
 
 def test_set_time_applies(tmp_path) -> None:
@@ -152,6 +212,35 @@ def test_set_effects_applies(tmp_path) -> None:
     h = _post(loop, "de-fx", {"op": "set_effects", "clip_id": "c1", "effects": {"muted": True}})
     assert h.status == 200
     assert _clip(loop, "c1")["effects"].get("muted") is True
+
+
+def test_continuous_rotation_applies_without_export_warning(tmp_path) -> None:
+    loop, _ = _loop(tmp_path, "de-rotate")
+    _seed_video_clip(loop)
+    h = _post(loop, "de-rotate", {
+        "op": "set_effects", "clip_id": "c1",
+        "effects": {"x": 120, "y": 80, "scale": 0.72, "rotation": 17.5},
+    })
+    assert h.status == 200
+    assert h.body_json.get("warnings") is None
+    assert _clip(loop, "c1")["effects"]["rotation"] == 17.5
+
+
+def test_undo_and_redo_restore_one_direct_edit(tmp_path) -> None:
+    loop, _ = _loop(tmp_path, "de-redo")
+    _seed_video_clip(loop)
+    moved = _post(loop, "de-redo", {"op": "move", "clip_id": "c1", "start": 2.0})
+    assert moved.status == 200 and moved.body_json["can_undo"] is True
+
+    undone = _post(loop, "de-redo", {"op": "undo", "steps": 1})
+    assert undone.status == 200
+    assert _clip(loop, "c1")["start"] == 0.0
+    assert undone.body_json["can_redo"] is True
+
+    redone = _post(loop, "de-redo", {"op": "redo", "steps": 1})
+    assert redone.status == 200
+    assert _clip(loop, "c1")["start"] == 2.0
+    assert redone.body_json["can_redo"] is False
 
 
 def test_delete_removes_clip(tmp_path) -> None:
@@ -203,6 +292,58 @@ def test_missing_clip_id_rejected(tmp_path) -> None:
     _seed_video_clip(loop)
     h = _post(loop, "de-bad5", {"op": "move", "start": 1.0})
     assert h.status == 400
+
+
+def test_edit_forwards_expected_revision_and_returns_committed_revision(tmp_path) -> None:
+    loop, _ = _loop(tmp_path, "de-revision")
+    _seed_video_clip(loop)
+    captured: dict[str, Any] = {}
+
+    def run_project_edit(fn, **kwargs):
+        captured.update(kwargs)
+        return fn()
+
+    runner = SimpleNamespace(
+        agent=loop,
+        session_id="de-revision",
+        cached_project_revision=8,
+        run_project_edit=run_project_edit,
+    )
+    body = json.dumps(
+        {
+            "op": "move",
+            "clip_id": "c1",
+            "start": 1.0,
+            "expected_project_revision": 7,
+        }
+    ).encode("utf-8")
+    handler = _PostHandler(body)
+
+    assert v3_routes._session_timeline_op(handler, runner) is True
+    assert handler.status == 200
+    assert captured["expected_project_revision"] == 7
+    assert handler.body_json["project_revision"] == 8
+
+
+def test_edit_rejects_invalid_expected_revision_before_mutation(tmp_path) -> None:
+    loop, _ = _loop(tmp_path, "de-bad-revision")
+    _seed_video_clip(loop)
+    before = _clip(loop, "c1")["start"]
+
+    handler = _post(
+        loop,
+        "de-bad-revision",
+        {
+            "op": "move",
+            "clip_id": "c1",
+            "start": 2.0,
+            "expected_project_revision": True,
+        },
+    )
+
+    assert handler.status == 400
+    assert handler.body_json["code"] == "E_BAD_ARG"
+    assert _clip(loop, "c1")["start"] == before
 
 
 # ── undo + patch log integration ──────────────────────────────────────────────

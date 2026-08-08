@@ -1,7 +1,7 @@
 {
   "name": "lumeri-desktop",
   "productName": "Lumeri",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Lumeri desktop preview — AI creative workflow engine",
   "main": "main.js",
   "author": {

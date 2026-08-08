@@ -12,7 +12,10 @@ reserve_amount used by the subtask fan-out. Covers:
 """
 from __future__ import annotations
 
+import pytest
+
 from gemia.budget_guard import BudgetGuard, BudgetReservation
+from gemia.production_budget import ProductionMediaBudget
 
 
 # ── ported d7f941c reservation math ──────────────────────────────────────────
@@ -143,3 +146,26 @@ def test_spawn_subtasks_cost_row_is_near_free() -> None:
     usd, eta = g.estimate("spawn_subtasks")
     assert usd == 0.0
     assert eta == 1.0
+
+
+def test_production_run_has_no_legacy_time_stop_or_five_dollar_paid_gate(tmp_path) -> None:
+    ledger = ProductionMediaBudget(tmp_path / "budget.json", run_id="formal")
+    ledger.import_baseline(import_key="echo-old-spend", amount_usd="1.525")
+    guard = BudgetGuard.for_production_run(ledger)
+    assert guard.max_seconds is None
+    guard.spent_seconds = 100_000.0
+    assert guard.check("edit_video").ok
+    # Three formal 8-second Veo reservations fit the run policy even though
+    # their $8.40 total would have tripped the legacy $5 session guard.
+    for index in range(3):
+        decision = guard.reserve_paid_media(
+            "generate_video",
+            idempotency_key=f"veo-{index}",
+            provider="vertex",
+            model="veo-3.1-fast",
+            requested_duration_sec=8,
+        )
+        assert decision.ok
+    assert ledger.snapshot()["veo_reserved_duration_sec"] == 24.0
+    with pytest.raises(RuntimeError, match="reserve_paid_media"):
+        guard.reserve("generate_video")

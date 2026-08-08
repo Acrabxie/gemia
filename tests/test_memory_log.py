@@ -22,7 +22,9 @@ from pathlib import Path
 
 import pytest
 
-from gemia import memory
+from gemia import memory, project_context
+from gemia.production_store import ProductionStore
+from gemia.tools._context import AssetRegistry, ToolContext
 
 
 @pytest.fixture
@@ -183,6 +185,156 @@ def test_log_note_tool_appends(mem_root: Path) -> None:
     assert "breadcrumb from the agent" in path.read_text(encoding="utf-8")
 
 
+def test_project_memory_and_log_are_shared_and_injected(
+    mem_root: Path, tmp_path: Path
+) -> None:
+    from gemia.agent_loop_v3 import AgentLoopV3
+    from gemia.tools import DISPATCHER
+
+    store = ProductionStore(tmp_path / "lumeri-data")
+    store.create_project("project-context", name="Context")
+    ctx = ToolContext(
+        session_id="session-context",
+        output_dir=tmp_path / "session-output",
+        registry=AssetRegistry(),
+        emit_progress=lambda _update: None,
+        extra={"production_store": store, "project_id": "project-context"},
+    )
+
+    remembered = asyncio.run(
+        DISPATCHER["remember"](
+            {"content": "Keep the opening restrained", "title": "Opening"},
+            ctx,
+        )
+    )
+    logged = asyncio.run(
+        DISPATCHER["log_note"]({"text": "first assembly completed"}, ctx)
+    )
+    assert remembered["scope"] == "project"
+    assert logged["scope"] == "project"
+    assert not memory.durable_memory_path().exists()
+
+    loop = AgentLoopV3(
+        session_id="session-context-prompt",
+        output_dir=tmp_path / "loop-output",
+        budget_max_usd=1.0,
+        budget_max_seconds=60.0,
+        gemini_client=object(),
+        extra={"production_store": store, "project_id": "project-context"},
+    )
+    system = loop.render_messages()[0]["content"]
+    assert "Global memory (applies across all Projects)" in system
+    assert "Keep the opening restrained" in system
+    assert "first assembly completed" in system
+    assert "only for this Project" in system
+    assert "Current Project: Context" in system
+    assert "one long-lived workspace" in system
+    assert "`project://edit/` is Lumeri's private editing root" in system
+    assert "Never carry this Project's private context into another Project" in system
+
+
+def test_project_memory_is_shared_across_its_sessions_and_isolated_between_projects(
+    mem_root: Path, tmp_path: Path
+) -> None:
+    from gemia.agent_loop_v3 import AgentLoopV3
+
+    store = ProductionStore(tmp_path / "lumeri-data")
+    source_a = tmp_path / "film-a-source"
+    source_a.mkdir()
+    store.create_project("project-a", name="Film A", source_root=source_a)
+    store.create_project("project-b", name="Film B")
+    project_context.remember_fact(store, "project-a", "Use a restrained blue grade")
+    project_context.remember_fact(store, "project-b", "Use a warm amber grade")
+
+    def render(project_id: str, session_id: str) -> str:
+        loop = AgentLoopV3(
+            session_id=session_id,
+            output_dir=tmp_path / session_id,
+            budget_max_usd=1.0,
+            budget_max_seconds=60.0,
+            gemini_client=object(),
+            extra={"production_store": store, "project_id": project_id},
+        )
+        return loop.render_messages()[0]["content"]
+
+    project_a_first = render("project-a", "film-a-session-1")
+    project_a_second = render("project-a", "film-a-session-2")
+    project_b = render("project-b", "film-b-session-1")
+
+    assert "Current Project: Film A" in project_a_first
+    assert "`project://source/` is the bound source folder" in project_a_first
+    assert str(source_a.resolve()) not in project_a_first
+    assert "Use a restrained blue grade" in project_a_first
+    assert "Use a restrained blue grade" in project_a_second
+    assert "Use a warm amber grade" not in project_a_first
+    assert "Use a warm amber grade" not in project_a_second
+
+    assert "Current Project: Film B" in project_b
+    assert "No source folder is bound" in project_b
+    assert "Use a warm amber grade" in project_b
+    assert "Use a restrained blue grade" not in project_b
+
+
+def test_internal_chat_container_is_not_treated_as_a_project(
+    mem_root: Path, tmp_path: Path
+) -> None:
+    from gemia.agent_loop_v3 import AgentLoopV3
+    from gemia.tools import DISPATCHER
+
+    store = ProductionStore(tmp_path / "lumeri-data")
+    store.create_project("v3-internal-chat")
+    project_context.remember_fact(
+        store,
+        "v3-internal-chat",
+        "legacy internal marker must stay outside the prompt",
+    )
+    ctx = ToolContext(
+        session_id="plain-chat",
+        output_dir=tmp_path / "plain-chat-output",
+        registry=AssetRegistry(),
+        emit_progress=lambda _update: None,
+        extra={"production_store": store, "project_id": "v3-internal-chat"},
+    )
+    remembered = asyncio.run(
+        DISPATCHER["remember"]({"content": "Creator prefers concise replies"}, ctx)
+    )
+    assert remembered["scope"] == "global"
+
+    loop = AgentLoopV3(
+        session_id="plain-chat",
+        output_dir=tmp_path / "plain-chat-loop",
+        budget_max_usd=1.0,
+        budget_max_seconds=60.0,
+        gemini_client=object(),
+        extra={"production_store": store, "project_id": "v3-internal-chat"},
+    )
+    system = loop.render_messages()[0]["content"]
+    assert "independent Chat with an internal session workspace" in system
+    assert "Creator prefers concise replies" in system
+    assert "legacy internal marker must stay outside the prompt" not in system
+
+
+def test_project_turn_auto_log_also_keeps_global_log(
+    mem_root: Path, tmp_path: Path
+) -> None:
+    from gemia.agent_loop_v3 import AgentLoopV3
+
+    store = ProductionStore(tmp_path / "lumeri-data")
+    store.create_project("project-log", name="Logs")
+    loop = AgentLoopV3(
+        session_id="session-project-log",
+        output_dir=tmp_path / "loop-output",
+        budget_max_usd=1.0,
+        budget_max_seconds=60.0,
+        gemini_client=object(),
+        extra={"production_store": store, "project_id": "project-log"},
+    )
+    loop._pinned_intent = "make a careful rough cut"
+    loop._auto_log_turn(tools_succeeded=2, tools_failed=0, assets_produced=1)
+    assert "careful rough cut" in memory.daily_path().read_text(encoding="utf-8")
+    assert "careful rough cut" in project_context.format_for_prompt(store, "project-log")
+
+
 # ── activity-reporting protocol present in the prompt ─────────────────
 
 
@@ -204,6 +356,38 @@ def test_narration_directive_present_in_prompt() -> None:
     assert "Before each meaningful batch of tool calls" in tpl
     # The tag format the host parses.
     assert "<activity>" in tpl
+
+
+def test_activity_prompt_requires_initial_direction_and_flexible_updates() -> None:
+    tpl = (
+        Path(__file__).resolve().parent.parent
+        / "gemia"
+        / "prompts"
+        / "system_v3.md"
+    ).read_text(encoding="utf-8")
+    section = tpl.split("## Activity reporting protocol", 1)[1].split("\n---", 1)[0]
+    folded = " ".join(section.casefold().split())
+
+    assert "first user-visible output after the user's message" in folded
+    assert "briefly describe the overall direction of the work" in folded
+    assert "meaningful phase change" in folded
+    assert "noticeable wait" in folded
+    assert "use judgment rather than a fixed cadence" in folded
+    assert "report merely because another tool call happened" in folded
+    assert "at most 3 per turn" not in folded
+
+
+def test_user_facing_language_softly_prefers_plain_terms() -> None:
+    tpl = (
+        Path(__file__).resolve().parent.parent
+        / "gemia"
+        / "prompts"
+        / "system_v3.md"
+    ).read_text(encoding="utf-8")
+    assert "Prefer plain creative language" in tpl
+    assert "unless they are genuinely needed" in tpl
+    assert "This is a preference, not a" in tpl
+    assert "ban: when technical terms are necessary" in tpl
 
 
 # ── new tools registered ──────────────────────────────────────────────

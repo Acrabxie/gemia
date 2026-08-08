@@ -163,6 +163,52 @@ def test_upload_media_route_round_trips_asset_library(monkeypatch, tmp_path: Pat
         assert json.loads(raw)["assets"] == []
 
 
+def test_media_routes_do_not_read_across_active_projects(monkeypatch, tmp_path: Path) -> None:
+    _patch_account_roots(monkeypatch, tmp_path)
+    monkeypatch.setattr(server, "_INPUTS_DIR", tmp_path / "inputs")
+    monkeypatch.setattr(
+        accounts,
+        "verify_google_id_token",
+        lambda credential, client_id=None: _claims("g-project", "project@example.com"),
+    )
+    accounts.sign_in_with_google("project")
+    active = {"project_id": "project-one"}
+    monkeypatch.setattr(server, "_active_media_project_id", lambda _account_id: active["project_id"])
+    source = _make_image(tmp_path / "project.png")
+
+    with _TestServer() as app:
+        status, _, raw = app.request(
+            "POST",
+            "/upload-media",
+            data=source.read_bytes(),
+            headers={"Content-Type": "image/png", "X-Filename": "project.png"},
+        )
+        assert status == 200
+        source_asset = json.loads(raw)["asset"]
+        assert source_asset["project_id"] == "project-one"
+
+        active["project_id"] = "project-two"
+        status, _, raw = app.request("GET", "/media-library/list")
+        assert status == 200
+        assert json.loads(raw)["assets"] == []
+        status, _, _ = app.request("GET", f"/media-library/{source_asset['asset_id']}")
+        assert status == 404
+        status, _, _ = app.request("GET", source_asset["preview_src"])
+        assert status == 404
+
+        status, _, raw = app.request(
+            "POST",
+            "/media-library/copy",
+            {"source_project_id": "project-one", "asset_id": source_asset["asset_id"]},
+        )
+        assert status == 200
+        copied = json.loads(raw)["asset"]
+        assert copied["project_id"] == "project-two"
+        assert copied["asset_id"] != source_asset["asset_id"]
+        status, _, raw = app.request("GET", "/media-library/list")
+        assert [item["asset_id"] for item in json.loads(raw)["assets"]] == [copied["asset_id"]]
+
+
 def test_media_annotation_routes_and_search(monkeypatch, tmp_path: Path) -> None:
     _patch_account_roots(monkeypatch, tmp_path)
     monkeypatch.setattr(server, "_INPUTS_DIR", tmp_path / "inputs")

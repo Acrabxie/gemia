@@ -1,0 +1,4849 @@
+{
+  "api_version": 1,
+  "capabilities": [
+    {
+      "description": "Create a new still image with GPT Image 2 through the OpenAI subscription bridge. This capability is exposed only when the selected provider is openai_subscription; it has no other-provider fallback. Returns a new asset_id.",
+      "effect": "write",
+      "estimated_eta_sec": 10.0,
+      "estimated_usd": 0.101,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "generate_image",
+      "paid": true,
+      "parameters": {
+        "properties": {
+          "aspect_ratio": {
+            "description": "Frame aspect ratio.",
+            "enum": [
+              "1:1",
+              "16:9",
+              "9:16",
+              "4:3",
+              "3:4"
+            ],
+            "type": "string"
+          },
+          "prompt": {
+            "description": "What the image should depict.",
+            "type": "string"
+          },
+          "reference_asset_ids": {
+            "description": "Optional reference assets for image-to-image guidance.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "style": {
+            "description": "Optional aesthetic hint (e.g. 'cinematic, soft light').",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "image",
+        "video_generation",
+        "storyboard",
+        "quanta"
+      ]
+    },
+    {
+      "description": "Submit a Vertex AI Veo video generation job. Returns a job_id immediately (non-blocking). Use check_job(job_id) to poll or wait_for_job(job_id) to block until the video asset is ready. Expensive — prefer search_library or local editing when existing footage can satisfy the task.",
+      "effect": "write",
+      "estimated_eta_sec": 120.0,
+      "estimated_usd": 2.8,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "generate_video",
+      "paid": true,
+      "parameters": {
+        "properties": {
+          "aspect_ratio": {
+            "enum": [
+              "16:9",
+              "9:16",
+              "1:1"
+            ],
+            "type": "string"
+          },
+          "camera": {
+            "description": "Optional motion hint (e.g. 'slow dolly in').",
+            "type": "string"
+          },
+          "duration_sec": {
+            "description": "Target duration in seconds (max 8).",
+            "type": "number"
+          },
+          "prompt": {
+            "description": "What the clip should show.",
+            "type": "string"
+          },
+          "reference_asset_id": {
+            "description": "Optional starting image for image-to-video.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "video_generation",
+        "storyboard"
+      ]
+    },
+    {
+      "description": "Create new music or sound from a text prompt using Vertex AI Lyria. Returns an audio asset_id after writing the generated WAV to the session workspace. Lyria currently returns a fixed short clip; use edit/mix tools afterward for timeline placement.",
+      "effect": "write",
+      "estimated_eta_sec": 45.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "generate_audio",
+      "paid": true,
+      "parameters": {
+        "properties": {
+          "bpm": {
+            "description": "Optional tempo target.",
+            "type": "number"
+          },
+          "duration_sec": {
+            "description": "Requested duration hint. Vertex Lyria may ignore this and return its fixed clip length.",
+            "type": "number"
+          },
+          "mood": {
+            "description": "Optional mood (e.g. 'tense, low').",
+            "type": "string"
+          },
+          "prompt": {
+            "description": "What the audio should sound like.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "audio"
+      ]
+    },
+    {
+      "description": "Turn a line of script into spoken voiceover (human-voice text-to-speech). Use this for narration/口播/解说 — generate_audio only makes music. Returns an audio asset_id and its measured duration, so you can pace the cut to the voiceover. Pass a system voice name (English 'Ava'/'Samantha', Chinese 'Tingting'/'Meijia') or omit for the system default.",
+      "effect": "write",
+      "estimated_eta_sec": 4.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "narrate",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "rate": {
+            "description": "Speaking rate in words per minute (80–400, default 175).",
+            "type": "integer"
+          },
+          "text": {
+            "description": "The script line(s) to speak.",
+            "type": "string"
+          },
+          "voice": {
+            "description": "System TTS voice name. Omit for the system default.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "audio"
+      ]
+    },
+    {
+      "description": "Put a timed subtitle track on a video and return a NEW video asset_id. source='text' (default): caption from words you already have (a narration script or explicit cues) — split evenly across the clip, exact wording, always works. source='transcribe': recover the words from the video's own speech via Whisper (needs openai-whisper). Use burn=false to add a toggleable soft-subtitle track instead of hard-coding it.",
+      "effect": "write",
+      "estimated_eta_sec": 4.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "subtitle",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "The video asset to caption.",
+            "type": "string"
+          },
+          "burn": {
+            "description": "Burn into the picture (default true) or mux a toggleable soft track (false).",
+            "type": "boolean"
+          },
+          "cues": {
+            "description": "Optional explicit cues [{start,end,text}] instead of auto-splitting text.",
+            "items": {
+              "properties": {
+                "end": {
+                  "type": "number"
+                },
+                "start": {
+                  "type": "number"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "language": {
+            "description": "Language code for transcribe (e.g. 'en', 'zh') or soft-track tag.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Where the words come from. Default 'text'.",
+            "enum": [
+              "text",
+              "transcribe"
+            ],
+            "type": "string"
+          },
+          "style": {
+            "description": "Optional look: font_size, font_color, outline_color, outline_width, margin_v.",
+            "type": "object"
+          },
+          "text": {
+            "description": "The subtitle text (source='text'). Split into timed cues across the clip.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "asset_id"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "video_edit"
+      ]
+    },
+    {
+      "description": "Add per-word animated captions (karaoke/word-pop, TikTok/Reels style) to a video and return a NEW video asset_id. Unlike `subtitle` (a static line track), each word highlights as it lands. Supply `text` (words spread evenly across the clip — no ASR needed) or explicit `word_timings` for exact sync. Renders per-frame, so it's slower — use it for the hero caption pass, not every clip.",
+      "effect": "write",
+      "estimated_eta_sec": 5.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "animate_captions",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "active_color": {
+            "description": "Color of the currently-spoken word. Default yellow.",
+            "type": "string"
+          },
+          "asset_id": {
+            "description": "The video asset to caption.",
+            "type": "string"
+          },
+          "font_size": {
+            "description": "Caption font size in px. Default 54.",
+            "type": "integer"
+          },
+          "inactive_color": {
+            "description": "Color of the other words. Default white.",
+            "type": "string"
+          },
+          "preset": {
+            "description": "Animation style. Default karaoke_pop (active word pops); quiet_captions is subtler.",
+            "enum": [
+              "karaoke_pop",
+              "quiet_captions"
+            ],
+            "type": "string"
+          },
+          "text": {
+            "description": "The words to animate (distributed evenly across the clip).",
+            "type": "string"
+          },
+          "word_timings": {
+            "description": "Optional exact per-word timing [{word,start_seconds,end_seconds}] instead of even distribution.",
+            "items": {
+              "properties": {
+                "end_seconds": {
+                  "type": "number"
+                },
+                "start_seconds": {
+                  "type": "number"
+                },
+                "word": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "asset_id"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "video_edit"
+      ]
+    },
+    {
+      "description": "Transform an existing image. Returns a new asset_id. Use operation='remove_background' to cut out the person/subject with real ML matting (clean alpha on any background — this is the '抠像/抠图/keying' verb).",
+      "effect": "write",
+      "estimated_eta_sec": 4.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "edit_image",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "An asset_id from the session registry (e.g. v_001, img_003).",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "crop",
+              "rotate",
+              "resize",
+              "blur",
+              "denoise",
+              "remove_background"
+            ],
+            "type": "string"
+          },
+          "params": {
+            "description": "Operation-specific parameters. rotate:{angle_deg}; crop:{x,y,w,h}; resize:{w,h}; blur:{radius}; denoise:{strength}. remove_background:{background?, feather?, matte_only?} — background null→transparent PNG cutout, or a colour name/[r,g,b]/asset_id/path to composite the subject over; feather softens the edge (px); matte_only=true returns the grayscale alpha mask.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "asset_id",
+          "operation"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "image"
+      ]
+    },
+    {
+      "description": "Transform an existing video. Operations: trim (cut a segment), concat (join clips end-to-end), reverse (play backward), speed (change playback speed). Returns a new asset_id.",
+      "effect": "write",
+      "estimated_eta_sec": 10.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "edit_video",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "An asset_id from the session registry (e.g. v_001, img_003).",
+            "type": "string"
+          },
+          "concat_with": {
+            "description": "For concat. Additional asset_ids to append after asset_id, in order.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "operation": {
+            "enum": [
+              "trim",
+              "concat",
+              "reverse",
+              "speed"
+            ],
+            "type": "string"
+          },
+          "speed_factor": {
+            "description": "For speed. >1 faster, <1 slower.",
+            "type": "number"
+          },
+          "trim": {
+            "description": "For trim. {start_sec, end_sec}. end_sec=null means 'to end of clip'.",
+            "properties": {
+              "end_sec": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "start_sec": {
+                "type": "number"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "asset_id",
+          "operation"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "video_generation",
+        "video_edit"
+      ]
+    },
+    {
+      "description": "Combine two visual layers into one. Returns a new asset_id.",
+      "effect": "write",
+      "estimated_eta_sec": 8.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "composite",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "base_asset_id": {
+            "description": "An asset_id from the session registry (e.g. v_001, img_003).",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "alpha",
+              "blend",
+              "screen",
+              "multiply"
+            ],
+            "type": "string"
+          },
+          "opacity": {
+            "description": "0..1",
+            "type": "number"
+          },
+          "overlay_asset_id": {
+            "description": "An asset_id from the session registry (e.g. v_001, img_003).",
+            "type": "string"
+          },
+          "position": {
+            "description": "Optional pixel offset {x, y} of the overlay's top-left.",
+            "properties": {
+              "x": {
+                "type": "integer"
+              },
+              "y": {
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "scale": {
+            "description": "Optional overlay scale factor.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "base_asset_id",
+          "overlay_asset_id",
+          "mode"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "image",
+        "video_edit"
+      ]
+    },
+    {
+      "description": "Apply one of the named color looks to a video. Returns a new asset_id.",
+      "effect": "write",
+      "estimated_eta_sec": 8.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "color_grade",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "An asset_id from the session registry (e.g. v_001, img_003).",
+            "type": "string"
+          },
+          "intensity": {
+            "description": "0..1, default 1.0. Lower values blend the graded look with the original.",
+            "type": "number"
+          },
+          "look": {
+            "description": "The color look to apply. color_grade does color looks only — there is no grayscale/black-and-white and no mirror/flip.",
+            "enum": [
+              "warm",
+              "cool",
+              "vintage",
+              "cinematic",
+              "teal_orange",
+              "neutral"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "asset_id",
+          "look"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "image",
+        "video_edit"
+      ]
+    },
+    {
+      "description": "Direct lightweight photo-app style adjustments for an image or video: brightness, contrast, saturation, exposure, and gamma. Returns a new asset_id. Use this for precise basic corrections instead of pretending a color_grade preset is the same thing.",
+      "effect": "write",
+      "estimated_eta_sec": 6.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "adjust_media",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "An asset_id from the session registry (e.g. v_001, img_003).",
+            "type": "string"
+          },
+          "brightness": {
+            "description": "Brightness offset from -1.0 to 1.0. 0 keeps original brightness.",
+            "type": "number"
+          },
+          "contrast": {
+            "description": "Contrast multiplier from 0.0 to 3.0. 1 keeps original contrast.",
+            "type": "number"
+          },
+          "exposure": {
+            "description": "Exposure change in stops from -5.0 to 5.0. 0 keeps original exposure.",
+            "type": "number"
+          },
+          "gamma": {
+            "description": "Gamma from 0.1 to 10.0. 1 keeps original gamma.",
+            "type": "number"
+          },
+          "saturation": {
+            "description": "Saturation multiplier from 0.0 to 3.0. 1 keeps original saturation; 0 is grayscale.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "asset_id"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "image",
+        "video_edit"
+      ]
+    },
+    {
+      "description": "Draw a visible annotation as a transparent PNG and place it on the current timeline as an undoable overlay clip. Use for circles, arrows, boxes, highlights, strokes, and short labels. Coordinates are normalized 0..1 canvas coordinates. First version is static/keyframed only; it does not track moving objects.",
+      "effect": "write",
+      "estimated_eta_sec": 1.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "paint_overlay",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "at_time": {
+            "description": "Alias for start_sec.",
+            "type": "number"
+          },
+          "color": {
+            "description": "#rrggbb, default #ff3030.",
+            "type": "string"
+          },
+          "duration": {
+            "description": "Overlay duration when end_sec/time_range is omitted. Default 3s.",
+            "type": "number"
+          },
+          "end_sec": {
+            "description": "Timeline end second.",
+            "type": "number"
+          },
+          "feather": {
+            "description": "Optional alpha feather/blur in pixels.",
+            "type": "number"
+          },
+          "opacity": {
+            "description": "0..1 clip opacity.",
+            "type": "number"
+          },
+          "points": {
+            "description": "Normalized points [[x,y], ...]. Stroke/arrow need 2+; rect/ellipse/highlight can use two opposite corners.",
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "rect": {
+            "description": "Optional normalized [x0,y0,x1,y1] bounds for rect/ellipse/highlight.",
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "shape": {
+            "description": "What to draw.",
+            "enum": [
+              "stroke",
+              "rect",
+              "ellipse",
+              "circle",
+              "arrow",
+              "highlight",
+              "text"
+            ],
+            "type": "string"
+          },
+          "start_sec": {
+            "description": "Timeline start second. Alias: at_time.",
+            "type": "number"
+          },
+          "text": {
+            "description": "For shape=text.",
+            "type": "string"
+          },
+          "time_range": {
+            "description": "Optional [start_sec,end_sec].",
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "track_id": {
+            "description": "Optional overlay track id. If omitted, Lumeri picks a non-overlapping OV track.",
+            "type": "string"
+          },
+          "width": {
+            "description": "Stroke/outline width in pixels.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "shape"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "image"
+      ]
+    },
+    {
+      "description": "Apply a local static mask effect to an image or video asset and return a new asset_id without modifying the source. Use for regional blur, mosaic, dim outside, highlight, and local brightness/contrast/saturation/exposure/gamma adjustments. First version is static/keyframed only; it does not track moving objects.",
+      "effect": "write",
+      "estimated_eta_sec": 12.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "paint_mask_effect",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "An asset_id from the session registry (e.g. v_001, img_003).",
+            "type": "string"
+          },
+          "effect": {
+            "enum": [
+              "blur",
+              "mosaic",
+              "dim_outside",
+              "highlight",
+              "adjust"
+            ],
+            "type": "string"
+          },
+          "end_sec": {
+            "description": "Video only: effect stops before this second. Omit for the rest of the asset.",
+            "type": "number"
+          },
+          "mask": {
+            "description": "Mask shape: {shape:'rect|ellipse|circle|polygon|stroke', points:[[x,y],...], rect:[x0,y0,x1,y1], feather, invert, width}. Coordinates are normalized 0..1.",
+            "type": "object"
+          },
+          "params": {
+            "description": "Effect params: blur radius, mosaic block_size, highlight/dim amount+color, or adjust brightness/contrast/saturation/exposure/gamma.",
+            "type": "object"
+          },
+          "start_sec": {
+            "description": "Video only: first second where the effect applies. Default 0.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "asset_id",
+          "effect",
+          "mask"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "image"
+      ]
+    },
+    {
+      "description": "Burn a text caption, image overlay, or subtitle onto a video. Returns a new asset_id.",
+      "effect": "write",
+      "estimated_eta_sec": 6.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "add_overlay",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "An asset_id from the session registry (e.g. v_001, img_003).",
+            "type": "string"
+          },
+          "end_sec": {
+            "description": "When the overlay disappears. Omit for whole clip.",
+            "type": "number"
+          },
+          "font_color": {
+            "description": "For kind=text. e.g. 'white', '#ffcc00'.",
+            "type": "string"
+          },
+          "font_size": {
+            "description": "For kind=text. Default 32.",
+            "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "text",
+              "image",
+              "subtitle"
+            ],
+            "type": "string"
+          },
+          "overlay_asset_id": {
+            "description": "For kind=image. The asset to overlay.",
+            "type": "string"
+          },
+          "position": {
+            "description": "Anchor position on the frame.",
+            "enum": [
+              "top_left",
+              "top_center",
+              "top_right",
+              "center_left",
+              "center",
+              "center_right",
+              "bottom_left",
+              "bottom_center",
+              "bottom_right"
+            ],
+            "type": "string"
+          },
+          "start_sec": {
+            "description": "When the overlay appears.",
+            "type": "number"
+          },
+          "text": {
+            "description": "For kind=text or kind=subtitle.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "asset_id",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "image",
+        "video_edit"
+      ]
+    },
+    {
+      "description": "Sequence multiple clips in order, with optional transitions. Returns a new asset_id (the assembled timeline).",
+      "effect": "write",
+      "estimated_eta_sec": 12.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "arrange_timeline",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_ids": {
+            "description": "Clips to place on the timeline, in playback order.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "transitions": {
+            "description": "Optional transitions between adjacent clips.",
+            "items": {
+              "properties": {
+                "between_index": {
+                  "description": "0-based index of the cut (between clip i and i+1).",
+                  "type": "integer"
+                },
+                "duration_sec": {
+                  "type": "number"
+                },
+                "kind": {
+                  "enum": [
+                    "cut",
+                    "dissolve",
+                    "wipe",
+                    "fade"
+                  ],
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "asset_ids"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "video_edit"
+      ]
+    },
+    {
+      "description": "Combine multiple audio tracks. Returns a new asset_id.",
+      "effect": "write",
+      "estimated_eta_sec": 6.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "mix_audio",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_ids": {
+            "description": "Audio assets to combine.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "levels_db": {
+            "description": "Optional per-track gain in dB. Same length as asset_ids.",
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "mode": {
+            "enum": [
+              "concat",
+              "mix",
+              "duck"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "asset_ids",
+          "mode"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "audio"
+      ]
+    },
+    {
+      "description": "Lightweight standalone audio preprocessing for one audio asset: volume gain and fade in/out. Returns a new audio asset_id. Use this before timeline placement when a raw audio asset itself needs adjustment.",
+      "effect": "write",
+      "estimated_eta_sec": 4.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "edit_audio",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "An asset_id from the session registry (e.g. v_001, img_003).",
+            "type": "string"
+          },
+          "fade_in_sec": {
+            "description": "Fade-in duration in seconds from the beginning of the asset.",
+            "type": "number"
+          },
+          "fade_out_sec": {
+            "description": "Fade-out duration in seconds ending at the asset duration.",
+            "type": "number"
+          },
+          "gain_db": {
+            "description": "Volume gain in decibels, -60..36. 0 keeps original level.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "asset_id"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "audio"
+      ]
+    },
+    {
+      "description": "Geometric operations on an image or video frame (crop, rotate, scale, perspective warp). Returns a new asset_id.",
+      "effect": "write",
+      "estimated_eta_sec": 5.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "transform_geometry",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "An asset_id from the session registry (e.g. v_001, img_003).",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "crop",
+              "rotate",
+              "scale",
+              "perspective"
+            ],
+            "type": "string"
+          },
+          "params": {
+            "description": "Operation-specific parameters (e.g. {angle_deg: 15} or {x, y, w, h} for crop).",
+            "type": "object"
+          }
+        },
+        "required": [
+          "asset_id",
+          "operation"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "image",
+        "video_edit"
+      ]
+    },
+    {
+      "description": "Adapt an image or video to a target canvas such as 9:16, 1:1, 4:5, or 16:9 using deterministic center-crop or fit-pad scaling. Returns a new asset_id. Use for fast social-format reframing; pass anchor_x/anchor_y when analysis suggests the subject is off-center.",
+      "effect": "write",
+      "estimated_eta_sec": 8.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "smart_reframe",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "anchor_x": {
+            "description": "Crop anchor from 0 left to 1 right. Default 0.5 center.",
+            "type": "number"
+          },
+          "anchor_y": {
+            "description": "Crop anchor from 0 top to 1 bottom. Default 0.5 center.",
+            "type": "number"
+          },
+          "asset_id": {
+            "description": "An asset_id from the session registry (e.g. v_001, img_003).",
+            "type": "string"
+          },
+          "background": {
+            "description": "Pad color for fit_pad, e.g. black, white, or #101010.",
+            "type": "string"
+          },
+          "height": {
+            "description": "Optional target height; required for target=custom.",
+            "type": "integer"
+          },
+          "mode": {
+            "description": "center_crop fills the target by cropping overflow; fit_pad preserves all pixels with padding.",
+            "enum": [
+              "center_crop",
+              "fit_pad"
+            ],
+            "type": "string"
+          },
+          "target": {
+            "description": "Target aspect/canvas preset. Use custom with explicit width and height.",
+            "enum": [
+              "vertical_9_16",
+              "9:16",
+              "tiktok",
+              "reels",
+              "shorts",
+              "square_1_1",
+              "1:1",
+              "portrait_4_5",
+              "4:5",
+              "landscape_16_9",
+              "16:9",
+              "custom"
+            ],
+            "type": "string"
+          },
+          "width": {
+            "description": "Optional target width; required for target=custom.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "asset_id"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "image",
+        "video_edit"
+      ]
+    },
+    {
+      "description": "Pull a single still frame from a video at a given timestamp. Returns a new image asset_id.",
+      "effect": "write",
+      "estimated_eta_sec": 1.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http",
+        "mcp"
+      ],
+      "name": "extract_frame",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "An asset_id from the session registry (e.g. v_001, img_003).",
+            "type": "string"
+          },
+          "time_sec": {
+            "description": "Timestamp to extract from.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "asset_id",
+          "time_sec"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "general",
+        "media_inspect",
+        "image",
+        "video_generation",
+        "video_edit",
+        "motion_graphics"
+      ]
+    },
+    {
+      "description": "Cheap ffprobe-style physical metadata for a registered asset. Returns duration_ms, width, height, fps, codecs, channel count, sample rate, stream count, and file size. Use before trim/reframe/audio edits when exact media properties matter; it does not do semantic visual analysis.",
+      "effect": "read",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http",
+        "mcp"
+      ],
+      "name": "probe_media",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "An asset_id from the session registry (e.g. v_001, img_003).",
+            "type": "string"
+          },
+          "verify_motion": {
+            "description": "For video, decode sampled frames and prove real frame-to-frame motion rather than trusting the container. Use for formal production evidence.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "asset_id"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "general",
+        "media_inspect",
+        "image",
+        "video_generation",
+        "video_edit",
+        "audio",
+        "motion_graphics",
+        "annotations",
+        "multiagent"
+      ]
+    },
+    {
+      "description": "Examine an asset and get a short text description and a thumbnail back. Use this when you want to actually see what an earlier action produced — for self-review or to decide a next step. Costs tokens; do not call as a default pre-flight.",
+      "effect": "read",
+      "estimated_eta_sec": 4.0,
+      "estimated_usd": 0.01,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http",
+        "mcp"
+      ],
+      "name": "analyze_media",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "An asset_id from the session registry (e.g. v_001, img_003).",
+            "type": "string"
+          },
+          "focus": {
+            "description": "Optional aspect to focus on (e.g. 'color palette', 'subject motion', 'visible text').",
+            "type": "string"
+          }
+        },
+        "required": [
+          "asset_id"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "general",
+        "media_inspect",
+        "image",
+        "video_generation",
+        "video_edit",
+        "audio",
+        "motion_graphics",
+        "annotations",
+        "multiagent"
+      ]
+    },
+    {
+      "description": "Return conservative canvas safe-area boxes and avoid zones for social/video layouts. Use before placing captions, titles, logos, or UI-sensitive overlays on vertical/square deliverables.",
+      "effect": "read",
+      "estimated_eta_sec": 0.1,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "get_safe_areas",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "height": {
+            "description": "Canvas height in pixels. Default comes from the preset.",
+            "type": "integer"
+          },
+          "platform": {
+            "description": "Platform/layout preset. Unknown values fall back to generic_vertical.",
+            "enum": [
+              "generic_vertical",
+              "generic",
+              "tiktok",
+              "reels",
+              "instagram",
+              "instagram_reels",
+              "shorts",
+              "youtube_shorts",
+              "square_feed",
+              "square"
+            ],
+            "type": "string"
+          },
+          "width": {
+            "description": "Canvas width in pixels. Default comes from the preset.",
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "media_inspect",
+        "image"
+      ]
+    },
+    {
+      "description": "Render one exact frame from a Lottie/dotLottie asset and return it as an image asset plus a thumbnail. Use before placing motion graphics or when checking icon/logo animation timing.",
+      "effect": "write",
+      "estimated_eta_sec": 1.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "inspect_lottie",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "An asset_id from the session registry (e.g. v_001, img_003).",
+            "type": "string"
+          },
+          "frame": {
+            "description": "0-based Lottie frame to render. Mutually exclusive with time_sec.",
+            "type": "integer"
+          },
+          "height": {
+            "description": "Output height in pixels. Defaults to the Lottie height.",
+            "type": "integer"
+          },
+          "time": {
+            "description": "Alias for time_sec.",
+            "type": "number"
+          },
+          "time_sec": {
+            "description": "Animation time in seconds. Alias: time.",
+            "type": "number"
+          },
+          "width": {
+            "description": "Output width in pixels. Defaults to the Lottie width.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "asset_id"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "media_inspect"
+      ]
+    },
+    {
+      "description": "Search the user's existing asset library by text query, including persisted media annotation labels/tags/notes. Returns a list of matching asset_ids with brief descriptions.",
+      "effect": "read",
+      "estimated_eta_sec": 0.5,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http",
+        "mcp"
+      ],
+      "name": "search_library",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "image",
+              "video",
+              "audio",
+              "any"
+            ],
+            "type": "string"
+          },
+          "limit": {
+            "description": "Max results. Default 10.",
+            "type": "integer"
+          },
+          "query": {
+            "description": "Free-text search.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "general",
+        "media_inspect",
+        "storyboard",
+        "quanta",
+        "motion_graphics",
+        "annotations",
+        "multiagent"
+      ]
+    },
+    {
+      "description": "Semantic search over persistent media annotations (vision captions, subjects, actions, on-screen text, tags — Chinese and English). Returns matching assets WITH time ranges so timeline/cut tools can act on them directly. Free and fast. Results are registered as session asset_ids. If unindexed_count > 0, consider annotate_media (paid) to index the rest.",
+      "effect": "read",
+      "estimated_eta_sec": 0.5,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "search_media",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "video",
+              "image",
+              "audio",
+              "any"
+            ],
+            "type": "string"
+          },
+          "limit": {
+            "description": "Max assets. Default 8, max 20.",
+            "type": "integer"
+          },
+          "query": {
+            "description": "Free text, zh or en, e.g. '海边日落 无人机' or 'woman talking to camera'.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "media_inspect",
+        "storyboard",
+        "quanta",
+        "motion_graphics",
+        "annotations"
+      ]
+    },
+    {
+      "description": "Search or fetch licensed public stock footage from the configured Pexels/Pixabay connectors. Use action='search' to inspect real options before spending generation budget, then action='fetch' to import one usable result into this project with provider, source URL, attribution, license, and a provenance sidecar. This is free media sourcing, not AI generation.",
+      "effect": "write",
+      "estimated_eta_sec": 5.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "stock_media",
+      "paid": true,
+      "parameters": {
+        "properties": {
+          "action": {
+            "description": "search returns candidates; fetch downloads and registers one project asset. Default search.",
+            "enum": [
+              "search",
+              "fetch"
+            ],
+            "type": "string"
+          },
+          "limit": {
+            "description": "Search candidates, default 8 and max 20.",
+            "type": "integer"
+          },
+          "media_type": {
+            "description": "Default video.",
+            "enum": [
+              "video",
+              "image"
+            ],
+            "type": "string"
+          },
+          "orientation": {
+            "description": "Optional source orientation.",
+            "enum": [
+              "landscape",
+              "portrait",
+              "square"
+            ],
+            "type": "string"
+          },
+          "provider": {
+            "description": "Configured licensed source. Default auto.",
+            "enum": [
+              "auto",
+              "pexels",
+              "pixabay"
+            ],
+            "type": "string"
+          },
+          "query": {
+            "description": "Concrete visual search, preferably in English, e.g. 'rainy cyberpunk city aerial'.",
+            "type": "string"
+          },
+          "result_id": {
+            "description": "For action='fetch', select the exact id returned by a prior search.",
+            "type": "string"
+          },
+          "result_index": {
+            "description": "For action='fetch', select a zero-based candidate index when no stable id is available.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "media_inspect",
+        "storyboard"
+      ]
+    },
+    {
+      "description": "Lay the filled storyboard onto the timeline: for every shot that has an asset_id, append a clip trimmed to its planned duration, align its on_screen_text as an overlay, apply its transition, and mark it placed. Call after filling shots (search_media / generate_*). Unfilled shots are skipped and reported. Use rebuild=true to clear the timeline and reassemble after revising the plan. Then inspect_timeline to review, or export to render.",
+      "effect": "write",
+      "estimated_eta_sec": 8.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "assemble_shotlist",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "rebuild": {
+            "description": "Clear the current timeline and reassemble from scratch. Default false (append newly-filled shots).",
+            "type": "boolean"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "storyboard"
+      ]
+    },
+    {
+      "description": "Semantic footage search over already available real material (filename + probed visual/dialog labels), ranked by relevance. This is the '先搜真素材' step: fill a shot from raw footage before falling back to generate_video. Returns matching asset_ids ready to use. It is NOT an import or registration tool for a specific external path; use copy_in for that and require asset_registered=true plus asset_id. If it finds nothing, generate the shot instead. Probes frames live so it needs NO prior annotation — complements search_media (which queries saved annotations and returns timecodes). Stronger than search_library (a plain filename/label text match).",
+      "effect": "read",
+      "estimated_eta_sec": 3.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "search_frames",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "kind": {
+            "description": "Media kind to search. Default video.",
+            "enum": [
+              "video",
+              "image",
+              "any"
+            ],
+            "type": "string"
+          },
+          "limit": {
+            "description": "Max results. Default 5.",
+            "type": "integer"
+          },
+          "paths": {
+            "description": "Optional extra local files/folders to include in the search.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "query": {
+            "description": "What the shot should show, e.g. 'city sunrise timelapse aerial'.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "media_inspect",
+        "storyboard",
+        "quanta",
+        "motion_graphics"
+      ]
+    },
+    {
+      "description": "Turn a ONE-LINE theme into a complete promo storyboard in one call: scenes -> shots with durations, on-screen text, voiceover (narration), mood tags, and per-shot search_query, following a proven structure. Use this to START outline-driven editing from just a sentence, then fill each shot (search_frames/search_media/generate_*) and assemble_shotlist. It REPLACES the current shotlist (set replace=false to preview without persisting). A scaffold — refine wording/footage/timings after.",
+      "effect": "write",
+      "estimated_eta_sec": 0.3,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "draft_shotlist",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "fit_media": {
+            "description": "Fit indexed time-ranged library evidence to the drafted outline. Default false; never generates or purchases media.",
+            "type": "boolean"
+          },
+          "language": {
+            "description": "Language of the drafted text. Auto-detected from the theme if omitted.",
+            "enum": [
+              "zh",
+              "en"
+            ],
+            "type": "string"
+          },
+          "replace": {
+            "description": "Replace the current shotlist (default true). false = return the draft without persisting.",
+            "type": "boolean"
+          },
+          "style": {
+            "description": "Optional look/tone, e.g. 'cinematic promo, warm'.",
+            "type": "string"
+          },
+          "target_duration_sec": {
+            "description": "Total target length in seconds. Default 30.",
+            "type": "number"
+          },
+          "template": {
+            "description": "Structure. 'promo' = Hook→Problem→Solution→Highlights→CTA (default). 'story' = Setup→Rising→Turn→Climax→Resolution.",
+            "enum": [
+              "promo",
+              "story"
+            ],
+            "type": "string"
+          },
+          "theme": {
+            "description": "One line describing the video, e.g. '一款帮你专注的极简待办 App' or 'A minimalist focus timer'.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "theme"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "storyboard"
+      ]
+    },
+    {
+      "description": "Draft or replace the whole storyboard (shotlist) for outline/storyboard-driven editing. Turn the user's brief/outline into scenes → shots; each shot states what it should show, how long, on-screen text, and how to source footage. This is a PLAN, not the timeline — nothing renders until you assemble_shotlist. Prefer source='search' (find real footage) and only source='generate' when nothing fits. Persisted + undoable.",
+      "effect": "write",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "set_shotlist",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "fit_media": {
+            "description": "Fit indexed time-ranged library evidence before the single atomic shotlist write. Default false; never generates or purchases media.",
+            "type": "boolean"
+          },
+          "shotlist": {
+            "description": "The storyboard plan.",
+            "properties": {
+              "logline": {
+                "description": "One-line summary of the video.",
+                "type": "string"
+              },
+              "scenes": {
+                "description": "Ordered scenes, each a group of shots.",
+                "items": {
+                  "properties": {
+                    "id": {
+                      "description": "Stable scene id (optional; auto-filled).",
+                      "type": "string"
+                    },
+                    "shots": {
+                      "items": {
+                        "properties": {
+                          "alternatives": {
+                            "description": "Up to three traceable candidates not selected.",
+                            "items": {
+                              "type": "object"
+                            },
+                            "type": "array"
+                          },
+                          "asset_id": {
+                            "description": "Optional registered media asset already chosen for this shot.",
+                            "type": "string"
+                          },
+                          "description": {
+                            "description": "What this shot shows (the visual intent).",
+                            "type": "string"
+                          },
+                          "duration_sec": {
+                            "description": "Planned on-screen duration. Default 3.",
+                            "type": "number"
+                          },
+                          "evidence": {
+                            "description": "Traceable persistent evidence identity and ranking explanation.",
+                            "type": "object"
+                          },
+                          "id": {
+                            "description": "Stable shot id you will reference in update_shot (optional; auto-filled).",
+                            "type": "string"
+                          },
+                          "library_asset_id": {
+                            "description": "Persistent media-library identity for the chosen source.",
+                            "type": "string"
+                          },
+                          "mood": {
+                            "description": "Optional emotion/tone tag, e.g. 'energetic','tense','hopeful','calm','inviting'.",
+                            "type": "string"
+                          },
+                          "narration": {
+                            "description": "Optional voiceover line for this shot (script the narrate tool speaks). Not burned on screen.",
+                            "type": "string"
+                          },
+                          "notes": {
+                            "type": "string"
+                          },
+                          "on_screen_text": {
+                            "description": "Optional title/caption burned over this shot.",
+                            "type": "string"
+                          },
+                          "search_query": {
+                            "description": "Query for search_frames/search_media when source='search'.",
+                            "type": "string"
+                          },
+                          "source": {
+                            "description": "How to fill this shot. Prefer 'search'.",
+                            "enum": [
+                              "search",
+                              "generate",
+                              "unset"
+                            ],
+                            "type": "string"
+                          },
+                          "source_in": {
+                            "description": "Chosen source start second from persistent evidence.",
+                            "type": "number"
+                          },
+                          "source_out": {
+                            "description": "Chosen source end second from persistent evidence.",
+                            "type": "number"
+                          },
+                          "transition_after": {
+                            "description": "Transition INTO the next shot (omit or kind='cut' for a hard cut).",
+                            "properties": {
+                              "duration_sec": {
+                                "type": "number"
+                              },
+                              "kind": {
+                                "enum": [
+                                  "cut",
+                                  "dissolve",
+                                  "wipe",
+                                  "fade"
+                                ],
+                                "type": "string"
+                              }
+                            },
+                            "type": "object"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "title": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "style": {
+                "description": "Look/tone, e.g. 'cinematic promo, warm'.",
+                "type": "string"
+              },
+              "target_duration_sec": {
+                "description": "Optional total target length.",
+                "type": "number"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "shotlist"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "storyboard"
+      ]
+    },
+    {
+      "description": "Revise ONE shot in the current shotlist by id without resending the whole plan. Use to mark a shot filled (set asset_id + source) after search/generate, to mark it placed (clip_id) after assembly, or to retime/reword it. The shot 'id' itself cannot be changed. Persisted + undoable.",
+      "effect": "write",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "update_shot",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "fields": {
+            "description": "Fields to merge, e.g. {asset_id, source, status, duration_sec, on_screen_text, narration, mood, search_query, description, transition_after, notes}.",
+            "properties": {
+              "alternatives": {
+                "description": "Up to three non-selected evidence candidates.",
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "asset_id": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "duration_sec": {
+                "type": "number"
+              },
+              "evidence": {
+                "description": "Traceable evidence identity and ranking explanation.",
+                "type": "object"
+              },
+              "library_asset_id": {
+                "description": "Persistent media-library identity for the selected source.",
+                "type": "string"
+              },
+              "mood": {
+                "type": "string"
+              },
+              "narration": {
+                "type": "string"
+              },
+              "notes": {
+                "type": "string"
+              },
+              "on_screen_text": {
+                "type": "string"
+              },
+              "search_query": {
+                "type": "string"
+              },
+              "source": {
+                "enum": [
+                  "search",
+                  "generate",
+                  "unset"
+                ],
+                "type": "string"
+              },
+              "source_in": {
+                "description": "Chosen source start second from persistent evidence.",
+                "type": "number"
+              },
+              "source_out": {
+                "description": "Chosen source end second from persistent evidence.",
+                "type": "number"
+              },
+              "status": {
+                "enum": [
+                  "draft",
+                  "filled",
+                  "placed"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "shot_id": {
+            "description": "The shot's id (from set_shotlist / get_shotlist).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "shot_id",
+          "fields"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "storyboard"
+      ]
+    },
+    {
+      "description": "Read the current storyboard (shotlist) with each shot's id, status, planned duration, source, asset_id, and clip_id. Call before revising shots or assembling so you use the right shot ids.",
+      "effect": "read",
+      "estimated_eta_sec": 0.1,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "get_shotlist",
+      "paid": false,
+      "parameters": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "storyboard"
+      ]
+    },
+    {
+      "description": "Edit ONE already-assembled shot in place WITHOUT reassembling the timeline. Pick exactly one operation: retime (duration_sec), replace footage (asset_id — must be a registered asset, preserves position), recaption (on_screen_text, '' clears it), or remove (remove=true drops the shot's clip). Reuses timeline ops with ripple so neighbors reflow. The shot must already be placed (assemble_shotlist) — otherwise it returns guidance to assemble first. Cheaper than assemble_shotlist(rebuild=true) for a one-shot tweak.",
+      "effect": "write",
+      "estimated_eta_sec": 3.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "refine_shot",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "REPLACE: new footage asset (registered). Keeps the shot's position + duration.",
+            "type": "string"
+          },
+          "duration_sec": {
+            "description": "RETIME: new on-screen duration for this shot.",
+            "type": "number"
+          },
+          "on_screen_text": {
+            "description": "RECAPTION: new burned caption; empty string removes it.",
+            "type": "string"
+          },
+          "remove": {
+            "description": "REMOVE: true drops this shot's clip (and caption) from the cut.",
+            "type": "boolean"
+          },
+          "shot_id": {
+            "description": "The shot's id (from get_shotlist).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "shot_id"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "storyboard"
+      ]
+    },
+    {
+      "description": "Draft a COMPLETE quanta (a discrete video: an ordered tree of content scopes and render states) in one call — the START of any quanta task. Two modes: (1) give a ONE-LINE 'theme' and a structure template — 'pitch' (Hook→Problem→Solution→Highlights→Numbers→CTA), 'report' (conclusions-first analysis), 'teach' (lesson arc); (2) from_shotlist=true converts the CURRENT storyboard into scopes (narration→speaker notes, on-screen text→title block, footage→image blocks, shot durations→state dwell). Drafted blocks have stable ids; bullets/cards are separate grouped leaves with explicit cumulative state visibility. It REPLACES the current quanta (replace=false previews without persisting). A scaffold — refine per node with update_quantum after.",
+      "effect": "write",
+      "estimated_eta_sec": 0.3,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "draft_quanta",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "from_shotlist": {
+            "description": "true = build the quanta from the current shotlist instead of a theme (video→quanta migration).",
+            "type": "boolean"
+          },
+          "language": {
+            "description": "Language of the drafted text. Auto-detected if omitted.",
+            "enum": [
+              "zh",
+              "en"
+            ],
+            "type": "string"
+          },
+          "replace": {
+            "description": "Replace the current quanta (default true). false = return the draft without persisting.",
+            "type": "boolean"
+          },
+          "template": {
+            "description": "Structure for theme mode. Default 'pitch'.",
+            "enum": [
+              "pitch",
+              "report",
+              "teach"
+            ],
+            "type": "string"
+          },
+          "theme": {
+            "description": "One line describing the quanta, e.g. 'Lumeri 产品介绍' or 'Q3 growth review'. Required unless from_shotlist=true.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "quanta"
+      ]
+    },
+    {
+      "description": "Set or replace the WHOLE quanta — a DISCRETE VIDEO: one ordered state tree. For a fresh scaffold prefer draft_quanta; for node edits prefer update_quantum. Two accepted shapes: (a) flat authoring sugar {slides:[…]} (below) — lifts deterministically into the tree, slide→content scope, builds→state children, default_path orders scopes then disappears (DFS leaf order IS the default path); (b) the full tree {root:{children:[…]}} with group nodes (title+children, may nest), content scopes (blocks+state children), and states ({visible_block_ids, dwell_sec, advance:'wait'|'auto', hidden}). Content truth lives in semantic blocks (text/stat/image/shape/group — never pixels). Each state is a FULL cumulative snapshot in visible_block_ids (leaf ids only): monotonic, final state exactly covers every leaf. Any node takes hidden:true — outside the default walk and mp4, reachable only via explicit links (appendix pattern). STRICTLY validated (E_BAD_ARG): duplicate quantum/block ids, nested content scopes, invalid visibility, links mounted on groups, hotspot blocks outside their scope, dangling link targets (every edge enumerated), dwell_sec <= 0. Persisted + undoable.",
+      "effect": "write",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "set_quanta",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "quanta": {
+            "description": "The quanta plan.",
+            "properties": {
+              "default_path": {
+                "description": "Flat-sugar only: orders the lifted scopes, then disappears — in the tree, DFS leaf order IS the default path; reorder with update_quantum op='move'.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "root": {
+                "description": "Tree shape (alternative to slides): {id:'root', children:[group|content nodes]}. group={id,title,hidden,children}; content={id,layout,title,blocks,notes,links,transition,hidden,children:[states]}; state={id,visible_block_ids,dwell_sec,advance,hidden}.",
+                "type": "object"
+              },
+              "slides": {
+                "description": "Flat authoring sugar: ordered content scopes (each lifts to a tree node; builds lift to state children with document-unique prefixed ids like s1_b1).",
+                "items": {
+                  "properties": {
+                    "blocks": {
+                      "description": "Semantic content blocks — the content truth. kind='text' (text and/or bullets), 'stat' (value+label big number), 'image' (asset_id or query+source), 'shape' (accent shape), 'group' (children: homogeneous sub-blocks, e.g. 3 feature cards).",
+                      "items": {
+                        "properties": {
+                          "asset_id": {
+                            "description": "image: a registered asset.",
+                            "type": "string"
+                          },
+                          "bullets": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          "children": {
+                            "description": "group: nested semantic blocks. Every child also has a stable id; builds reference renderable non-group leaves, never the group id.",
+                            "items": {
+                              "type": "object"
+                            },
+                            "type": "array"
+                          },
+                          "fill_token": {
+                            "type": "string"
+                          },
+                          "id": {
+                            "description": "Stable id within this slide. Optional input; deterministically backfilled as blk_1 / blk_1_1 by source path.",
+                            "type": "string"
+                          },
+                          "kind": {
+                            "enum": [
+                              "text",
+                              "stat",
+                              "image",
+                              "shape",
+                              "group"
+                            ],
+                            "type": "string"
+                          },
+                          "label": {
+                            "description": "stat: what the number means.",
+                            "type": "string"
+                          },
+                          "query": {
+                            "description": "image: search query when not yet filled.",
+                            "type": "string"
+                          },
+                          "role": {
+                            "description": "Slot hint, e.g. 'title', 'body', 'hero', 'cta', 'card'.",
+                            "type": "string"
+                          },
+                          "shape": {
+                            "description": "shape: e.g. 'rect'.",
+                            "type": "string"
+                          },
+                          "source": {
+                            "description": "image: how to fill it ('search'/'generate').",
+                            "type": "string"
+                          },
+                          "style_token": {
+                            "type": "string"
+                          },
+                          "text": {
+                            "type": "string"
+                          },
+                          "value": {
+                            "description": "stat: the big number, e.g. '97'.",
+                            "type": "string"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "builds": {
+                      "description": "Ordered render states (the discrete video's frames-of-meaning). visible_block_ids is the FULL cumulative leaf-id snapshot for that state (not a delta); it may start empty, must only grow, and the final state must exactly cover every renderable leaf. Missing/wrong-type visibility on legacy input backfills all leaves. dwell_sec (> 0) is the autoplay/mp4 hold; advance 'wait' (default) holds at this state until interaction in presentation mode, 'auto' advances after dwell.",
+                      "items": {
+                        "properties": {
+                          "advance": {
+                            "description": "Presentation semantics: wait = hold until interaction (default), auto = advance after dwell.",
+                            "enum": [
+                              "wait",
+                              "auto"
+                            ],
+                            "type": "string"
+                          },
+                          "dwell_sec": {
+                            "type": "number"
+                          },
+                          "id": {
+                            "type": "string"
+                          },
+                          "visible_block_ids": {
+                            "description": "Unique ids of every leaf visible at this state. Group ids are invalid.",
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "id": {
+                      "description": "Stable quantum id you will reference in update_quantum/links (optional; auto-filled).",
+                      "type": "string"
+                    },
+                    "layout": {
+                      "description": "Layout template name, e.g. 'title', 'content', 'stat', 'full-bleed'.",
+                      "type": "string"
+                    },
+                    "links": {
+                      "description": "Interaction out-edges (跃迁); omit for the implicit advance. Mount on content scopes (applies to all its states; advance = the scope's EXIT edge) or on a state (overrides itself). target: 'next', 'quantum:<id>', or 'url:<https url>'. hotspot blocks must exist in this scope.",
+                      "items": {
+                        "properties": {
+                          "target": {
+                            "type": "string"
+                          },
+                          "trigger": {
+                            "description": "'advance' or 'hotspot:<leaf block id>'.",
+                            "type": "string"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "type": "array"
+                    },
+                    "notes": {
+                      "description": "Speaker notes (the shotlist narration's descendant).",
+                      "type": "string"
+                    },
+                    "title": {
+                      "description": "Slide heading.",
+                      "type": "string"
+                    },
+                    "transition": {
+                      "description": "Transition into this slide. v1: 'cut' (default) or 'fade'.",
+                      "properties": {
+                        "kind": {
+                          "enum": [
+                            "cut",
+                            "fade"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "theme": {
+                "description": "Quanta-level look: one mood for the WHOLE quanta (per-slide moods read as collage).",
+                "properties": {
+                  "aspect": {
+                    "description": "Canvas aspect, default '16:9'.",
+                    "type": "string"
+                  },
+                  "mood": {
+                    "description": "Quanta-wide tone, e.g. 'calm-tech', 'confident'.",
+                    "type": "string"
+                  },
+                  "tokens": {
+                    "description": "Design-token overrides (optional).",
+                    "type": "object"
+                  }
+                },
+                "type": "object"
+              },
+              "version": {
+                "description": "IR version (optional; backfilled — stored canonical form is the v2 tree).",
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "quanta"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "quanta"
+      ]
+    },
+    {
+      "description": "The EDIT TREE's single entry point: revise any node of the quanta state tree by document-unique id, one op or an atomic batch. op='patch' (default) merges 'fields' into one node — reword blocks/title/notes, retune state visibility/dwell/advance, change links/layout/transition/hidden; a content node's fields.builds replaces its states wholesale (v1 sugar); 'id'/'children' cannot be patched. op='insert' adds a whole subtree ('quantum') under 'parent_id' at 'index' (states under content scopes; groups/content under groups or root). op='remove' detaches a subtree — if other links point into it the batch is rejected with EVERY dangling edge enumerated; retarget them in the SAME call via 'ops'. op='move' reorders/reparents ('quantum_id' → 'parent_id' + 'index') — this is how you reorder the default path (DFS leaf order). 'ops' runs several edits as ONE atomic undoable patch, order-independent for reference integrity. Persisted + undoable.",
+      "effect": "write",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "update_quantum",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "fields": {
+            "description": "patch: fields to merge, e.g. {title, blocks, notes, builds, links, layout, transition, mood_override, hidden} on a content scope; {visible_block_ids, dwell_sec, advance, hidden} on a state; {title, hidden} on a group.",
+            "properties": {
+              "advance": {
+                "enum": [
+                  "wait",
+                  "auto"
+                ],
+                "type": "string"
+              },
+              "blocks": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "builds": {
+                "description": "Content scopes: replace the state children wholesale (v1 sugar).",
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "dwell_sec": {
+                "type": "number"
+              },
+              "hidden": {
+                "type": "boolean"
+              },
+              "layout": {
+                "type": "string"
+              },
+              "links": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "mood_override": {
+                "type": "string"
+              },
+              "notes": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "transition": {
+                "type": "object"
+              },
+              "visible_block_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "index": {
+            "description": "insert/move: position among the parent's children (default: end).",
+            "type": "integer"
+          },
+          "op": {
+            "description": "Single-op mode. Default 'patch'.",
+            "enum": [
+              "patch",
+              "insert",
+              "remove",
+              "move"
+            ],
+            "type": "string"
+          },
+          "ops": {
+            "description": "Atomic batch: [{op, …}, …] applied as one undoable patch (e.g. remove a quantum AND retarget its in-edges together).",
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "parent_id": {
+            "description": "insert/move: destination parent ('root' or a group id; a content scope id when inserting/moving states).",
+            "type": "string"
+          },
+          "quantum": {
+            "description": "insert: the new subtree — a state ({visible_block_ids,dwell_sec,advance}), a content scope ({blocks,…,children:[states]}), or a group ({title,children}).",
+            "type": "object"
+          },
+          "quantum_id": {
+            "description": "Target node id (patch/remove/move). From get_quanta.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "quanta"
+      ]
+    },
+    {
+      "description": "Read the current quanta state tree: groups as indented sections, each content scope's id, layout, block kinds, state count/dwell, title, notes, non-default links and hidden marks, plus the full tree IR. Call before revising so you use the right quantum ids.",
+      "effect": "read",
+      "estimated_eta_sec": 0.1,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "get_quanta",
+      "paid": false,
+      "parameters": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "quanta"
+      ]
+    },
+    {
+      "description": "Revise ONE quantum (a content scope or one of its states) in an assembled quanta and immediately refresh the presentation pager + dedicated Quanta timeline. Rematerialization is subtree-granular: with a current frame cache it rerenders only the containing content scope and reuses every unchanged scope's frames; if the quanta was not assembled or the cache is stale, it safely materializes the whole quanta. Use update_quantum instead while still planning. Unrelated timeline clips survive.",
+      "effect": "write",
+      "estimated_eta_sec": 5.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "refine_quantum",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "fail_on_overflow": {
+            "description": "When true, leave the valid IR edit in place but refuse timeline refresh if any scope still overflows.",
+            "type": "boolean"
+          },
+          "fields": {
+            "description": "Fields to merge into this quantum: layout, title, blocks, notes, mood_override, builds, links, transition (content scope) or visible_block_ids, dwell_sec, advance (state).",
+            "properties": {
+              "blocks": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "builds": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "layout": {
+                "type": "string"
+              },
+              "links": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "mood_override": {
+                "type": "string"
+              },
+              "notes": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "transition": {
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "quantum_id": {
+            "description": "The quantum id (content scope or state) from get_quanta.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "quantum_id",
+          "fields"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "quanta"
+      ]
+    },
+    {
+      "description": "Materialize the current quanta into every render-state PNG, register those frames, return a same-origin presentation pager URL, and atomically rebuild dedicated Quanta timeline tracks in DFS leaf order using each state's dwell_sec. Hidden subtrees stay out of the flatten (they are interaction-only). Re-running the same quanta reuses the frame cache and replaces only the dedicated Quanta tracks; unrelated timeline clips survive. MP4 flattening never follows interaction edges: authored fades and discarded interaction links are reported as explicit degradations (fade_to_cut, interaction_flattened).",
+      "effect": "write",
+      "estimated_eta_sec": 12.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "assemble_quanta",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "fail_on_overflow": {
+            "description": "When true, refuse to assemble if any text still overflows after the two allowed autofit steps. Default false returns overflow details for refine_quantum.",
+            "type": "boolean"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "quanta"
+      ]
+    },
+    {
+      "description": "Create persistent Gemini-style annotations for media-library assets. Use this for long videos or bulk footage triage before searching, cutting, or assembling. Writes asset-level tags plus timecoded review markers.",
+      "effect": "write",
+      "estimated_eta_sec": 8.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "annotate_media",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "all": {
+            "description": "If true, annotate a batch from the media library instead of explicit asset_ids.",
+            "type": "boolean"
+          },
+          "asset_ids": {
+            "description": "Media-library asset ids, e.g. asset_0123abcd....",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "description": "Media kind for all=true. Default video.",
+            "enum": [
+              "video",
+              "image",
+              "audio",
+              "any"
+            ],
+            "type": "string"
+          },
+          "language": {
+            "description": "Language for labels/notes. Use the user's prompt language, e.g. zh or en.",
+            "type": "string"
+          },
+          "max_assets": {
+            "description": "Batch cap. Default is the explicit list length or 20 for all=true.",
+            "type": "integer"
+          },
+          "mode": {
+            "description": "quick creates fewer markers; detailed samples more ranges.",
+            "enum": [
+              "quick",
+              "detailed"
+            ],
+            "type": "string"
+          },
+          "query": {
+            "description": "Optional media-library query when all=true.",
+            "type": "string"
+          },
+          "replace_existing": {
+            "description": "Replace existing Gemini-source annotations for these assets. Default true.",
+            "type": "boolean"
+          },
+          "tags": {
+            "description": "Optional tags/taxonomy to add to generated annotations.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "annotations"
+      ]
+    },
+    {
+      "description": "Prepare imported video/audio for editorial review without changing the timeline. Runs local Whisper transcription, detects pauses and filler words, ranks repeated takes, creates/reuses a low-resolution proxy, and checkpoints each asset so interrupted long batches can resume. This is local and does not spend generation budget. Use before storyboard fitting or timeline editing when the user has raw talking-head, interview, or repeated-take footage.",
+      "effect": "write",
+      "estimated_eta_sec": 30.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "prepare_roughcut",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "all": {
+            "description": "Prepare all video/audio assets in the media library.",
+            "type": "boolean"
+          },
+          "asset_ids": {
+            "description": "Media-library video/audio asset ids.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "create_proxies": {
+            "description": "Create/reuse 540p local proxies for video. Default true.",
+            "type": "boolean"
+          },
+          "language": {
+            "description": "Spoken language code or auto. Default auto.",
+            "type": "string"
+          },
+          "max_assets": {
+            "description": "Batch cap, maximum 100.",
+            "type": "integer"
+          },
+          "proxy_resolution": {
+            "description": "Proxy height from 240 to 1080. Default 540.",
+            "type": "integer"
+          },
+          "resume": {
+            "description": "Reuse matching completed checkpoints. Default true.",
+            "type": "boolean"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "video_edit",
+        "annotations"
+      ]
+    },
+    {
+      "description": "Read persistent annotations for one media-library asset: asset summary, tags, labels, and timecoded markers.",
+      "effect": "read",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http",
+        "mcp"
+      ],
+      "name": "get_media_annotations",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "Media-library asset id, e.g. asset_0123abcd....",
+            "type": "string"
+          }
+        },
+        "required": [
+          "asset_id"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "media_inspect",
+        "annotations"
+      ]
+    },
+    {
+      "description": "Create or update one persistent annotation on a media-library asset. Use this to mark useful ranges, problems, subjects, quality notes, or cut candidates.",
+      "effect": "write",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http",
+        "mcp"
+      ],
+      "name": "write_media_annotation",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "annotation_id": {
+            "description": "Optional existing annotation id to update.",
+            "type": "string"
+          },
+          "asset_id": {
+            "description": "Media-library asset id, e.g. asset_0123abcd....",
+            "type": "string"
+          },
+          "category": {
+            "description": "Category such as summary, segment, cut_candidate, quality, warning.",
+            "type": "string"
+          },
+          "confidence": {
+            "description": "0..1 confidence.",
+            "type": "number"
+          },
+          "end_sec": {
+            "description": "End timestamp for time_range annotations.",
+            "type": "number"
+          },
+          "frame": {
+            "description": "Optional exact frame number.",
+            "type": "integer"
+          },
+          "label": {
+            "description": "Short marker title.",
+            "type": "string"
+          },
+          "language": {
+            "description": "Language for label/note.",
+            "type": "string"
+          },
+          "metadata": {
+            "description": "Optional structured metadata.",
+            "type": "object"
+          },
+          "note": {
+            "description": "Longer annotation note.",
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "asset",
+              "time_range",
+              "frame"
+            ],
+            "type": "string"
+          },
+          "start_sec": {
+            "description": "Start timestamp for time_range annotations.",
+            "type": "number"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "asset_id",
+          "label"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "annotations"
+      ]
+    },
+    {
+      "description": "Final encode of an asset at requested quality and format. Returns the path to the exported file as a new asset_id.",
+      "effect": "write",
+      "estimated_eta_sec": 20.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "export",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "An asset_id from the session registry (e.g. v_001, img_003).",
+            "type": "string"
+          },
+          "audio_bitrate": {
+            "description": "Optional audio bitrate override (e.g. '192k', '256k').",
+            "type": "string"
+          },
+          "codec": {
+            "description": "Video codec for mp4/mov (default h264). h265/HEVC gives a smaller file at similar quality; ignored for webm/gif.",
+            "enum": [
+              "h264",
+              "h265"
+            ],
+            "type": "string"
+          },
+          "color": {
+            "description": "Tag Rec.709 primaries/transfer/matrix (bt709) for broadcast-correct HD color, or leave auto (default).",
+            "enum": [
+              "auto",
+              "bt709"
+            ],
+            "type": "string"
+          },
+          "format": {
+            "enum": [
+              "mp4",
+              "mov",
+              "webm",
+              "gif"
+            ],
+            "type": "string"
+          },
+          "fps": {
+            "description": "Optional output frame-rate override (1-120).",
+            "type": "number"
+          },
+          "platform": {
+            "description": "Optional platform preset for additional tuning.",
+            "enum": [
+              "youtube",
+              "instagram",
+              "tiktok",
+              "twitter",
+              "prores",
+              "generic"
+            ],
+            "type": "string"
+          },
+          "quality": {
+            "enum": [
+              "4k",
+              "1080p",
+              "720p",
+              "480p",
+              "draft"
+            ],
+            "type": "string"
+          },
+          "video_bitrate": {
+            "description": "Optional target video bitrate (e.g. '8M', '800k'). Switches from quality-based CRF to constrained bitrate; use for a fixed delivery size.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "asset_id",
+          "format",
+          "quality"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "video_generation",
+        "video_edit"
+      ]
+    },
+    {
+      "description": "Search the public web from the host side and return compact result titles, URLs, snippets, and a saved JSON path. Use this to discover current sources before opening a page or fetching a file. The sandbox remains network-denied; raw HTML is not returned. BYOK: pluggable search engines, each reading its key from ~/.gemia/config.json — tavily (tavily_api_key), serper (serper_api_key), brave (brave_api_key), exa (exa_api_key), google_cse (google_cse_key + google_cse_id), bing (bing_api_key). searxng is a keyless self-hosted metasearch engine (set searxng_url, optional searxng_api_key) — the recommended free default. With provider=auto (default) a configured paid key wins first (order: tavily, serper, brave, exa, google_cse, bing), then searxng if searxng_url is set, else duckduckgo (no config) is used. Set config search_provider to force one engine globally, or pass provider per call. If a configured provider errors, the result falls back to duckduckgo and includes a 'fallback' note; the served engine is reported in 'provider'.",
+      "effect": "read",
+      "estimated_eta_sec": 3.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "web_search",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "limit": {
+            "description": "Max results to return. Defaults to a full result page (10); clamped to 1..10.",
+            "type": "integer"
+          },
+          "provider": {
+            "description": "Which search engine to use. 'auto' (default) picks the first configured paid BYOK provider, then searxng (if searxng_url is set), else duckduckgo. Paid providers need their key(s) in ~/.gemia/config.json; searxng needs searxng_url (keyless, self-hosted); duckduckgo needs nothing.",
+            "enum": [
+              "auto",
+              "tavily",
+              "serper",
+              "brave",
+              "exa",
+              "google_cse",
+              "bing",
+              "searxng",
+              "duckduckgo"
+            ],
+            "type": "string"
+          },
+          "query": {
+            "description": "Search query, e.g. 'current YouTube Shorts safe zone dimensions'.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "general",
+        "web"
+      ]
+    },
+    {
+      "description": "Read the persisted RealityContract and compact Creative IR for this ProductionRun. Use it before consequential design work or a targeted revision; it is the bridge from human intent to deterministic project code, not a generated shot-list dump.",
+      "effect": "read",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "get_design_state",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "document": {
+            "description": "Which production fact document to return. Default both.",
+            "enum": [
+              "both",
+              "reality_contract",
+              "creative_ir"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "production_design"
+      ]
+    },
+    {
+      "description": "Apply ONE small, revision-checked JSON-pointer patch to RealityContract or Creative IR. Use repeated semantic patches instead of replacing a giant JSON document. Contract patches define the real deliverable; Creative IR patches define stable beats, design systems, program inputs and the active human revision scope.",
+      "effect": "write",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "patch_design_state",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "document": {
+            "enum": [
+              "reality_contract",
+              "creative_ir"
+            ],
+            "type": "string"
+          },
+          "expected_revision": {
+            "description": "Document revision returned by get_design_state; prevents concurrent overwrite.",
+            "type": "integer"
+          },
+          "operation": {
+            "enum": [
+              "set",
+              "merge",
+              "remove",
+              "append"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "description": "Non-root JSON pointer, e.g. /brief, /beats/opening, /systems/motion, /beat_order.",
+            "type": "string"
+          },
+          "value": {
+            "description": "Patch value. Omit only for remove. One patch is capped at 64 KiB.",
+            "type": [
+              "object",
+              "array",
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "document",
+          "operation",
+          "path",
+          "expected_revision"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "production_design"
+      ]
+    },
+    {
+      "description": "Inspect the session lumenframe layer document: layer tree (id, type, name, visibility), selection, and canvas settings.",
+      "effect": "read",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http",
+        "mcp"
+      ],
+      "name": "get_lumenframe",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "history": {
+            "description": "Reserved for future patch history (currently 0).",
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "lumen_core",
+        "lumen_time",
+        "lumen_mask",
+        "motion_graphics"
+      ]
+    },
+    {
+      "description": "Low-level: apply a raw LayerPatch (one or more ops atomically). Each op names its type (add_layer, set_transform, set_opacity, delete_layer, move_layer, set_visibility, select, etc.) and carries the required arguments. Refer to lumenframe.catalog for the complete op vocabulary.",
+      "effect": "write",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http",
+        "mcp"
+      ],
+      "name": "lumen_patch",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "ops": {
+            "description": "List of LayerPatch operations: [{op: 'add_layer', type: 'video', ...}, {op: 'set_transform', layer_id: '...', x: 100}, ...].",
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "ops"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "lumen_core",
+        "lumen_time",
+        "lumen_mask",
+        "motion_graphics"
+      ]
+    },
+    {
+      "description": "Render the current lumenframe document to a video (MP4) or still frame (PNG). Missing media assets degrade gracefully. Returns asset_id for playback or analysis via analyze_media.",
+      "effect": "write",
+      "estimated_eta_sec": 20.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "lumen_render",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "format": {
+            "description": "Output format. Default 'video' (MP4); 'frame' renders a single PNG.",
+            "enum": [
+              "video",
+              "frame"
+            ],
+            "type": "string"
+          },
+          "frame_index": {
+            "description": "For format='frame', which frame to render (0-based). Default 0.",
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "lumen_core",
+        "lumen_time",
+        "lumen_mask",
+        "motion_graphics"
+      ]
+    },
+    {
+      "description": "Seek/locate the current lumenframe document to a specific moment. Use when the user says 'go to', 'show me at', 'what's happening at <time>', 'jump to frame N', or wants to inspect/preview a single instant. Reports the timeline state at that moment (which layers are active and how they are placed/sampled) AND renders that exact frame to a preview image asset. Pass exactly one of seconds or frame.",
+      "effect": "write",
+      "estimated_eta_sec": 1.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "lumen_seek",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "frame": {
+            "description": "Explicit frame index to seek to (0-based). Mutually exclusive with 'seconds'.",
+            "type": "integer"
+          },
+          "seconds": {
+            "description": "Time on the document timeline to seek to, in seconds. Mutually exclusive with 'frame'.",
+            "type": "number"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "lumen_core",
+        "lumen_mask",
+        "motion_graphics"
+      ]
+    },
+    {
+      "description": "Render or EXPORT only a time range [t_in, t_out) of the current lumenframe document, not the whole thing. Use when the user wants just a slice/segment/clip — 'render seconds 1 to 2.5', 'export the part from 0:05 to 0:10', 'preview the middle section'. Set export=true to write that range to a video (MP4) asset; otherwise returns a short preview (rendered frame count plus a representative middle-frame preview image asset). Times are seconds; require t_in < t_out.",
+      "effect": "write",
+      "estimated_eta_sec": 5.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "lumen_render_range",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "export": {
+            "description": "If true, export the range to an MP4 video asset; otherwise render a short in-memory preview and report the frame count. Default false.",
+            "type": "boolean"
+          },
+          "step": {
+            "description": "Stride between rendered frames (>= 1). Default 1.",
+            "type": "integer"
+          },
+          "t_in": {
+            "description": "Inclusive start time of the range, in seconds.",
+            "type": "number"
+          },
+          "t_out": {
+            "description": "Exclusive end time of the range, in seconds. Must be greater than t_in.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "t_in",
+          "t_out"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "lumen_core",
+        "lumen_time",
+        "lumen_mask"
+      ]
+    },
+    {
+      "description": "Place the current lumenframe composition ON THE TIMELINE as a normal video clip. Renders the window [t_in, t_out) once to a cached file and inserts it in ONE undoable step. The clip is a LIVE reference: editing the composition later marks it stale, and project_export automatically re-renders it (pass 0). Use this to bring keyframed/masked/blended lumenframe work into the final cut alongside ordinary clips. NOTE the undo asymmetry: undoing timeline steps never restores composition content — if you undo past a refresh, the clip points at the older rendered file (stale but playable) while the composition document stays at its latest state.",
+      "effect": "write",
+      "estimated_eta_sec": 10.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "lumen_comp_to_timeline",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "at_index": {
+            "description": "Place the clip at this position among the track's clips. Mutually exclusive with at_time.",
+            "type": "integer"
+          },
+          "at_time": {
+            "description": "Place the clip at this timeline time (seconds). Mutually exclusive with at_index; default append after the last clip.",
+            "type": "number"
+          },
+          "ripple": {
+            "description": "When placing by at_time, shift later clips to make room instead of failing on overlap. Default false.",
+            "type": "boolean"
+          },
+          "t_in": {
+            "description": "Inclusive start time of the composition window, in seconds.",
+            "type": "number"
+          },
+          "t_out": {
+            "description": "Exclusive end time of the window, in seconds. Must be > t_in; clamped to the composition's duration.",
+            "type": "number"
+          },
+          "track_id": {
+            "description": "Target video track id. Default V1 (auto-created if missing).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "t_in",
+          "t_out"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "timeline",
+        "lumen_core"
+      ]
+    },
+    {
+      "description": "Professional vector motion design (logo reveals, brand stings, MG animation, animated backgrounds) as ONE creative verb. op:'create' takes a creative BRIEF — {subject:{kind: logo_text|title|mark|abstract, text?, mark?: ring|hex|star|blob|wave|orbit, preset?, subtitle?}, intent: reveal|intro|loop|transition|outro, style (playful/minimal/luxury/tech/lumeri or aliases like 'google-like'), feeling:[adjectives], duration (s), palette, seed, params:{energy|smoothness|playfulness|elegance|complexity|density|organicness: 0..1}} — plans the choreography (phase arc, staggering, focal order) and adds the result as an animated html layer in the lumenframe doc. Speak creative language, not coordinates: say energy 0.8, never x+=20. op:'adjust' re-choreographs an existing vector layer from human feedback phrases ('more playful', 'less chaotic', '更高级'). op:'catalog' lists the full vocabulary. Verify with lumen_seek / lumen_render_range. Deterministic per seed; same brief renders once (content-hash cache).",
+      "effect": "write",
+      "estimated_eta_sec": 1.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "vector_motion",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "brief": {
+            "description": "create only: the creative brief (subject required; everything else optional).",
+            "type": "object"
+          },
+          "feedback": {
+            "description": "adjust only: feedback phrases, e.g. ['more playful', 'less dense'].",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "layer_id": {
+            "description": "adjust only: the vector layer to re-choreograph.",
+            "type": "string"
+          },
+          "op": {
+            "description": "create = brief → new vector layer; adjust = feedback → rebuild an existing layer; catalog = vocabulary.",
+            "enum": [
+              "create",
+              "adjust",
+              "catalog"
+            ],
+            "type": "string"
+          },
+          "place": {
+            "description": "create only: layer placement {start (s), lane, name}.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "lumen_core",
+        "motion_graphics"
+      ]
+    },
+    {
+      "description": "Call an installed Lumeri Point Library package through its single semantic host surface. Use library_id such as 'vector-motion' or 'grade', op:'catalog' first when the vocabulary is unknown, then op:'create'/'adjust' for Shape A or op:'apply'/'describe' for Shape B. The package supplies the professional taste floor, deterministic implementation, catalog, verification evidence, and next step; do not bypass it with raw craft recipes.",
+      "effect": "write",
+      "estimated_eta_sec": 1.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "point_library",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "brief": {
+            "description": "Semantic creative brief for create/adjust when the selected library uses it.",
+            "type": "object"
+          },
+          "feedback": {
+            "description": "Human feedback phrases for a semantic adjustment.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "layer_id": {
+            "description": "Existing library-created layer for an adjust operation.",
+            "type": "string"
+          },
+          "library_id": {
+            "description": "Installed Point Library id, for example vector-motion or grade.",
+            "type": "string"
+          },
+          "op": {
+            "description": "Library operation. catalog/describe are read-only vocabulary calls.",
+            "enum": [
+              "create",
+              "adjust",
+              "catalog",
+              "apply",
+              "describe"
+            ],
+            "type": "string"
+          },
+          "payload": {
+            "description": "Shape B payload forwarded only through its declared safe ops binding.",
+            "type": "object"
+          },
+          "place": {
+            "description": "Optional placement for a library that creates a document layer.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "library_id"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "lumen_core",
+        "motion_graphics",
+        "memory_skills"
+      ]
+    },
+    {
+      "description": "Creative COLOUR GRADING as one verb. op:'create' takes a BRIEF {look (neutral|teal_orange|film|bleach_bypass|noir|day_for_night|pastel|cyberpunk|vintage|clean, or aliases kodak/blockbuster/bw/instagram), feeling:[adjectives], intensity (0..1), params:{warmth|contrast|saturation|lift|drama|filmic:0..1}, seed} → a deterministic grade RECIPE (protected S-curve tone, complementary split toning, skin-safe by default) + a preview SVG + an ffmpeg_filter string to apply to footage. op:'adjust' folds feedback ('warmer','更电影感') into the recipe. op:'catalog' lists looks. Speak looks, not curve points.",
+      "effect": "read",
+      "estimated_eta_sec": 0.3,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "grade",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "brief": {
+            "description": "create/adjust: the grade brief (look + feelings + params).",
+            "type": "object"
+          },
+          "feedback": {
+            "description": "adjust only: phrases like ['warmer','less contrast','更高级'].",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "op": {
+            "description": "create = brief → grade recipe; adjust = feedback → re-derive; catalog = vocabulary.",
+            "enum": [
+              "create",
+              "adjust",
+              "catalog"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "video_edit"
+      ]
+    },
+    {
+      "description": "Animated TITLES / KINETIC TYPOGRAPHY as one verb. op:'create' takes a BRIEF {text or lines:[...], layout (title_card|lower_third|quote|kinetic_lyric|list_reveal|caption|credits_roll), style (title_hero|editorial|kinetic|broadcast|lyric|minimal), feeling:[...], reveal (per_word|per_line|typewriter|mask_wipe|rise_fade|scale_pop), emphasis:[words], duration, palette, seed} → a typeset, choreographed animated SVG added as an html layer (modular type scale, TV title-safe margins, pace-timed reveals). Verify with lumen_seek/lumen_render. op:'adjust' re-typesets a kinetic layer from feedback ('more energetic','更优雅'). op:'catalog' lists layouts/reveals/styles. Deterministic per seed.",
+      "effect": "write",
+      "estimated_eta_sec": 1.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "kinetic_type",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "brief": {
+            "description": "create only: the text brief (text or lines + layout).",
+            "type": "object"
+          },
+          "feedback": {
+            "description": "adjust only: phrases like ['more energetic','更优雅'].",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "layer_id": {
+            "description": "adjust only: the kinetic layer to re-typeset.",
+            "type": "string"
+          },
+          "op": {
+            "description": "create = brief → new title layer; adjust = feedback → rebuild; catalog = vocabulary.",
+            "enum": [
+              "create",
+              "adjust",
+              "catalog"
+            ],
+            "type": "string"
+          },
+          "place": {
+            "description": "create only: layer placement {start (s), lane, name}.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "motion_graphics"
+      ]
+    },
+    {
+      "description": "EDIT GRAMMAR / cut craft as one verb. op:'create' takes a BRIEF {clips:[{id, duration, has_action?, tags?, scene?}], style (invisible|energetic|dreamy|documentary|montage|commercial, aliases mtv/film/music_video), feeling:[...], seed} → a reasoned CUT PLAN (straight cuts by default; J/L cuts; cut-on-action; a capped transition budget) of timeline transition/trim ops with a reason each. op:'adjust' re-plans from feedback ('more energetic','更梦幻'). op:'catalog' lists styles + transition vocabulary.",
+      "effect": "read",
+      "estimated_eta_sec": 0.3,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "edit_grammar",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "brief": {
+            "description": "create/adjust: {clips:[...], style, feeling}.",
+            "type": "object"
+          },
+          "feedback": {
+            "description": "adjust only: phrases like ['more energetic','fewer transitions'].",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "op": {
+            "description": "create = clips → cut plan; adjust = feedback → re-plan; catalog = vocabulary.",
+            "enum": [
+              "create",
+              "adjust",
+              "catalog"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "timeline"
+      ]
+    },
+    {
+      "description": "Synthetic CAMERA MOVEMENT as one verb. op:'create' takes a BRIEF {move (push_in|pull_out|pan_left|pan_right|tilt_up|tilt_down|dolly|reveal|ken_burns|handheld|float|whip), subject:{x,y in 0..1}, style (locked|cinematic|energetic|handheld|documentary|epic), feeling:[...], energy, duration, canvas, seed} → an eased, motivated, frame-safe keyframe TRANSFORM TRACK (subtle by default, never reveals an edge; organic handheld from seeded noise) to apply via lumen_set_transform. op:'adjust' re-derives from feedback; op:'catalog' lists moves. Canvas defaults to the doc.",
+      "effect": "read",
+      "estimated_eta_sec": 0.3,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "camera",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "brief": {
+            "description": "create/adjust: {move, subject, style, duration}.",
+            "type": "object"
+          },
+          "feedback": {
+            "description": "adjust only: phrases like ['slower','more handheld'].",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "op": {
+            "description": "create = move → transform track; adjust = feedback → re-derive; catalog = vocabulary.",
+            "enum": [
+              "create",
+              "adjust",
+              "catalog"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "lumen_core"
+      ]
+    },
+    {
+      "description": "COMPOSITION / FRAMING as one verb. op:'create' takes a BRIEF {subjects:[{bbox:[x,y,w,h] in 0..1, weight?, facing?}], canvas or aspect, framing (thirds|centered|golden|negative_space|dynamic|tight|wide), intent?, headroom?, horizon?, seed} → a REFRAME RECIPE (thirds/golden anchor, hard subject containment so the head is never cropped, honest horizon snapping) + a guide-overlay SVG, to apply via lumen_set_transform. op:'adjust' re-derives from feedback; op:'catalog' lists framings. Canvas defaults to the doc.",
+      "effect": "read",
+      "estimated_eta_sec": 0.3,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "compose",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "brief": {
+            "description": "create/adjust: {subjects:[...], framing, canvas}.",
+            "type": "object"
+          },
+          "feedback": {
+            "description": "adjust only: phrases like ['tighter','more negative space'].",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "op": {
+            "description": "create = subjects → reframe recipe; adjust = feedback → re-derive; catalog = vocabulary.",
+            "enum": [
+              "create",
+              "adjust",
+              "catalog"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "image"
+      ]
+    },
+    {
+      "description": "Musical RHYTHM EDITING (cut to the beat) as one verb. op:'create' takes a BRIEF {bpm, time_signature?, sections?:[{name, bars}], clips?:[{id, duration}], style (on_beat|on_downbeat|on_phrase|syncopated|half_time|double_time|build_drop, alias edm), feeling:[...], energy, sync, seed} → a BEAT GRID + a phrase-aware beat-aligned CUT PLAN (accents on strong beats, density following energy, build/drop acceleration). op:'adjust' re-derives from feedback; op:'catalog' lists sync patterns. Deterministic from bpm.",
+      "effect": "read",
+      "estimated_eta_sec": 0.3,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "rhythm_edit",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "brief": {
+            "description": "create/adjust: {bpm, sections, style} (bpm required).",
+            "type": "object"
+          },
+          "feedback": {
+            "description": "adjust only: phrases like ['tighter','more drive'].",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "op": {
+            "description": "create = bpm → beat grid + cut plan; adjust = feedback → re-derive; catalog = vocabulary.",
+            "enum": [
+              "create",
+              "adjust",
+              "catalog"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "timeline"
+      ]
+    },
+    {
+      "description": "Inspect the session timeline document: tracks, clips (id, track, start/end, source range, effects), duration, and optionally recent patch history. Use when the prompt's Timeline section is not detailed enough.",
+      "effect": "read",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http",
+        "mcp"
+      ],
+      "name": "get_timeline",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "history": {
+            "description": "How many recent patches to include (0-20). Default 0.",
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "timeline",
+        "interchange",
+        "multiagent"
+      ]
+    },
+    {
+      "description": "Place a clip on the timeline. Video assets go on video tracks (V1...); image assets and text titles go on overlay tracks (OV1..., auto-created); audio assets go on audio tracks (A1..., auto-created). Default position appends to the end of the track. Returns the new clip_id plus the updated timeline.",
+      "effect": "write",
+      "estimated_eta_sec": 0.5,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http",
+        "mcp"
+      ],
+      "name": "timeline_insert_clip",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "Asset to place (video, image, or audio). Omit when inserting text.",
+            "type": "string"
+          },
+          "at_index": {
+            "description": "Insert before the Nth clip of the track (0-based); later clips shift right. Mutually exclusive with at_time.",
+            "type": "integer"
+          },
+          "at_time": {
+            "description": "Place at this timeline second. Overlap on the track is an error unless ripple=true (then later clips shift right).",
+            "type": "number"
+          },
+          "duration": {
+            "description": "Image/text only: how long it stays on screen. Default 3s.",
+            "type": "number"
+          },
+          "ripple": {
+            "description": "Default false: never shifts other clips unless you set true.",
+            "type": "boolean"
+          },
+          "source_in": {
+            "description": "Video/audio only: source trim-in second. Default 0.",
+            "type": "number"
+          },
+          "source_out": {
+            "description": "Video/audio only: source trim-out second. Default full asset.",
+            "type": "number"
+          },
+          "text": {
+            "description": "Text title/caption clip instead of an asset. {content (required), font_size, color '#rrggbb', position {x,y} px top-left (default centered), align}.",
+            "properties": {
+              "align": {
+                "enum": [
+                  "left",
+                  "center",
+                  "right"
+                ],
+                "type": "string"
+              },
+              "color": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              },
+              "font_size": {
+                "type": "number"
+              },
+              "position": {
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "track_id": {
+            "description": "Target track (e.g. V1, OV1). Default: V1 for video, first overlay track for image/text.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "video_edit",
+        "timeline"
+      ]
+    },
+    {
+      "description": "Read one Clip's expandable SegmentDocument, including its internal timeline, layers, states, revisions and human reservations. Reading a legacy clip is zero-write and returns the implicit single-material structure.",
+      "effect": "read",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "get_segment",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "clip_id": {
+            "description": "Top-level Clip to inspect.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "clip_id"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "segment"
+      ]
+    },
+    {
+      "description": "Edit one Clip's SegmentDocument. Always call get_segment first and pass its expected_segment_revision. Agent edits are refused when a human reservation covers the entity_ref; branches never enter the main preview or export.",
+      "effect": "write",
+      "estimated_eta_sec": 0.3,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "segment_edit",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "action": {
+            "enum": [
+              "set_layer",
+              "set_timeline",
+              "set_state",
+              "state_add",
+              "state_copy",
+              "state_delete",
+              "state_reorder",
+              "branch"
+            ],
+            "type": "string"
+          },
+          "changes": {
+            "type": "object"
+          },
+          "client_op_id": {
+            "type": "string"
+          },
+          "clip_id": {
+            "type": "string"
+          },
+          "entity_ref": {
+            "description": "Layer, material or state id being edited.",
+            "type": "string"
+          },
+          "entity_refs": {
+            "description": "Additional entities touched by the same operation.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "expected_segment_revision": {
+            "type": "integer"
+          },
+          "index": {
+            "type": "integer"
+          },
+          "new_state_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "clip_id",
+          "action",
+          "expected_segment_revision"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "segment"
+      ]
+    },
+    {
+      "description": "Remove a clip from the timeline. ripple=true closes the gap by shifting later clips on the same track left.",
+      "effect": "write",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http",
+        "mcp"
+      ],
+      "name": "timeline_delete_clip",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "clip_id": {
+            "description": "Clip to delete.",
+            "type": "string"
+          },
+          "ripple": {
+            "description": "Default false (leaves a gap).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "clip_id"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "timeline"
+      ]
+    },
+    {
+      "description": "Move a clip to a new start time and/or another compatible track. The destination must be free (no overlap). ripple=true closes the gap left at the origin.",
+      "effect": "write",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http",
+        "mcp"
+      ],
+      "name": "timeline_move_clip",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "clip_id": {
+            "type": "string"
+          },
+          "ripple": {
+            "description": "Default false.",
+            "type": "boolean"
+          },
+          "start": {
+            "description": "New timeline start second.",
+            "type": "number"
+          },
+          "track_id": {
+            "description": "Optional destination track of the same kind.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "clip_id"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "timeline"
+      ]
+    },
+    {
+      "description": "Change which part of the source media a video/image clip shows (source_in/source_out, seconds). Clip duration follows the new range. ripple=true shifts later clips on the track by the duration change.",
+      "effect": "write",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http",
+        "mcp"
+      ],
+      "name": "timeline_trim_clip",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "clip_id": {
+            "type": "string"
+          },
+          "ripple": {
+            "description": "Default false: extending into a neighbour is an error instead.",
+            "type": "boolean"
+          },
+          "source_in": {
+            "type": "number"
+          },
+          "source_out": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "clip_id"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "timeline"
+      ]
+    },
+    {
+      "description": "Cut a clip in two at a timeline second strictly inside it. The first half keeps the clip_id; the new second-half clip_id is returned. Both halves keep the same asset.",
+      "effect": "write",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http",
+        "mcp"
+      ],
+      "name": "timeline_split_clip",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "at_time": {
+            "description": "Timeline second to cut at (inside the clip).",
+            "type": "number"
+          },
+          "clip_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "clip_id",
+          "at_time"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "timeline"
+      ]
+    },
+    {
+      "description": "Set a clip's start (any clip) and/or on-screen duration (image/text clips only — trim video clips with timeline_trim_clip instead).",
+      "effect": "write",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "timeline_set_clip_time",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "clip_id": {
+            "type": "string"
+          },
+          "duration": {
+            "description": "Image/text clips only.",
+            "type": "number"
+          },
+          "ripple": {
+            "description": "Default false.",
+            "type": "boolean"
+          },
+          "start": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "clip_id"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "timeline"
+      ]
+    },
+    {
+      "description": "Set the transition from a clip into the NEXT adjacent clip on the same track. kind=cut removes any transition. Non-cut kinds need the two clips to touch (no gap) — align them first.",
+      "effect": "write",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http",
+        "mcp"
+      ],
+      "name": "timeline_add_transition",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "clip_id": {
+            "description": "The earlier clip of the pair.",
+            "type": "string"
+          },
+          "duration_sec": {
+            "description": "Transition length, default 0.5. Must fit inside both clips.",
+            "type": "number"
+          },
+          "kind": {
+            "enum": [
+              "cut",
+              "dissolve",
+              "wipe",
+              "fade"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "clip_id",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "timeline"
+      ]
+    },
+    {
+      "description": "Merge effects onto one clip. Visual keys: rotation (0/90/180/270), mirrored, blur_radius, opacity (0-1), x, y (px, overlay placement), scale, speed (reserved). Audio keys: gain_db (volume change in dB, +/-), fade_in, fade_out (seconds), muted (drop this clip's audio). Set a key to null to clear it.",
+      "effect": "write",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "timeline_set_clip_effects",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "clip_id": {
+            "type": "string"
+          },
+          "effects": {
+            "description": "Subset of allowed effect keys to merge.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "clip_id",
+          "effects"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "timeline"
+      ]
+    },
+    {
+      "description": "Add a video, overlay, or audio track. track_id defaults to the next free V<n>/OV<n>/A<n>.",
+      "effect": "write",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "timeline_add_track",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "video",
+              "overlay",
+              "audio"
+            ],
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "track_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "timeline"
+      ]
+    },
+    {
+      "description": "Set track-level options. Ducking: pass duck_under=<audio track id> to make this audio track a music bed that automatically ducks (lowers) whenever the trigger track (e.g. a voiceover track) is loud; pass duck_under=null to clear it. Both tracks must be audio; no self-reference or cycles.",
+      "effect": "write",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "timeline_set_track",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "duck_under": {
+            "description": "Audio track id whose loudness ducks this track (sidechain trigger). null clears the relationship.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "track_id": {
+            "description": "The audio track to configure.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "track_id"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "timeline"
+      ]
+    },
+    {
+      "description": "Rewind the last N timeline changes (each timeline_* call is one step). Discarded patches are kept for audit.",
+      "effect": "write",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http",
+        "mcp"
+      ],
+      "name": "timeline_undo",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "steps": {
+            "description": "1-10, default 1.",
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "timeline"
+      ]
+    },
+    {
+      "description": "Render the current project timeline as a low-res composited proxy and sample actual visual frames from it. Use after timeline/layout edits, before diagnosing visual timing/composition, or when you need to see what the timeline currently looks like. Pass the exact seconds to review in times_sec; returns image asset_ids and attaches a preview thumbnail for the next model turn.",
+      "effect": "write",
+      "estimated_eta_sec": 12.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "inspect_timeline",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "label": {
+            "description": "Short label for render artifacts (default 'inspect').",
+            "type": "string"
+          },
+          "times_sec": {
+            "description": "One to twelve exact timeline positions to inspect, in seconds. Default [0].",
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "storyboard",
+        "quanta",
+        "timeline"
+      ]
+    },
+    {
+      "description": "Render the current timeline document into a low-res proxy MP4 and register it as a new video asset. Use for a playable preview asset; use inspect_timeline when you need the model to see composited frames directly. Final quality comes from export.",
+      "effect": "write",
+      "estimated_eta_sec": 20.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http",
+        "mcp"
+      ],
+      "name": "render_preview",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "label": {
+            "description": "Short label for the render manifest (default 'preview').",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "timeline"
+      ]
+    },
+    {
+      "description": "Export the full project timeline as a final-quality MP4. Composes video track clips in timeline order and overlays image/text clips on top. Returns a registered asset_id for the output file.",
+      "effect": "write",
+      "estimated_eta_sec": 60.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http",
+        "mcp"
+      ],
+      "name": "project_export",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "label": {
+            "description": "Short label for the export manifest (default 'export').",
+            "type": "string"
+          },
+          "quality": {
+            "description": "Output quality preset. Default '1080p'.",
+            "enum": [
+              "4k",
+              "1080p",
+              "720p",
+              "480p",
+              "draft"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "storyboard",
+        "quanta",
+        "timeline",
+        "interchange"
+      ]
+    },
+    {
+      "description": "Export the current project timeline to an OpenTimelineIO-family interchange file for DaVinci Resolve, Premiere, Final Cut and other NLEs. format defaults to 'otio' (lossless JSON). otioz/otiod also bundle the media; edl/fcp7/fcpx are lossy and need the optional interop plugins. Returns the written file as a registered asset_id.",
+      "effect": "write",
+      "estimated_eta_sec": 5.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "project_export_otio",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "format": {
+            "description": "Interchange format. otio=lossless JSON (default); otioz/otiod=lossless bundle with media; edl/fcp7/fcpx=lossy NLE formats (need lumeri[interop]).",
+            "enum": [
+              "otio",
+              "otioz",
+              "otiod",
+              "edl",
+              "fcp7",
+              "fcpx"
+            ],
+            "type": "string"
+          },
+          "label": {
+            "description": "Base filename label (without extension). Default 'project'.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "interchange"
+      ]
+    },
+    {
+      "description": "Align multiple audio/video assets to a reference using cross-correlation. Detects time offsets and provides natural language suggestions for syncing. Read-only analysis; produces no new assets.",
+      "effect": "read",
+      "estimated_eta_sec": 2.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "align_audio",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_ids": {
+            "description": "List of asset IDs to align against the reference (required).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "max_offset_sec": {
+            "description": "Optional maximum allowed offset in seconds.",
+            "type": "number"
+          },
+          "reference_asset_id": {
+            "description": "ID of the reference audio/video asset (required).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference_asset_id",
+          "asset_ids"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "audio"
+      ]
+    },
+    {
+      "description": "Detect beats, tempo, and optionally onsets in an audio/video asset. Provides beat times and suggested cut points for timeline editing. Read-only analysis; produces no new assets.",
+      "effect": "read",
+      "estimated_eta_sec": 2.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "detect_beats",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "ID of the audio/video asset (required).",
+            "type": "string"
+          },
+          "cut_every": {
+            "description": "Take every Nth beat/onset (default 1).",
+            "type": "integer"
+          },
+          "include_onsets": {
+            "description": "Include onset detection in results (default false).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "asset_id"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "audio"
+      ]
+    },
+    {
+      "description": "Evaluate the ProductionRun against its persisted RealityContract and the exact canonical preview/export graph, contract-required inspected frames, verified source motion, provenance, audio, budget and technical gates. Call only after project_export moved the run to verifying. A passing report moves the run to ready_for_review; it never marks human acceptance.",
+      "effect": "write",
+      "estimated_eta_sec": 1.0,
+      "estimated_usd": 0.0,
+      "execution": "job",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "verify_delivery",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "export_asset_id": {
+            "type": "string"
+          },
+          "inspection_asset_ids": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "preview_asset_id": {
+            "type": "string"
+          },
+          "review_checks": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "description": "Boolean pass/fail for every agent_review_checks name in the current RealityContract.",
+            "type": "object"
+          },
+          "review_notes": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Concrete visual observation for every contract-required review check.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "export_asset_id",
+          "preview_asset_id",
+          "inspection_asset_ids",
+          "review_checks",
+          "review_notes"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "timeline"
+      ]
+    },
+    {
+      "description": "Install and atomically activate a local or cloud-loaded Point Library .lus bundle.",
+      "effect": "write",
+      "estimated_eta_sec": 0.5,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "install_point_library",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "bundle_base64": {
+            "description": "Exact bundle bytes returned by load_cloud_guide.",
+            "type": "string"
+          },
+          "path": {
+            "description": "Local .lus bundle path.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "memory_skills"
+      ]
+    },
+    {
+      "description": "List installed and built-in Point Library packages with version, active state, catalog count, and verification status.",
+      "effect": "read",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "list_point_libraries",
+      "paid": false,
+      "parameters": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "plan_mode": "allowed",
+      "requires_idempotency_key": false,
+      "requires_project_revision": false,
+      "surface": "product",
+      "workflows": [
+        "memory_skills"
+      ]
+    },
+    {
+      "description": "Activate one exact previously installed Point Library version without deleting package bytes.",
+      "effect": "write",
+      "estimated_eta_sec": 0.2,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "rollback_point_library",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "library_id": {
+            "description": "Point Library id.",
+            "type": "string"
+          },
+          "version": {
+            "description": "Exact installed SemVer version to activate.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "library_id",
+          "version"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "memory_skills"
+      ]
+    },
+    {
+      "description": "Upload one locally validated Point Library .lus bundle to the signed-in user's Skill Cloud. Private is the default; public requires explicit confirmation.",
+      "effect": "write",
+      "estimated_eta_sec": 1.0,
+      "estimated_usd": 0.0,
+      "execution": "sync",
+      "exposed_via": [
+        "agent",
+        "http"
+      ],
+      "name": "publish_point_library",
+      "paid": false,
+      "parameters": {
+        "properties": {
+          "path": {
+            "description": "Local .lus bundle path.",
+            "type": "string"
+          },
+          "public_confirmed": {
+            "description": "Required true only after an explicit public-publishing request.",
+            "type": "boolean"
+          },
+          "visibility": {
+            "enum": [
+              "private",
+              "public"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "plan_mode": "blocked",
+      "requires_idempotency_key": true,
+      "requires_project_revision": true,
+      "surface": "product",
+      "workflows": [
+        "memory_skills"
+      ]
+    }
+  ],
+  "error_envelope": {
+    "required": [
+      "code",
+      "message",
+      "recovery",
+      "details"
+    ]
+  },
+  "event_envelope": {
+    "optional": [
+      "request_id",
+      "project_revision",
+      "production_revision"
+    ],
+    "required": [
+      "seq",
+      "ts",
+      "session_id",
+      "origin",
+      "kind",
+      "data"
+    ]
+  },
+  "protocol_version": 2
+}

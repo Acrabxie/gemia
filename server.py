@@ -35,6 +35,7 @@ import hashlib
 import mimetypes
 import os
 import re
+import shutil
 import socket
 import subprocess
 import threading
@@ -48,9 +49,71 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from gemia.model_strength import strongest_media_model
 
 
-_CONFIG_PATH = Path.home() / ".gemia" / "config.json"
+_DEFAULT_CONFIG_PATH = Path.home() / ".gemia" / "config.json"
+_DEFAULT_LOCAL_CONFIG_PATH = Path.home() / ".lumeri" / "config.toml"
+_CONFIG_PATH = _DEFAULT_CONFIG_PATH
+_LOCAL_CONFIG_PATH = _DEFAULT_LOCAL_CONFIG_PATH
 _DEFAULT_IMAGE_MODEL = strongest_media_model("image", "openrouter")
 _DEFAULT_IMAGE_BASE_URL = "https://openrouter.ai/api/v1"
+_VALIDATED_CLOUD_ACCOUNT_ID = ""
+_VALIDATED_CLOUD_ACCOUNT_LOCK = threading.RLock()
+
+
+def _public_config_path() -> Path:
+    override = os.environ.get("LUMERI_LOCAL_CONFIG_PATH", "").strip()
+    if override:
+        return Path(override).expanduser()
+    # Test/embedded hosts commonly redirect the legacy config. Keep their
+    # public authority beside that isolated root instead of touching real HOME.
+    if _CONFIG_PATH != _DEFAULT_CONFIG_PATH and _LOCAL_CONFIG_PATH == _DEFAULT_LOCAL_CONFIG_PATH:
+        return _CONFIG_PATH.parent / "lumeri-config.toml"
+    return _LOCAL_CONFIG_PATH
+
+
+def _validated_cloud_account_id() -> str:
+    with _VALIDATED_CLOUD_ACCOUNT_LOCK:
+        return _VALIDATED_CLOUD_ACCOUNT_ID
+
+
+def _mark_cloud_account_validated(cloud_account: dict[str, object]) -> None:
+    global _VALIDATED_CLOUD_ACCOUNT_ID
+    cloud_id = str(cloud_account.get("id") or "").strip()
+    with _VALIDATED_CLOUD_ACCOUNT_LOCK:
+        _VALIDATED_CLOUD_ACCOUNT_ID = cloud_id
+
+
+def _clear_cloud_account_validation(*, clear_credential: bool = True) -> None:
+    global _VALIDATED_CLOUD_ACCOUNT_ID
+    with _VALIDATED_CLOUD_ACCOUNT_LOCK:
+        _VALIDATED_CLOUD_ACCOUNT_ID = ""
+    if clear_credential:
+        try:
+            cloud_client = cloud_accounts.client()
+            clear = getattr(cloud_client, "clear_credential", None)
+            if callable(clear):
+                clear()
+            clear_auxiliary = getattr(cloud_client, "clear_auxiliary_credentials", None)
+            if callable(clear_auxiliary):
+                clear_auxiliary()
+        except Exception:
+            pass
+
+
+def _close_live_cloud_sessions() -> None:
+    """Drop account-bound runners while preserving every durable workdir."""
+    try:
+        from gemia.session_manager import get_manager
+
+        manager = get_manager()
+        for session_id in manager.list_sessions():
+            try:
+                manager.close_session(session_id, remove_workdir=False)
+            except Exception:
+                # close_session removes the runner from the live registry
+                # before shutting its loop down, so it cannot be reused.
+                pass
+    except Exception:
+        pass
 
 
 def _legacy_image_model(value: object) -> bool:
@@ -169,14 +232,179 @@ def _host_allowed(host_header: str) -> bool:
 def _require_account(handler: BaseHTTPRequestHandler) -> str | None:
     """Return the acting account_id or send 401 and return None.
 
-    Resolution goes through gemia.identity (per-request X-Lumeri-Account pin
-    first, process-global active.json as fallback) so one client switching
-    accounts no longer retargets every other open client."""
+    Cloud mode trusts only the profile written by the boot-time remote session
+    check. Legacy mode retains gemia.identity's per-request account pin."""
+    if cloud_accounts.enabled():
+        # /auth/session performs the remote token validation once at boot.
+        # Workspace requests use the resulting local profile so timeline and
+        # media interactions never inherit cloud round-trip latency.
+        profile = accounts.current_account()
+        if not profile:
+            _json_response(handler, 401, {"error": "not signed in"})
+            return None
+        if profile.get("onboarding_completed") is not True:
+            _json_response(handler, 403, {"error": "account onboarding required"})
+            return None
+        cloud_id = str(profile.get("cloud_account_id") or "").strip()
+        if not cloud_id or cloud_id != _validated_cloud_account_id():
+            _json_response(handler, 401, {"error": "cloud session not validated"})
+            return None
+        account_id = str(profile.get("account_id") or "").strip()
+    else:
+        account_id = identity.resolve_account_id(handler)
+    if not account_id:
+        _json_response(handler, 401, {"error": "not signed in"})
+        return None
+    return account_id
+
+
+def _normalized_byok_provider(value: object) -> str:
+    provider = str(value or "").strip().lower()
+    return {"anthropic": "claude"}.get(provider, provider)
+
+
+def _cloud_provider_name(value: object) -> str:
+    provider = _normalized_byok_provider(value)
+    return {"claude": "anthropic"}.get(provider, provider)
+
+
+_CLOUD_KEYLESS_PROVIDERS = ("lumeri", "openai_subscription")
+_CLOUD_BYOK_PROVIDERS = ("openai", "claude", "gemini", "openrouter", "custom")
+
+
+def _allowed_cloud_providers(profile: dict[str, object]) -> tuple[str, ...]:
+    if profile.get("age_band") == "18_plus":
+        return (*_CLOUD_KEYLESS_PROVIDERS, *_CLOUD_BYOK_PROVIDERS)
+    return _CLOUD_KEYLESS_PROVIDERS
+
+
+_MODEL_KEY_PROVIDER = {
+    "openrouter_api_key": "openrouter",
+    "gemini_api_key": "gemini",
+    "anthropic_api_key": "claude",
+    "openai_api_key": "openai",
+}
+_CLOUD_AUXILIARY_SECRET_FIELDS = {
+    "image_api_key",
+    "nano_banana_api_key",
+}
+_CLOUD_SEARCH_SECRET_FIELDS = {
+    "tavily_api_key",
+    "brave_api_key",
+    "serper_api_key",
+    "exa_api_key",
+    "bing_api_key",
+    "google_cse_key",
+    "searxng_api_key",
+}
+_CLOUD_SEARCH_PROVIDER_SECRET_FIELD = {
+    "tavily": "tavily_api_key",
+    "brave": "brave_api_key",
+    "serper": "serper_api_key",
+    "exa": "exa_api_key",
+    "bing": "bing_api_key",
+    "google_cse": "google_cse_key",
+    "searxng": "searxng_api_key",
+}
+_CLOUD_KEYLESS_SEARCH_PROVIDERS = {"", "auto", "duckduckgo", "searxng"}
+_CLOUD_SEARCH_PROVIDERS = {
+    *_CLOUD_KEYLESS_SEARCH_PROVIDERS,
+    *_CLOUD_SEARCH_PROVIDER_SECRET_FIELD,
+}
+
+
+def _prepare_cloud_config_body(body: dict[str, object]) -> tuple[dict[str, object] | None, str]:
+    """Validate a cloud Setup update against the account's age policy."""
+    profile = accounts.current_account() or {}
+    selected = _normalized_byok_provider(profile.get("model_provider"))
+    candidate = _normalized_byok_provider(body.get("provider")) or selected
+    cloud_provider = _cloud_provider_name(candidate)
+    if not selected or not cloud_provider:
+        return None, "account provider is not configured"
+    if candidate not in _allowed_cloud_providers(profile):
+        return None, "provider is not available for this account"
+    profile_id = str(body.get("profile_id") or "").strip()
+    if profile_id:
+        profile_provider = "custom" if profile_id.startswith("custom:") else _normalized_byok_provider(profile_id)
+        if profile_provider != candidate:
+            return None, "profile does not match selected provider"
+    for field, provider in _MODEL_KEY_PROVIDER.items():
+        if field not in body:
+            continue
+        expected = "openai" if candidate == "custom" else candidate
+        if provider != expected:
+            return None, "credential field does not match selected provider"
+    forbidden = sorted(field for field in _CLOUD_AUXILIARY_SECRET_FIELDS if field in body)
+    if forbidden:
+        return None, "auxiliary credentials are unavailable in cloud-account mode"
+    search_provider = str(body.get("search_provider") or "").strip().lower()
+    if search_provider not in _CLOUD_SEARCH_PROVIDERS:
+        return None, "search provider is unavailable in cloud-account mode"
+    supplied_search_secrets = {
+        field for field in _CLOUD_SEARCH_SECRET_FIELDS if field in body
+    }
+    expected_search_secret = _CLOUD_SEARCH_PROVIDER_SECRET_FIELD.get(search_provider, "")
+    if supplied_search_secrets - ({expected_search_secret} if expected_search_secret else set()):
+        return None, "search credential does not match selected provider"
+    prepared = dict(body)
+    prepared["provider"] = candidate
+    if candidate != "custom":
+        prepared.pop("base_url", None)
+    if profile_id:
+        prepared["profile_id"] = profile_id
+    return prepared, cloud_provider
+
+
+def _require_provider_access(
+    handler: BaseHTTPRequestHandler,
+    *,
+    requested_provider: object = "",
+) -> bool:
+    """Allow only providers permitted by the signed-in account's age band.
+
+    Legacy/local-only mode keeps its existing first-run behavior.  In cloud
+    mode the account service remains authoritative. Lumeri Credits and OpenAI
+    subscription are available to both age bands; external keys remain 18+.
+    """
+    if cloud_accounts.enabled():
+        if _require_account(handler) is None:
+            return False
+        profile = accounts.current_account() or {}
+        requested = _normalized_byok_provider(requested_provider)
+        if requested and requested not in _allowed_cloud_providers(profile):
+            _json_response(handler, 403, {"error": "provider is not available for this account"})
+            return False
+        return True
+    if accounts.list_accounts() and _require_account(handler) is None:
+        return False
+    return True
+
+
+def _require_workspace_account(handler: BaseHTTPRequestHandler) -> str | None:
+    """Resolve an account for workspace/media routes in both runtime modes."""
+    if cloud_accounts.enabled():
+        return _require_account(handler)
     account_id = identity.resolve_account_id(handler)
     if not account_id:
         _json_response(handler, 401, {"error": "not signed in"})
         return None
     return account_id
+
+
+def _active_media_project_id(account_id: str) -> str:
+    """Return the active Project scope without accepting caller-selected ids."""
+    from gemia.media_library import LEGACY_PROJECT_SCOPE
+    from gemia.session_history import load_current_session
+
+    try:
+        session = load_current_session(account_id=account_id)
+    except Exception:
+        return LEGACY_PROJECT_SCOPE
+    project_id = str(session.get("project_id") or "").strip()
+    if project_id:
+        return project_id
+    project = session.get("project") if isinstance(session.get("project"), dict) else {}
+    return str(project.get("project_id") or project.get("id") or "").strip() or LEGACY_PROJECT_SCOPE
 
 
 def _video_path_allowed(account_id: str | None, video: str) -> bool:
@@ -235,8 +463,19 @@ def _origin_allowed(origin_or_referer: str) -> bool:
     return host_only in _cached_lan_addresses()
 
 
+def _is_loopback_client(handler: BaseHTTPRequestHandler) -> bool:
+    try:
+        import ipaddress
+
+        return ipaddress.ip_address(str(handler.client_address[0])).is_loopback
+    except Exception:
+        return False
+
+
 def _load_config_keys() -> None:
     """Load API keys from ~/.gemia/config.json into env vars (if not already set)."""
+    if cloud_accounts.enabled():
+        return
     if _CONFIG_PATH.exists():
         try:
             cfg = json.loads(_CONFIG_PATH.read_text())
@@ -262,6 +501,16 @@ def _has_valid_key() -> bool:
     return bool(key) and key not in ("test", "sk-or-...") and len(key) > 10
 
 
+def _cloud_credential_snapshot() -> dict[str, str]:
+    if not cloud_accounts.enabled():
+        return {}
+    try:
+        snapshot = cloud_accounts.client().credential_snapshot()
+        return dict(snapshot or {})
+    except Exception:
+        return {}
+
+
 def _has_valid_image_key() -> bool:
     # OPENAI_API_KEY is intentionally NOT consulted; see GenerativeClient docstring.
     try:
@@ -283,6 +532,7 @@ def _model_profile_payload() -> dict:
     return public_model_profile()
 
 from gemia import accounts
+from gemia import cloud_accounts
 from gemia import identity
 from gemia.artifacts import artifact_outputs as _artifact_outputs
 from gemia.artifacts import is_document_artifact_output as _is_document_artifact_output
@@ -298,8 +548,60 @@ from gemia.stability import (
     stability_gate_enabled as _stability_gate_enabled,
 )
 from gemia.ai.sub_agents import SubAgentRegistry
-from lumerai.sandbox import sandbox_ctx as _sandbox_ctx
 from gemia.sandbox_v4 import set_sandbox_disabled as _set_v4_sandbox_disabled, is_sandbox_disabled as _is_v4_sandbox_disabled
+
+
+def _auth_session_payload() -> dict[str, object]:
+    if not cloud_accounts.enabled():
+        return accounts.auth_session_payload()
+    previous_cloud_id = _validated_cloud_account_id()
+    # Revalidation is the only operation allowed to arm workspace access.
+    # Clear first so an account/token change cannot race with the old marker.
+    _clear_cloud_account_validation()
+    try:
+        cloud_client = cloud_accounts.client()
+        cloud_account = cloud_client.current_account(sync_credential=False)
+        if cloud_account:
+            next_cloud_id = str(cloud_account.get("id") or "").strip()
+            if previous_cloud_id and previous_cloud_id != next_cloud_id:
+                _close_live_cloud_sessions()
+            sync_credential = getattr(cloud_client, "sync_selected_credential", None)
+            if callable(sync_credential):
+                sync_credential(cloud_account)
+    except cloud_accounts.CloudAuthError as exc:
+        accounts.sign_out()
+        if previous_cloud_id:
+            _close_live_cloud_sessions()
+        return {
+            "account": None,
+            "accounts": [],
+            "cloud_login_enabled": True,
+            "account_service_available": False,
+            "service_error": str(exc),
+        }
+    profile = accounts.activate_cloud_account(cloud_account) if cloud_account else None
+    if not profile:
+        accounts.sign_out()
+        if previous_cloud_id:
+            _close_live_cloud_sessions()
+    else:
+        _mark_cloud_account_validated(cloud_account)
+        try:
+            stored = json.loads(_CONFIG_PATH.read_text()) if _CONFIG_PATH.exists() else {}
+            search_provider = str(stored.get("search_provider") or "").strip().lower()
+            sync_auxiliary = getattr(cloud_client, "sync_auxiliary_credential", None)
+            if search_provider in _CLOUD_SEARCH_PROVIDER_SECRET_FIELD and callable(sync_auxiliary):
+                sync_auxiliary(search_provider)
+        except Exception:
+            # Search is optional and has a built-in DuckDuckGo fallback. A
+            # missing/stale auxiliary credential must not invalidate login.
+            pass
+    return {
+        "account": profile,
+        "accounts": [profile] if profile else [],
+        "cloud_login_enabled": True,
+        "account_service_available": True,
+    }
 
 # In-memory store for pending ask sessions. Each entry MUST carry account_id
 # and created_at so that account-switch cannot let user B answer user A's ask.
@@ -526,8 +828,16 @@ def _health_payload() -> dict:
             item.update(extra)
         checks.append(item)
 
-    add("config.openrouter", _has_valid_key(), "OpenRouter key present" if _has_valid_key() else "OpenRouter key missing", required=False)
-    add("config.image", _has_valid_image_key(), "image provider key present" if _has_valid_image_key() else "image provider key missing", required=False)
+    if cloud_accounts.enabled():
+        add(
+            "config.cloud_account",
+            True,
+            "Provider credentials are resolved after account login",
+            required=False,
+        )
+    else:
+        add("config.openrouter", _has_valid_key(), "OpenRouter key present" if _has_valid_key() else "OpenRouter key missing", required=False)
+        add("config.image", _has_valid_image_key(), "image provider key present" if _has_valid_image_key() else "image provider key missing", required=False)
     for name, path in (("outputs_dir", _BASE_DIR / "outputs"), ("tasks_dir", _TASKS_DIR)):
         add(name, _dir_is_writable(path), str(path))
 
@@ -537,19 +847,14 @@ def _health_payload() -> dict:
     session_ok, session_detail = _session_health()
     add("session_video_refs", session_ok, session_detail, required=False)
 
-    try:
-        from gemia.video.blender_link import blender_link_status
-
-        blender = blender_link_status()
-        add(
-            "blender_lumerilink",
-            bool(blender.get("available")),
-            str(blender.get("blender_path") or "Blender not found; local fallback remains available"),
-            required=False,
-            extra={"available": bool(blender.get("available"))},
-        )
-    except Exception as exc:
-        add("blender_lumerilink", False, _human_error_message(exc), required=False)
+    blender = _lightweight_blender_status()
+    add(
+        "blender_lumerilink",
+        bool(blender.get("available")),
+        str(blender.get("blender_path") or "Blender not found; local fallback remains available"),
+        required=False,
+        extra={"available": bool(blender.get("available"))},
+    )
 
     input_log_dir = Path.home() / "Desktop" / "Lumeri Gemini Inputs"
     add(
@@ -567,6 +872,20 @@ def _health_payload() -> dict:
         "task_statuses": sorted(TASK_STATUSES),
         "checks": checks,
     }
+
+
+def _lightweight_blender_status() -> dict[str, object]:
+    """Probe Blender without importing the heavy video runtime during startup."""
+    candidates = (
+        os.environ.get("LUMERI_BLENDER_PATH", ""),
+        os.environ.get("GEMIA_BLENDER_PATH", ""),
+        shutil.which("blender") or "",
+        "/Applications/Blender.app/Contents/MacOS/Blender",
+    )
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return {"available": True, "blender_path": str(Path(candidate))}
+    return {"available": False, "blender_path": None}
 
 
 def _dir_is_writable(path: Path) -> bool:
@@ -664,6 +983,27 @@ class _Handler(BaseHTTPRequestHandler):
         parsed_url = urlparse(self.path)
         path = unquote(parsed_url.path).rstrip("/") or "/"
 
+        if path == "/api/internal/v1" or path.startswith("/api/internal/v1/"):
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
+            from gemia.api_v1_routes import try_handle as _api_v1_try
+
+            if _api_v1_try(self, method=("GET" if body else "HEAD"), body=body):
+                return
+        if path == "/api/v1" or path.startswith("/api/v1/"):
+            from gemia.api_v1_routes import legacy_path
+
+            previous_path = self.path
+            suffix = legacy_path(path)
+            self.path = suffix + (
+                f"?{parsed_url.query}" if parsed_url.query else ""
+            )
+            try:
+                self._handle_get_like(body=body)
+            finally:
+                self.path = previous_path
+            return
+
         # Root: remote visitors go straight to Video; local stays blank
         # (reserved for a future Lumeri family portal).
         if path == "/":
@@ -691,15 +1031,26 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/settings/sandbox":
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
             _json_response(self, 200, {"sandbox_disabled": _is_v4_sandbox_disabled()})
             return
-        # Lumeri v3 session HTTP surface (sessions / turn / assets / stream).
-        if path == "/sessions" or path.startswith("/sessions/"):
+        # Lumeri v3 protocol surface (live sessions + durable projects/runs).
+        if (
+            path == "/sessions"
+            or path.startswith("/sessions/")
+            or path == "/projects"
+            or path.startswith("/projects/")
+        ):
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
             from gemia.v3_routes import try_handle as _v3_try
             if _v3_try(self, method=("GET" if body else "HEAD")):
                 return
         # Read-only file browsing for the web UI (whitelisted roots only).
         if path.startswith("/files/"):
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
             from gemia.file_browse_routes import try_handle as _files_try
             if _files_try(
                 self,
@@ -707,9 +1058,14 @@ class _Handler(BaseHTTPRequestHandler):
                 serve_file=lambda p: _file_response(self, p, body=body),
             ):
                 return
-        # Quanta (discrete video) interactive demo.
+        # Quanta uses the shared Lumeri workspace shell.  Keep the standalone
+        # kernel demonstration available as evidence at /quanta/demo.
         if path == "/quanta" or path.startswith("/quanta/"):
-            rel = "index.html" if path in ("/quanta", "/quanta/") else path[len("/quanta/"):]
+            if path in ("/quanta", "/quanta/"):
+                target = (Path(__file__).resolve().parent / "static" / "v3" / "index.html").resolve()
+                _file_response(self, target, body=body)
+                return
+            rel = "index.html" if path in ("/quanta/demo", "/quanta/demo/") else path[len("/quanta/"):]
             quanta_root = (Path(__file__).resolve().parent / "static" / "v3" / "quanta").resolve()
             target = _safe_child_path(quanta_root, rel)
             if target is None:
@@ -738,19 +1094,76 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        if path == "/config/codex-login-status":
+            if not _require_provider_access(self, requested_provider="openai_subscription"):
+                return
+            from gemia import brain_config
+
+            status, payload = brain_config.codex_login_bridge("GET")
+            _json_response(self, status, payload)
+            return
+
         # Config status (for first-run key check). Network topology fields
         # (bind host, port, LAN URLs) are gated behind a signed-in account so
         # the first-run check stays anonymous but a logged-in user can still
         # retrieve LAN pairing info.
         if path == "/config":
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
+            cloud_profile = accounts.current_account() or {}
+            cloud_snapshot = _cloud_credential_snapshot()
+            cloud_byok_allowed = cloud_profile.get("age_band") == "18_plus"
+            allowed_cloud_providers = (
+                list(_allowed_cloud_providers(cloud_profile))
+                if cloud_accounts.enabled()
+                else []
+            )
             payload = {
-                "has_key": _has_valid_key(),
-                "has_image_key": _has_valid_image_key(),
+                "has_key": bool(cloud_snapshot.get("secret"))
+                if cloud_accounts.enabled()
+                else _has_valid_key(),
+                "has_image_key": bool(
+                    cloud_snapshot.get("secret")
+                    and cloud_snapshot.get("local_provider") == "openrouter"
+                )
+                if cloud_accounts.enabled()
+                else _has_valid_image_key(),
                 "image_provider": "openrouter/nano-banana",
                 "stability_gate": _stability_gate_enabled(),
                 "health_url": "/health",
+                "byok_allowed": not cloud_accounts.enabled()
+                or cloud_byok_allowed,
             }
-            if identity.resolve_account_id(self):
+            try:
+                from gemia import local_config
+
+                if not _is_loopback_client(self) and not identity.resolve_account_id(self):
+                    raise PermissionError("public local config is loopback-only")
+                _public_source = {}
+                if _CONFIG_PATH.exists():
+                    loaded = json.loads(_CONFIG_PATH.read_text())
+                    _public_source = loaded if isinstance(loaded, dict) else {}
+                if cloud_accounts.enabled():
+                    _public_source = cloud_accounts.runtime_model_config(_public_source)
+                payload["local_config"] = local_config.load_or_create(
+                    _public_source, path=_public_config_path()
+                )
+            except Exception:
+                pass
+            if cloud_accounts.enabled():
+                payload.update(
+                    {
+                        "allowed_providers": allowed_cloud_providers,
+                        "selected_provider": _normalized_byok_provider(
+                            cloud_profile.get("model_provider")
+                        ),
+                        "provider_mode": cloud_profile.get("provider_mode") or "",
+                    }
+                )
+            if (
+                (cloud_accounts.enabled() and _validated_cloud_account_id())
+                or identity.resolve_account_id(self)
+            ):
                 bind_host = _configured_server_host()
                 try:
                     bind_port = int(os.environ.get("LUMERI_PORT") or os.environ.get("GEMIA_PORT") or "7788")
@@ -770,18 +1183,43 @@ class _Handler(BaseHTTPRequestHandler):
                     _cfg_search = {}
                     if _CONFIG_PATH.exists():
                         _cfg_search = json.loads(_CONFIG_PATH.read_text())
-                    payload["search"] = {
-                        "provider": _cfg_search.get("search_provider", "auto"),
-                        "has_key": {
-                            "tavily": bool(_cfg_search.get("tavily_api_key")),
-                            "brave": bool(_cfg_search.get("brave_api_key")),
-                            "serper": bool(_cfg_search.get("serper_api_key")),
-                            "exa": bool(_cfg_search.get("exa_api_key")),
-                            "bing": bool(_cfg_search.get("bing_api_key")),
-                            "google_cse": bool(_cfg_search.get("google_cse_key") and _cfg_search.get("google_cse_id")),
-                            "searxng": bool(_cfg_search.get("searxng_url")),
-                        },
-                    }
+                    if cloud_accounts.enabled():
+                        provider = str(_cfg_search.get("search_provider") or "auto").lower()
+                        auxiliary_snapshot = {}
+                        try:
+                            snapshot = getattr(
+                                cloud_accounts.client(),
+                                "auxiliary_credential_snapshot",
+                                None,
+                            )
+                            auxiliary_snapshot = snapshot() if callable(snapshot) else {}
+                        except Exception:
+                            auxiliary_snapshot = {}
+                        payload["search"] = {
+                            "provider": provider
+                            if provider in _CLOUD_SEARCH_PROVIDERS
+                            else "auto",
+                            "has_key": {
+                                name: bool((auxiliary_snapshot.get(name) or {}).get("secret"))
+                                for name in _CLOUD_SEARCH_PROVIDER_SECRET_FIELD
+                            },
+                            "allowed_providers": sorted(
+                                _CLOUD_SEARCH_PROVIDERS - {""}
+                            ),
+                        }
+                    else:
+                        payload["search"] = {
+                            "provider": _cfg_search.get("search_provider", "auto"),
+                            "has_key": {
+                                "tavily": bool(_cfg_search.get("tavily_api_key")),
+                                "brave": bool(_cfg_search.get("brave_api_key")),
+                                "serper": bool(_cfg_search.get("serper_api_key")),
+                                "exa": bool(_cfg_search.get("exa_api_key")),
+                                "bing": bool(_cfg_search.get("bing_api_key")),
+                                "google_cse": bool(_cfg_search.get("google_cse_key") and _cfg_search.get("google_cse_id")),
+                                "searxng": bool(_cfg_search.get("searxng_url")),
+                            },
+                        }
                 except Exception:
                     pass
                 # 大脑 provider 现状（密钥脱敏，供 Setup 面板渲染）。
@@ -790,33 +1228,75 @@ class _Handler(BaseHTTPRequestHandler):
                     _cfg = {}
                     if _CONFIG_PATH.exists():
                         _cfg = json.loads(_CONFIG_PATH.read_text())
-                    payload["brain"] = brain_config.read_status(_cfg)
+                    if cloud_accounts.enabled():
+                        _cfg = cloud_accounts.runtime_model_config(_cfg)
+                    else:
+                        from gemia import local_config
+
+                        _cfg = local_config.merge_with_secret_config(
+                            _cfg, path=_public_config_path()
+                        )
+                    brain = brain_config.read_status(_cfg)
+                    if isinstance(payload.get("local_config"), dict):
+                        brain["fast_mode"] = payload["local_config"].get(
+                            "features", {}
+                        ).get("fast_mode", {})
+                    if cloud_accounts.enabled():
+                        lumeri_credits = {
+                            "id": "lumeri",
+                            "label": "Lumeri Credits",
+                            "hint": "保存为账户级供应商偏好；Credits 结算功能后续开放",
+                            "fields": [],
+                            "key_field": None,
+                            "recommended_model": "",
+                            "model_presets": [],
+                        }
+                        allowed = set(allowed_cloud_providers)
+                        providers = [lumeri_credits, *brain.get("providers", [])]
+                        brain["providers"] = [
+                            provider
+                            for provider in providers
+                            if _normalized_byok_provider(provider.get("id")) in allowed
+                        ]
+                        brain["allowed_providers"] = allowed_cloud_providers
+                        brain["cloud_account_mode"] = True
+                    payload["brain"] = brain
                 except Exception:
                     pass
             _json_response(self, 200, payload)
             return
 
         if path == "/model":
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
             from gemia.memory import model_selection_payload
 
             _json_response(self, 200, model_selection_payload("planner"))
             return
 
         if path == "/auth/session":
-            _json_response(self, 200, accounts.auth_session_payload())
+            _json_response(self, 200, _auth_session_payload())
             return
 
         if path == "/accounts":
-            _json_response(self, 200, {"accounts": accounts.list_accounts(), **accounts.auth_session_payload()})
+            session_payload = _auth_session_payload()
+            if cloud_accounts.enabled():
+                _json_response(self, 200, session_payload)
+            else:
+                _json_response(self, 200, {"accounts": accounts.list_accounts(), **session_payload})
             return
 
         if path == "/agent-links/status":
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
             from gemia.agent_links import status_payload
 
             _json_response(self, 200, status_payload())
             return
 
         if path == "/agent-links/messages":
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
             from gemia.agent_links import list_messages
 
             query = parse_qs(parsed_url.query)
@@ -828,6 +1308,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if path.startswith("/runtime/dev/workspace"):
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
             if not _vnext_enabled():
                 _json_response(self, 404, {"error": "vNext runtime is disabled"})
                 return
@@ -920,9 +1402,8 @@ class _Handler(BaseHTTPRequestHandler):
             from gemia.project_model import normalize_project
             from gemia.session_history import load_current_session
 
-            account_id = identity.resolve_account_id(self)
-            if not account_id:
-                _json_response(self, 401, {"error": "not signed in"})
+            account_id = _require_workspace_account(self)
+            if account_id is None:
                 return
             session = load_current_session(account_id=account_id)
             project = normalize_project(
@@ -936,35 +1417,68 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/session-history":
             from gemia.session_history import load_current_session
 
-            try:
-                account_id = identity.resolve_account_id(self)
-            except Exception:
-                account_id = None
+            if cloud_accounts.enabled():
+                account_id = _require_account(self)
+                if account_id is None:
+                    return
+            else:
+                try:
+                    account_id = identity.resolve_account_id(self)
+                except Exception:
+                    account_id = None
             _json_response(self, 200, load_current_session(account_id=account_id))
             return
 
         if path == "/session-history/list":
             from gemia.session_history import list_session_snapshots
+            from gemia.session_manager import get_manager
 
-            try:
-                account_id = identity.resolve_account_id(self)
-            except Exception:
-                account_id = None
+            if cloud_accounts.enabled():
+                account_id = _require_account(self)
+                if account_id is None:
+                    return
+            else:
+                try:
+                    account_id = identity.resolve_account_id(self)
+                except Exception:
+                    account_id = None
             query = parse_qs(parsed_url.query)
             try:
                 limit = int(query.get("limit", ["30"])[0] or 30)
             except ValueError:
                 limit = 30
-            _json_response(self, 200, {"sessions": list_session_snapshots(limit=limit, account_id=account_id)})
+            snapshots = list_session_snapshots(limit=limit, account_id=account_id)
+            records = get_manager().list_persisted_sessions(include_deleted=True)
+            session_meta = {
+                str(record.get("session_id") or ""): record
+                for record in records
+                if (
+                    not account_id
+                    or str(record.get("account_id") or "") == str(account_id)
+                )
+            }
+            visible = []
+            for snapshot in snapshots:
+                meta = session_meta.get(str(snapshot.get("v3_session_id") or ""))
+                if meta and meta.get("deleted_at"):
+                    continue
+                visible.append({**snapshot, "pinned": bool(meta and meta.get("pinned"))})
+            visible.sort(key=lambda item: bool(item.get("pinned")), reverse=True)
+            _json_response(self, 200, {"sessions": visible})
             return
 
         if path.startswith("/session-history/"):
             from gemia.session_history import load_session_snapshot
 
-            try:
-                account_id = identity.resolve_account_id(self)
-            except Exception:
-                account_id = None
+            if cloud_accounts.enabled():
+                account_id = _require_account(self)
+                if account_id is None:
+                    return
+            else:
+                try:
+                    account_id = identity.resolve_account_id(self)
+                except Exception:
+                    account_id = None
             snapshot_id = unquote(path.removeprefix("/session-history/")).strip()
             try:
                 _json_response(self, 200, load_session_snapshot(snapshot_id, account_id=account_id, activate=True))
@@ -977,9 +1491,8 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/media-library/list":
             from gemia.media_library import list_assets
 
-            account_id = identity.resolve_account_id(self)
-            if not account_id:
-                _json_response(self, 401, {"error": "not signed in"})
+            account_id = _require_workspace_account(self)
+            if account_id is None:
                 return
             query = parse_qs(parsed_url.query)
             kind = str(query.get("kind", [""])[0] or "")
@@ -988,20 +1501,71 @@ class _Handler(BaseHTTPRequestHandler):
                 limit = int(query.get("limit", ["200"])[0] or 200)
             except ValueError:
                 limit = 200
-            _json_response(self, 200, {"assets": list_assets(account_id, kind=kind, q=q, limit=limit)})
+            project_id = _active_media_project_id(account_id)
+            _json_response(
+                self,
+                200,
+                {"assets": list_assets(account_id, kind=kind, q=q, limit=limit, project_id=project_id)},
+            )
+            return
+
+        if path.startswith("/media-library/prepare/"):
+            from gemia.roughcut import RoughcutError, get_prepare_job
+
+            account_id = _require_workspace_account(self)
+            if account_id is None:
+                return
+            job_id = path.removeprefix("/media-library/prepare/").strip()
+            try:
+                _json_response(
+                    self,
+                    200,
+                    get_prepare_job(
+                        account_id,
+                        job_id,
+                        project_id=_active_media_project_id(account_id),
+                    ),
+                )
+            except RoughcutError as exc:
+                _json_response(self, 404, {"error": str(exc)})
+            return
+
+        if path.startswith("/media-library/") and path.endswith("/roughcut"):
+            from gemia.roughcut import RoughcutError, load_roughcut
+
+            account_id = _require_workspace_account(self)
+            if account_id is None:
+                return
+            parts = path.split("/")
+            asset_id = parts[2] if len(parts) >= 4 else ""
+            try:
+                _json_response(
+                    self,
+                    200,
+                    {"manifest": load_roughcut(
+                        account_id,
+                        asset_id,
+                        project_id=_active_media_project_id(account_id),
+                    )},
+                )
+            except RoughcutError as exc:
+                _json_response(self, 404, {"error": str(exc)})
             return
 
         if path.startswith("/media-library/") and path.endswith("/annotations"):
             from gemia.media_annotations import MediaAnnotationError, list_annotations
 
-            account_id = identity.resolve_account_id(self)
-            if not account_id:
-                _json_response(self, 401, {"error": "not signed in"})
+            account_id = _require_workspace_account(self)
+            if account_id is None:
                 return
             parts = path.split("/")
             asset_id = parts[2] if len(parts) >= 4 else ""
             try:
-                _json_response(self, 200, {"annotations": list_annotations(account_id, asset_id)})
+                _json_response(
+                    self,
+                    200,
+                    {"annotations": list_annotations(account_id, asset_id, project_id=_active_media_project_id(account_id))},
+                )
             except MediaAnnotationError as exc:
                 _json_response(self, 404, {"error": str(exc)})
             return
@@ -1009,16 +1573,25 @@ class _Handler(BaseHTTPRequestHandler):
         if path.startswith("/media-library/file/"):
             from gemia.media_library import MediaLibraryError, resolve_asset_file
 
-            account_id = identity.resolve_account_id(self)
-            if not account_id:
-                _json_response(self, 401, {"error": "not signed in"})
+            account_id = _require_workspace_account(self)
+            if account_id is None:
                 return
             parts = path.split("/")
             try:
                 asset_id = parts[3] if len(parts) >= 5 else ""
                 area = parts[4] if len(parts) >= 5 else ""
                 filename = parts[5] if len(parts) >= 6 else None
-                _file_response(self, resolve_asset_file(account_id, asset_id, area, filename), body=body)
+                _file_response(
+                    self,
+                    resolve_asset_file(
+                        account_id,
+                        asset_id,
+                        area,
+                        filename,
+                        project_id=_active_media_project_id(account_id),
+                    ),
+                    body=body,
+                )
             except MediaLibraryError as exc:
                 _json_response(self, 404, {"error": str(exc)})
             return
@@ -1026,13 +1599,12 @@ class _Handler(BaseHTTPRequestHandler):
         if path.startswith("/media-library/"):
             from gemia.media_library import get_asset
 
-            account_id = identity.resolve_account_id(self)
-            if not account_id:
-                _json_response(self, 401, {"error": "not signed in"})
+            account_id = _require_workspace_account(self)
+            if account_id is None:
                 return
             parts = path.split("/")
             asset_id = parts[2] if len(parts) >= 3 else ""
-            asset = get_asset(account_id, asset_id)
+            asset = get_asset(account_id, asset_id, project_id=_active_media_project_id(account_id))
             if not asset:
                 _json_response(self, 404, {"error": "media asset not found"})
                 return
@@ -1041,6 +1613,8 @@ class _Handler(BaseHTTPRequestHandler):
 
         # Safe file serving: /file/outputs/..., /file/demo/...
         if path.startswith("/file/"):
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
             rel = path[len("/file/"):]
             # Reject traversal attempts
             parts_rel = Path(rel).parts
@@ -1058,10 +1632,35 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/agents":
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
             _json_response(self, 200, {"agents": SubAgentRegistry.list_agents()})
             return
 
+        if path == "/skill-cloud/artifacts":
+            if not cloud_accounts.enabled():
+                _json_response(
+                    self,
+                    503,
+                    {"error": "Skill Cloud is not enabled on this Lumeri runtime"},
+                )
+                return
+            if _require_account(self) is None:
+                return
+            try:
+                artifacts = cloud_accounts.client().list_skill_artifacts()
+                _json_response(self, 200, {"artifacts": artifacts})
+            except cloud_accounts.CloudAuthError as exc:
+                _json_response(
+                    self,
+                    exc.status,
+                    {"error": exc.code, "user_message": str(exc)},
+                )
+            return
+
         if path == "/skills":
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
             # Load from skills_v2/ (preferred) with name+description from JSON
             skills_v2 = []
             for p in sorted(_SKILLS_V2_DIR.glob("*.json")):
@@ -1112,19 +1711,47 @@ class _Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802
         if self._security_gate(mutating=True):
             return
-        route = unquote(urlparse(self.path).path).rstrip("/")
+        parsed_url = urlparse(self.path)
+        route = unquote(parsed_url.path).rstrip("/")
+        if route == "/api/v1" or route.startswith("/api/v1/"):
+            from gemia.api_v1_routes import legacy_path
+
+            previous_path = self.path
+            self.path = legacy_path(route) + (
+                f"?{parsed_url.query}" if parsed_url.query else ""
+            )
+            try:
+                self.do_DELETE()
+            finally:
+                self.path = previous_path
+            return
+        if route.startswith("/sessions/") or route.startswith("/projects/"):
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
+            from gemia.v3_routes import try_handle as _v3_try
+
+            if _v3_try(self, method="DELETE"):
+                return
         if route.startswith("/media-library/") and "/annotations/" in route:
             try:
                 from gemia.media_annotations import MediaAnnotationError, delete_annotation
 
-                account_id = identity.resolve_account_id(self)
-                if not account_id:
-                    _json_response(self, 401, {"error": "not signed in"})
+                account_id = _require_workspace_account(self)
+                if account_id is None:
                     return
                 parts = route.split("/")
                 asset_id = parts[2] if len(parts) >= 5 else ""
                 annotation_id = parts[4] if len(parts) >= 5 else ""
-                _json_response(self, 200, {"annotation": delete_annotation(account_id, asset_id, annotation_id)})
+                _json_response(
+                    self,
+                    200,
+                    {"annotation": delete_annotation(
+                        account_id,
+                        asset_id,
+                        annotation_id,
+                        project_id=_active_media_project_id(account_id),
+                    )},
+                )
             except MediaAnnotationError as exc:
                 _json_response(self, 404, {"error": str(exc)})
             except Exception as exc:
@@ -1134,13 +1761,20 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 from gemia.media_library import MediaLibraryError, soft_delete_asset
 
-                account_id = identity.resolve_account_id(self)
-                if not account_id:
-                    _json_response(self, 401, {"error": "not signed in"})
+                account_id = _require_workspace_account(self)
+                if account_id is None:
                     return
                 parts = route.split("/")
                 asset_id = parts[2] if len(parts) >= 3 else ""
-                _json_response(self, 200, {"asset": soft_delete_asset(account_id, asset_id)})
+                _json_response(
+                    self,
+                    200,
+                    {"asset": soft_delete_asset(
+                        account_id,
+                        asset_id,
+                        project_id=_active_media_project_id(account_id),
+                    )},
+                )
             except MediaLibraryError as exc:
                 _json_response(self, 404, {"error": str(exc)})
             except Exception as exc:
@@ -1151,13 +1785,63 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         if self._security_gate(mutating=True):
             return
-        route = unquote(urlparse(self.path).path).rstrip("/")
-        # Lumeri v3 session HTTP surface.
-        if route == "/sessions" or route.startswith("/sessions/"):
+        parsed_url = urlparse(self.path)
+        route = unquote(parsed_url.path).rstrip("/")
+        if route == "/api/internal/v1" or route.startswith("/api/internal/v1/"):
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
+            from gemia.api_v1_routes import try_handle as _api_v1_try
+
+            if _api_v1_try(self, method="POST"):
+                return
+        if route == "/api/v1" or route.startswith("/api/v1/"):
+            from gemia.api_v1_routes import legacy_path
+
+            previous_path = self.path
+            self.path = legacy_path(route) + (
+                f"?{parsed_url.query}" if parsed_url.query else ""
+            )
+            try:
+                self.do_POST()
+            finally:
+                self.path = previous_path
+            return
+        # Client-owned workspaces (the personal iPad build) use this as a
+        # one-shot subscription call.  It must stay above the session router:
+        # no SessionManager/ProjectStore is created or written here.
+        if route == "/local-chat":
+            if cloud_accounts.enabled():
+                if _require_account(self) is None:
+                    return
+                _json_response(
+                    self,
+                    403,
+                    {"error": "online managed creation is not available yet"},
+                )
+                return
+            try:
+                from gemia.stateless_chat import StatelessChatError, complete
+
+                _json_response(self, 200, complete(_read_json_body(self)))
+            except StatelessChatError as exc:
+                _json_response(self, 400, {"error": str(exc)})
+            return
+        # Lumeri v3 protocol surface (live sessions + durable projects/runs).
+        if (
+            route == "/sessions"
+            or route.startswith("/sessions/")
+            or route == "/projects"
+            or route.startswith("/projects/")
+        ):
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
             from gemia.v3_routes import try_handle as _v3_try
             if _v3_try(self, method="POST"):
                 return
         if route == "/auth/google/start":
+            if cloud_accounts.enabled():
+                _json_response(self, 409, {"error": "use cloud device login"})
+                return
             try:
                 _json_response(self, 200, accounts.start_google_oauth())
             except Exception as exc:
@@ -1165,6 +1849,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if route == "/auth/email/start":
+            if cloud_accounts.enabled():
+                _json_response(self, 409, {"error": "use cloud device login"})
+                return
             try:
                 payload = _read_json_body(self)
                 _json_response(self, 200, accounts.start_email_login(payload.get("email", "")))
@@ -1173,6 +1860,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if route == "/auth/email/verify":
+            if cloud_accounts.enabled():
+                _json_response(self, 409, {"error": "use cloud device login"})
+                return
             try:
                 payload = _read_json_body(self)
                 profile = accounts.verify_email_login(payload.get("email", ""), payload.get("code", ""))
@@ -1181,14 +1871,64 @@ class _Handler(BaseHTTPRequestHandler):
                 _json_response(self, 400, _error_payload(exc))
             return
 
-        if route == "/model":
+        if route == "/auth/device/start":
+            if not cloud_accounts.enabled():
+                _json_response(self, 404, {"error": "cloud login is disabled"})
+                return
             try:
-                from gemia.memory import apply_model_selection, model_selection_payload, strongest_model_lock
+                import platform as _platform
+
+                device_name = _platform.node().strip() or f"Lumeri {_platform.system()}"
+                payload = cloud_accounts.client().start_device_login(
+                    device_name=device_name,
+                    platform_name=_platform.system() or "Desktop",
+                )
+                _json_response(self, 200, payload)
+            except cloud_accounts.CloudAuthError as exc:
+                _json_response(self, exc.status, {"error": exc.code, "user_message": str(exc)})
+            return
+
+        if route == "/auth/device/token":
+            if not cloud_accounts.enabled():
+                _json_response(self, 404, {"error": "cloud login is disabled"})
+                return
+            previous_cloud_id = ""
+            try:
+                payload = _read_json_body(self)
+                cloud_client = cloud_accounts.client()
+                result = cloud_client.poll_device_login(
+                    str(payload.get("attempt_id") or ""),
+                    sync_credential=False,
+                )
+                if result.get("pending"):
+                    _json_response(self, 202, result)
+                    return
+                previous_cloud_id = _validated_cloud_account_id()
+                _clear_cloud_account_validation()
+                next_cloud_id = str(result["account"].get("id") or "").strip()
+                if previous_cloud_id and previous_cloud_id != next_cloud_id:
+                    _close_live_cloud_sessions()
+                sync_credential = getattr(cloud_client, "sync_selected_credential", None)
+                if callable(sync_credential):
+                    sync_credential(result["account"])
+                profile = accounts.activate_cloud_account(result["account"])
+                _mark_cloud_account_validated(result["account"])
+                _json_response(self, 200, {"ok": True, "account": profile, **_auth_session_payload()})
+            except cloud_accounts.CloudAuthError as exc:
+                _clear_cloud_account_validation()
+                if previous_cloud_id:
+                    _close_live_cloud_sessions()
+                accounts.sign_out()
+                _json_response(self, exc.status, {"error": exc.code, "user_message": str(exc)})
+            return
+
+        if route == "/model":
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
+            try:
+                from gemia.memory import apply_model_selection, model_selection_payload
 
                 payload = _read_json_body(self) or {}
-                if strongest_model_lock("planner").get("enabled"):
-                    _json_response(self, 423, {"error": "模型已强制锁定为最强配置，不能降级或切换"})
-                    return
                 apply_model_selection(payload, "planner")
                 _json_response(self, 200, {"ok": True, **model_selection_payload("planner")})
             except ValueError as exc:
@@ -1198,12 +1938,11 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if route == "/model/add":
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
             try:
-                from gemia.memory import add_model_to_catalog, model_selection_payload, strongest_model_lock
-
-                if strongest_model_lock("planner").get("enabled"):
-                    _json_response(self, 423, {"error": "模型已锁定为最强配置，不能添加或切换"})
-                    return
+                from gemia import brain_config
+                from gemia.memory import add_model_to_catalog, model_selection_payload
 
                 payload = _read_json_body(self) or {}
                 model_id = payload.get("id", "").strip()
@@ -1213,7 +1952,10 @@ class _Handler(BaseHTTPRequestHandler):
                 add_model_to_catalog(
                     model_id,
                     label=payload.get("label", ""),
-                    provider=payload.get("provider", ""),
+                    provider=payload.get("provider", "")
+                    or brain_config.read_status(
+                        json.loads(_CONFIG_PATH.read_text()) if _CONFIG_PATH.exists() else {}
+                    ).get("provider", ""),
                     slot="planner",
                 )
                 _json_response(self, 200, {"ok": True, **model_selection_payload("planner")})
@@ -1224,12 +1966,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if route == "/model/remove":
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
             try:
-                from gemia.memory import model_selection_payload, remove_model_from_catalog, strongest_model_lock
-
-                if strongest_model_lock("planner").get("enabled"):
-                    _json_response(self, 423, {"error": "模型已锁定为最强配置，不能删除或切换"})
-                    return
+                from gemia.memory import model_selection_payload, remove_model_from_catalog
 
                 payload = _read_json_body(self) or {}
                 model_id = payload.get("id", "").strip()
@@ -1245,11 +1985,21 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if route == "/auth/logout":
+            if _validated_cloud_account_id():
+                _close_live_cloud_sessions()
+            _clear_cloud_account_validation()
+            if cloud_accounts.enabled():
+                try:
+                    cloud_accounts.client().logout()
+                except cloud_accounts.CloudAuthError:
+                    pass
             accounts.sign_out()
-            _json_response(self, 200, {"ok": True, **accounts.auth_session_payload()})
+            _json_response(self, 200, {"ok": True, **_auth_session_payload()})
             return
 
         if route.startswith("/runtime/"):
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
             if not _vnext_enabled():
                 _json_response(self, 404, {"error": "vNext runtime is disabled"})
                 return
@@ -1414,9 +2164,8 @@ class _Handler(BaseHTTPRequestHandler):
             from gemia.media_library import MediaLibraryError, import_media, upload_response_for_asset
             from gemia.video.timeline_assets import SUPPORTED_MEDIA_EXTENSIONS
 
-            account_id = identity.resolve_account_id(self)
-            if not account_id:
-                _json_response(self, 401, {"error": "not signed in"})
+            account_id = _require_workspace_account(self)
+            if account_id is None:
                 return
             filename = (self.headers.get("X-Filename") or "upload").strip()
             safe_name = Path(filename).name.strip() or "upload"
@@ -1459,7 +2208,12 @@ class _Handler(BaseHTTPRequestHandler):
                         "received_bytes": actual,
                     })
                     return
-                asset = import_media(account_id, dest, original_name=safe_name)
+                asset = import_media(
+                    account_id,
+                    dest,
+                    original_name=safe_name,
+                    project_id=_active_media_project_id(account_id),
+                )
                 _json_response(self, 200, upload_response_for_asset(asset))
             except MediaLibraryError as exc:
                 _json_response(self, 400, {"error": str(exc)})
@@ -1476,12 +2230,135 @@ class _Handler(BaseHTTPRequestHandler):
             # Save API keys to ~/.gemia/config.json and reload into env. The
             # first-run UI lets a logged-out user paste a key, so we only
             # require auth once any account has been provisioned locally.
-            if accounts.list_accounts() and _require_account(self) is None:
+            if not _require_provider_access(self):
                 return
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 raw = self.rfile.read(length) if length else b"{}"
                 body = json.loads(raw)
+                if not isinstance(body, dict):
+                    _json_response(self, 400, {"error": "request body must be an object"})
+                    return
+                if "fast_mode" in body and not isinstance(body.get("fast_mode"), bool):
+                    _json_response(self, 400, {"error": "fast_mode must be a boolean"})
+                    return
+                if cloud_accounts.enabled():
+                    provider_requested = bool(str(body.get("provider") or "").strip())
+                    provider_body = dict(body)
+                    provider_body.pop("fast_mode", None)
+                    prepared, cloud_provider = _prepare_cloud_config_body(provider_body)
+                    if prepared is None:
+                        _json_response(self, 403, {"error": cloud_provider})
+                        return
+                    if not _require_provider_access(
+                        self, requested_provider=prepared.get("provider")
+                    ):
+                        return
+                    selected = _normalized_byok_provider(prepared.get("provider"))
+                    updated_account: dict[str, object] | None = None
+                    if provider_requested:
+                        updated_account = cloud_accounts.client().select_provider(
+                            cloud_provider
+                        )
+                        accounts.activate_cloud_account(updated_account)
+                    expected_key_field = {
+                        "openrouter": "openrouter_api_key",
+                        "gemini": "gemini_api_key",
+                        "claude": "anthropic_api_key",
+                        "openai": "openai_api_key",
+                        "custom": "openai_api_key",
+                    }.get(selected, "")
+                    secret = str(body.get(expected_key_field) or "").strip() if expected_key_field else ""
+                    if secret:
+                        cloud_accounts.client().put_selected_credential(
+                            cloud_provider, secret
+                        )
+                    search_provider = str(prepared.get("search_provider") or "").strip().lower()
+                    search_secret_field = _CLOUD_SEARCH_PROVIDER_SECRET_FIELD.get(
+                        search_provider, ""
+                    )
+                    search_secret = (
+                        str(body.get(search_secret_field) or "").strip()
+                        if search_secret_field
+                        else ""
+                    )
+                    if search_secret:
+                        cloud_accounts.client().put_auxiliary_credential(
+                            search_provider, search_secret
+                        )
+                    elif search_secret_field:
+                        sync_auxiliary = getattr(
+                            cloud_accounts.client(),
+                            "sync_auxiliary_credential",
+                            None,
+                        )
+                        if callable(sync_auxiliary):
+                            sync_auxiliary(search_provider)
+                    cfg_dir = _CONFIG_PATH.parent
+                    cfg_dir.mkdir(parents=True, exist_ok=True)
+                    existing: dict[str, object] = {}
+                    if _CONFIG_PATH.exists():
+                        try:
+                            loaded = json.loads(_CONFIG_PATH.read_text())
+                            existing = loaded if isinstance(loaded, dict) else {}
+                        except Exception:
+                            existing = {}
+                    existing = cloud_accounts.strip_model_credentials(existing)
+                    for field in (
+                        *_CLOUD_AUXILIARY_SECRET_FIELDS,
+                        *_CLOUD_SEARCH_SECRET_FIELDS,
+                    ):
+                        existing.pop(field, None)
+                    if str(existing.get("search_provider") or "").lower() not in _CLOUD_SEARCH_PROVIDERS:
+                        existing["search_provider"] = "auto"
+                    safe_body = dict(prepared)
+                    for field in _MODEL_KEY_PROVIDER:
+                        safe_body.pop(field, None)
+                    for field in _CLOUD_SEARCH_SECRET_FIELDS:
+                        safe_body.pop(field, None)
+                    # Search selection and non-secret connection metadata stay
+                    # local; account-bound credentials never touch this file.
+                    for field in ("search_provider", "searxng_url", "google_cse_id"):
+                        if field in safe_body:
+                            value = str(safe_body.get(field) or "").strip()
+                            if value:
+                                existing[field] = value
+                            else:
+                                existing.pop(field, None)
+                    from gemia import brain_config
+                    from gemia import local_config
+
+                    brain_config.apply_update(existing, safe_body, sync_env=False)
+                    existing = cloud_accounts.bind_model_metadata(existing)
+                    public_body = dict(safe_body)
+                    if "fast_mode" in body:
+                        public_body["fast_mode"] = body["fast_mode"]
+                    local_config.write_public_update(
+                        existing, public_body, path=_public_config_path()
+                    )
+                    _CONFIG_PATH.write_text(
+                        json.dumps(existing, indent=2, ensure_ascii=False)
+                    )
+                    _json_response(
+                        self,
+                        200,
+                        {
+                            "ok": True,
+                            "selected_provider": selected,
+                            "provider_mode": (
+                                str((updated_account or {}).get("provider_mode") or "")
+                                or str((accounts.current_account() or {}).get("provider_mode") or "")
+                            ),
+                        },
+                    )
+                    return
+                requested_provider = body.get("provider")
+                if not requested_provider and body.get("openrouter_api_key"):
+                    requested_provider = "openrouter"
+                if not requested_provider and body.get("gemini_api_key"):
+                    requested_provider = "gemini"
+                if not _require_provider_access(self, requested_provider=requested_provider):
+                    return
                 cfg_dir = _CONFIG_PATH.parent
                 cfg_dir.mkdir(parents=True, exist_ok=True)
                 existing = {}
@@ -1490,10 +2367,14 @@ class _Handler(BaseHTTPRequestHandler):
                         existing = json.loads(_CONFIG_PATH.read_text())
                     except Exception:
                         pass
-                if key := body.get("openrouter_api_key", "").strip():
+                if not body.get("provider") and (
+                    key := body.get("openrouter_api_key", "").strip()
+                ):
                     existing["openrouter_api_key"] = key
                     os.environ["OPENROUTER_API_KEY"] = key
-                if key := body.get("gemini_api_key", "").strip():
+                if not body.get("provider") and (
+                    key := body.get("gemini_api_key", "").strip()
+                ):
                     existing["gemini_api_key"] = key
                     os.environ["GEMINI_API_KEY"] = key
                 if key := body.get("image_api_key", "").strip():
@@ -1536,55 +2417,122 @@ class _Handler(BaseHTTPRequestHandler):
                     brain_config.apply_update(existing, body)
                 except Exception:
                     pass
+                from gemia import local_config
+
+                local_config.write_public_update(
+                    existing, body, path=_public_config_path()
+                )
                 _CONFIG_PATH.write_text(json.dumps(existing, indent=2, ensure_ascii=False))
                 _json_response(self, 200, {"ok": True})
+            except cloud_accounts.CloudAuthError as exc:
+                _json_response(self, exc.status, {"error": exc.code, "user_message": str(exc)})
             except Exception as exc:
                 _json_response(self, 500, {"error": str(exc)})
             return
 
         if route == "/config/list-models":
-            if accounts.list_accounts() and _require_account(self) is None:
+            if not _require_provider_access(self):
                 return
             try:
                 from gemia import brain_config
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                if cloud_accounts.enabled():
+                    prepared, error = _prepare_cloud_config_body(body)
+                    if prepared is None:
+                        _json_response(self, 403, {"error": error})
+                        return
+                    if any(field in body for field in _MODEL_KEY_PROVIDER):
+                        _json_response(self, 403, {"error": "save the selected credential before listing models"})
+                        return
+                    body = prepared
+                if not _require_provider_access(self, requested_provider=body.get("provider")):
+                    return
                 cfg = {}
                 if _CONFIG_PATH.exists():
                     cfg = json.loads(_CONFIG_PATH.read_text())
+                if cloud_accounts.enabled():
+                    cfg = cloud_accounts.runtime_model_config(cfg)
+                else:
+                    from gemia import local_config
+
+                    cfg = local_config.merge_with_secret_config(
+                        cfg, path=_public_config_path()
+                    )
                 if body:
-                    brain_config.apply_update(cfg, body)
-                proxy = os.environ.get("HTTPS_PROXY") or ""
-                if not proxy:
+                    brain_config.apply_update(cfg, body, sync_env=False)
+                proxy = "" if cloud_accounts.enabled() else os.environ.get("HTTPS_PROXY") or ""
+                if not proxy and not cloud_accounts.enabled():
                     try:
                         proxy = json.loads(_CONFIG_PATH.read_text()).get("proxy") or ""
                     except Exception:
                         proxy = ""
-                pv = body.get("provider") or os.environ.get("LUMERI_V3_PROVIDER") or "openai"
+                pv = (
+                    body.get("provider")
+                    or brain_config.read_status(cfg).get("provider")
+                    or "openai"
+                )
                 result = brain_config.list_models(pv, cfg, proxy=proxy or None)
                 _json_response(self, 200, result)
             except Exception as exc:
                 _json_response(self, 500, {"ok": False, "error": str(exc), "models": []})
             return
 
+        if route == "/config/codex-login":
+            if not _require_provider_access(self, requested_provider="openai_subscription"):
+                return
+            from gemia import brain_config
+
+            status, payload = brain_config.codex_login_bridge("POST")
+            _json_response(self, status, payload)
+            return
+
         if route == "/config/test-brain":
             # 用当前配置发极小探针，验证 provider 连通与鉴权（Setup 面板的"测试连接"）。
-            if accounts.list_accounts() and _require_account(self) is None:
+            if not _require_provider_access(self):
                 return
             try:
                 from gemia import brain_config
                 length = int(self.headers.get("Content-Length", 0))
                 raw = self.rfile.read(length) if length else b"{}"
                 body = json.loads(raw) if raw.strip() else {}
-                # 允许先带上未存盘的字段临时应用（仅设 env，不写盘），测完即真实反映当前 env。
+                if cloud_accounts.enabled():
+                    prepared, error = _prepare_cloud_config_body(body)
+                    if prepared is None:
+                        _json_response(self, 403, {"error": error})
+                        return
+                    if any(field in body for field in _MODEL_KEY_PROVIDER):
+                        _json_response(self, 403, {"error": "save the selected credential before testing"})
+                        return
+                    body = prepared
+                if not _require_provider_access(self, requested_provider=body.get("provider")):
+                    return
+                cfg = {}
+                if _CONFIG_PATH.exists():
+                    try:
+                        cfg = json.loads(_CONFIG_PATH.read_text())
+                    except Exception:
+                        cfg = {}
+                if cloud_accounts.enabled():
+                    cfg = cloud_accounts.runtime_model_config(cfg)
+                else:
+                    from gemia import local_config
+
+                    cfg = local_config.merge_with_secret_config(
+                        cfg, path=_public_config_path()
+                    )
+                # 未保存字段只合并到临时快照，不污染运行进程的 provider/model。
                 if body:
-                    brain_config.apply_update({}, body)
-                proxy = os.environ.get("HTTPS_PROXY") or ""
-                if not proxy and _CONFIG_PATH.exists():
+                    brain_config.apply_update(cfg, body, sync_env=False)
+                proxy = "" if cloud_accounts.enabled() else os.environ.get("HTTPS_PROXY") or ""
+                if not proxy and not cloud_accounts.enabled() and _CONFIG_PATH.exists():
                     try:
                         proxy = json.loads(_CONFIG_PATH.read_text()).get("proxy") or ""
                     except Exception:
                         proxy = ""
-                result = brain_config.test_provider(proxy=proxy or None)
+                test_kwargs = {"proxy": proxy or None, "config": cfg}
+                if _normalized_byok_provider(body.get("provider")) == "openai_subscription":
+                    test_kwargs["provider_override"] = "openai_subscription"
+                result = brain_config.test_provider(**test_kwargs)
                 _json_response(self, 200, result)
             except Exception as exc:
                 _json_response(self, 500, {"ok": False, "error": str(exc)})
@@ -1615,10 +2563,15 @@ class _Handler(BaseHTTPRequestHandler):
                 from gemia.session_history import save_current_session
 
                 payload = _read_json_body(self)
-                try:
-                    account_id = identity.resolve_account_id(self)
-                except Exception:
-                    account_id = None
+                if cloud_accounts.enabled():
+                    account_id = _require_account(self)
+                    if account_id is None:
+                        return
+                else:
+                    try:
+                        account_id = identity.resolve_account_id(self)
+                    except Exception:
+                        account_id = None
                 _json_response(self, 200, save_current_session(payload, account_id=account_id))
             except Exception as exc:
                 _json_response(self, 500, {"error": str(exc)})
@@ -1642,23 +2595,138 @@ class _Handler(BaseHTTPRequestHandler):
                 _json_response(self, 500, {"error": str(exc)})
             return
 
+        if route == "/media-library/copy":
+            try:
+                from gemia.media_library import MediaLibraryError, copy_asset_to_project, upload_response_for_asset
+
+                payload = _read_json_body(self)
+                account_id = _require_workspace_account(self)
+                if account_id is None:
+                    return
+                source_project_id = str(payload.get("source_project_id") or "").strip()
+                asset_id = str(payload.get("asset_id") or "").strip()
+                if not source_project_id or not asset_id:
+                    _json_response(self, 400, {"error": "source_project_id and asset_id are required"})
+                    return
+                asset = copy_asset_to_project(
+                    account_id,
+                    asset_id,
+                    source_project_id=source_project_id,
+                    target_project_id=_active_media_project_id(account_id),
+                )
+                _json_response(self, 200, upload_response_for_asset(asset))
+            except MediaLibraryError as exc:
+                _json_response(self, 404, {"error": str(exc)})
+            except Exception as exc:
+                _json_response(self, 500, {"error": str(exc)})
+            return
+
         if route == "/media-library/import":
             try:
                 from gemia.media_library import MediaLibraryError, import_media, upload_response_for_asset
 
                 payload = _read_json_body(self)
-                account_id = identity.resolve_account_id(self)
-                if not account_id:
-                    _json_response(self, 401, {"error": "not signed in"})
+                account_id = _require_workspace_account(self)
+                if account_id is None:
                     return
                 source_path = str(payload.get("path") or payload.get("source_path") or "")
                 original_name = str(payload.get("name") or "") or None
-                asset = import_media(account_id, source_path, original_name=original_name)
+                asset = import_media(
+                    account_id,
+                    source_path,
+                    original_name=original_name,
+                    project_id=_active_media_project_id(account_id),
+                )
                 _json_response(self, 200, upload_response_for_asset(asset))
             except MediaLibraryError as exc:
                 _json_response(self, 400, {"error": str(exc)})
             except Exception as exc:
                 _json_response(self, 500, {"error": str(exc)})
+            return
+
+        if route == "/media-library/prepare":
+            try:
+                from gemia.roughcut import RoughcutError, prepare_roughcut, start_prepare_job
+
+                payload = _read_json_body(self)
+                account_id = _require_workspace_account(self)
+                if account_id is None:
+                    return
+                if bool(payload.get("background", True)):
+                    _json_response(
+                        self,
+                        202,
+                        start_prepare_job(
+                            account_id,
+                            payload,
+                            project_id=_active_media_project_id(account_id),
+                        ),
+                    )
+                else:
+                    asset_ids = payload.get("asset_ids") or payload.get("assets") or []
+                    if isinstance(asset_ids, str):
+                        asset_ids = [asset_ids]
+                    result = prepare_roughcut(
+                        account_id,
+                        [str(item) for item in asset_ids],
+                        all_assets=bool(payload.get("all") or payload.get("all_assets")),
+                        language=str(payload.get("language") or "auto"),
+                        create_proxies=bool(payload.get("create_proxies", True)),
+                        proxy_resolution=int(payload.get("proxy_resolution") or 540),
+                        resume=bool(payload.get("resume", True)),
+                        max_assets=int(payload.get("max_assets") or 100),
+                        project_id=_active_media_project_id(account_id),
+                    )
+                    _json_response(self, 200, result)
+            except RoughcutError as exc:
+                _json_response(self, 400, {"error": str(exc)})
+            except Exception as exc:
+                _json_response(self, 500, {"error": str(exc)})
+            return
+
+        if route.startswith("/media-library/prepare/") and route.endswith("/resume"):
+            try:
+                from gemia.roughcut import RoughcutError, resume_prepare_job
+
+                account_id = _require_workspace_account(self)
+                if account_id is None:
+                    return
+                job_id = route.removeprefix("/media-library/prepare/").removesuffix("/resume").strip("/")
+                _json_response(
+                    self,
+                    202,
+                    resume_prepare_job(
+                        account_id,
+                        job_id,
+                        project_id=_active_media_project_id(account_id),
+                    ),
+                )
+            except RoughcutError as exc:
+                _json_response(self, 400, {"error": str(exc)})
+            return
+
+        if route.startswith("/media-library/") and route.endswith("/roughcut/review"):
+            try:
+                from gemia.roughcut import RoughcutError, apply_roughcut_review
+
+                payload = _read_json_body(self)
+                account_id = _require_workspace_account(self)
+                if account_id is None:
+                    return
+                parts = route.split("/")
+                asset_id = parts[2] if len(parts) >= 5 else ""
+                _json_response(
+                    self,
+                    200,
+                    apply_roughcut_review(
+                        account_id,
+                        asset_id,
+                        payload,
+                        project_id=_active_media_project_id(account_id),
+                    ),
+                )
+            except RoughcutError as exc:
+                _json_response(self, 400, {"error": str(exc)})
             return
 
         if route == "/media-library/annotate":
@@ -1667,9 +2735,8 @@ class _Handler(BaseHTTPRequestHandler):
                 from gemia.media_library import list_assets
 
                 payload = _read_json_body(self)
-                account_id = identity.resolve_account_id(self)
-                if not account_id:
-                    _json_response(self, 401, {"error": "not signed in"})
+                account_id = _require_workspace_account(self)
+                if account_id is None:
                     return
                 asset_ids = payload.get("asset_ids") or payload.get("assets") or []
                 if isinstance(asset_ids, str):
@@ -1678,7 +2745,15 @@ class _Handler(BaseHTTPRequestHandler):
                     _json_response(self, 400, {"error": "asset_ids must be a list"})
                     return
                 if not asset_ids and payload.get("all"):
-                    asset_ids = [asset.get("asset_id") for asset in list_assets(account_id, kind="video", limit=int(payload.get("max_assets") or 20))]
+                    asset_ids = [
+                        asset.get("asset_id")
+                        for asset in list_assets(
+                            account_id,
+                            kind="video",
+                            limit=int(payload.get("max_assets") or 20),
+                            project_id=_active_media_project_id(account_id),
+                        )
+                    ]
                 if not asset_ids:
                     _json_response(self, 400, {"error": "asset_ids is required"})
                     return
@@ -1693,6 +2768,7 @@ class _Handler(BaseHTTPRequestHandler):
                             language=str(payload.get("language") or "auto"),
                             tags=payload.get("tags") if isinstance(payload.get("tags"), list) else None,
                             replace_existing=bool(payload.get("replace_existing", True)),
+                            project_id=_active_media_project_id(account_id),
                         )
                     )
                 _json_response(self, 200, {"results": results, "asset_count": len(results)})
@@ -1707,17 +2783,35 @@ class _Handler(BaseHTTPRequestHandler):
                 from gemia.media_annotations import MediaAnnotationError, create_annotation, update_annotation
 
                 payload = _read_json_body(self)
-                account_id = identity.resolve_account_id(self)
-                if not account_id:
-                    _json_response(self, 401, {"error": "not signed in"})
+                account_id = _require_workspace_account(self)
+                if account_id is None:
                     return
                 parts = route.split("/")
                 asset_id = parts[2] if len(parts) >= 4 else ""
                 if len(parts) >= 5 and parts[3] == "annotations" and parts[4]:
-                    _json_response(self, 200, {"annotation": update_annotation(account_id, asset_id, parts[4], payload)})
+                    _json_response(
+                        self,
+                        200,
+                        {"annotation": update_annotation(
+                            account_id,
+                            asset_id,
+                            parts[4],
+                            payload,
+                            project_id=_active_media_project_id(account_id),
+                        )},
+                    )
                     return
                 if len(parts) >= 4 and parts[3] == "annotations":
-                    _json_response(self, 200, {"annotation": create_annotation(account_id, asset_id, payload)})
+                    _json_response(
+                        self,
+                        200,
+                        {"annotation": create_annotation(
+                            account_id,
+                            asset_id,
+                            payload,
+                            project_id=_active_media_project_id(account_id),
+                        )},
+                    )
                     return
                 _json_response(self, 404, {"error": "not found"})
             except MediaAnnotationError as exc:
@@ -1730,13 +2824,12 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 from gemia.media_library import default_clip_for_asset, get_asset
 
-                account_id = identity.resolve_account_id(self)
-                if not account_id:
-                    _json_response(self, 401, {"error": "not signed in"})
+                account_id = _require_workspace_account(self)
+                if account_id is None:
                     return
                 parts = route.split("/")
                 asset_id = parts[2] if len(parts) >= 4 else ""
-                asset = get_asset(account_id, asset_id)
+                asset = get_asset(account_id, asset_id, project_id=_active_media_project_id(account_id))
                 if not asset:
                     _json_response(self, 404, {"error": "media asset not found"})
                     return
@@ -1784,6 +2877,8 @@ class _Handler(BaseHTTPRequestHandler):
         # Use the local `claude` / `codex` CLI directly during development.
 
         if route == "/settings/sandbox":
+            if cloud_accounts.enabled() and _require_account(self) is None:
+                return
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) if length else b"{}")
             _set_v4_sandbox_disabled(bool(body.get("disabled", False)))
@@ -1803,6 +2898,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if route == "/accounts/switch":
+            if cloud_accounts.enabled():
+                _json_response(self, 409, {"error": "account switching is managed by Lumeri Accounts"})
+                return
             account_id = str(payload.get("account_id") or "").strip()
             if not account_id:
                 _json_response(self, 400, {"error": "account_id is required"})
@@ -1817,19 +2915,24 @@ class _Handler(BaseHTTPRequestHandler):
         _json_response(self, 404, {"error": "not found"})
 
 
-def main(host: str | None = None, port: int | None = None) -> None:
+def main(
+    host: str | None = None,
+    port: int | None = None,
+    *,
+    allow_unconfigured: bool = False,
+) -> None:
     # First-run onboarding: if no usable model provider is configured, prompt
     # interactively (TTY) or print instructions and exit cleanly (headless).
     # When a provider is already configured this is a no-op, so existing
     # startup behaviour is unchanged.
-    from gemia.onboarding import ensure_onboarded
+    if not cloud_accounts.enabled():
+        from gemia.onboarding import ensure_onboarded
 
-    if not ensure_onboarded():
-        # Headless + unconfigured: instructions already printed. Do NOT bind a
-        # brain-less server.
-        return
-
-    _load_config_keys()  # Load API keys from ~/.gemia/config.json on startup
+        if not ensure_onboarded() and not allow_unconfigured:
+            # Headless + unconfigured: instructions already printed. Do NOT bind a
+            # brain-less server.
+            return
+        _load_config_keys()  # Legacy mode keeps its machine-local credentials.
     host = host or _configured_server_host()
     port = int(port or os.environ.get("LUMERI_PORT") or os.environ.get("GEMIA_PORT") or 7788)
     os.environ["GEMIA_HOST"] = host

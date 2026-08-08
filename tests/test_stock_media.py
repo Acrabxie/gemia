@@ -42,6 +42,17 @@ def test_search_stock_media_parses_pexels_video(monkeypatch) -> None:
     assert item["attribution"] == "Creator"
 
 
+def test_stock_video_prefers_delivery_sized_hd_over_4k() -> None:
+    selected = stock_media._largest_media_file(  # noqa: SLF001 - selection contract
+        [
+            {"width": 3840, "height": 2160, "link": "4k"},
+            {"width": 1920, "height": 1080, "link": "1080p"},
+            {"width": 1280, "height": 720, "link": "720p"},
+        ]
+    )
+    assert selected["link"] == "1080p"
+
+
 def test_search_stock_media_parses_pixabay_image(monkeypatch) -> None:
     monkeypatch.setattr(stock_media, "_api_key", lambda provider: f"{provider}-key")
 
@@ -124,6 +135,68 @@ def test_fetch_stock_media_downloads_and_writes_sidecar(tmp_path, monkeypatch) -
     payload = json.loads(sidecar.read_text(encoding="utf-8"))
     assert payload["source"]["provider"] == "pexels"
     assert payload["imported_asset_id"] is None
+
+
+def test_fetch_stock_media_selects_exact_prior_result_id(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        stock_media,
+        "search_stock_media",
+        lambda **_kwargs: {
+            "query": "city",
+            "provider": "pexels",
+            "media_type": "video",
+            "results": [
+                {
+                    "provider": "pexels",
+                    "id": "first",
+                    "media_type": "video",
+                    "width": 1920,
+                    "height": 1080,
+                    "duration": 8,
+                    "download_url": "https://example.test/first.mp4",
+                },
+                {
+                    "provider": "pexels",
+                    "id": "wanted",
+                    "media_type": "video",
+                    "width": 640,
+                    "height": 360,
+                    "duration": 4,
+                    "download_url": "https://example.test/wanted.mp4",
+                },
+            ],
+            "errors": [],
+        },
+    )
+
+    class FakeResponse:
+        headers = {"Content-Type": "video/mp4"}
+
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self.url.encode("utf-8")
+
+    monkeypatch.setattr(
+        stock_media.urllib.request,
+        "urlopen",
+        lambda request, **_kwargs: FakeResponse(request.full_url),
+    )
+    output = stock_media.fetch_stock_media(
+        "",
+        str(tmp_path / "selected.mp4"),
+        query="city",
+        result_id="wanted",
+        import_to_media_library=False,
+    )
+    assert Path(output).read_bytes().endswith(b"wanted.mp4")
 
 
 def test_stock_media_primitive_specs_are_tool_like() -> None:

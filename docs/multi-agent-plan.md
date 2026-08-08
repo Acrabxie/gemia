@@ -14,21 +14,21 @@
 
 | # | Decision | Verdict |
 |---|----------|---------|
-| D1 | Product shape | **Bounded sub-task fan-out via ONE host tool `spawn_subtasks`** — not free-form agent spawning. Fixed tool-profiles, shared deadline, structured results. |
+| D1 | Product shape | **Bounded sub-task fan-out via ONE host tool `spawn_subtasks`** — at most 4 direct children per call; children can ask the root for internal guidance but cannot fan out again. Legacy profiles remain opt-in; full profile exposes the parent's project-scoped read/write/edit surface. |
 | D2 | Child architecture | **New lightweight `SubtaskLoop` class** (AgentLoopV3-lite in new file `gemia/subtasks.py`), NOT a second `AgentLoopV3` instance, NOT tool-batch-only. Shares parent's `GeminiClientV3`, `AssetRegistry`, `JobRegistry`, `ProjectHandle` (reads only in P1/P2 profiles). |
 | D3 | Concurrency | **`asyncio` tasks on the session's existing single event loop.** No new threads, ever. |
-| D4 | Budget | **Reservation/settlement drawn from the PARENT session `BudgetGuard`**, salvaging `BudgetReservation` / `reserve()` / `commit_reserved()` from `d7f941c:gemia/budget_guard.py:84,131,151` plus a new amount-based `reserve_amount()`. Unspent slice returns on settlement. |
+| D4 | Budget | **Children share the PARENT session `BudgetGuard`**. No per-child budget slice or fresh budget pool is created; existing paid-media production policy remains authoritative. |
 | D5 | Protocol | **Two new SSE kinds only: `subagent_start`, `subagent_result`.** No `subagent_progress` kind — child activity rides EXISTING `tool_exec_*` kinds with a new OPTIONAL `agent_id` field. Contract (`gemia/v3_contract.py`) updated FIRST, both frontends + drift tests same commit. |
 | D6 | Child text | Child `model_text_delta` is **never emitted to SSE**. Child final text folds into the structured result `summary`. |
 | D7 | Plan mode | `spawn_subtasks` classified **BLOCKED** in `PLAN_BLOCKED_TOOLS`; children additionally re-read the parent's live `plan_mode` flag per dispatch (defense in depth for mid-turn toggles). |
-| D8 | Mutation rule | **Children never mutate the shared project document** (timeline / lumenframe). Assembly workers (P2) return *proposals*; the parent applies mutations serially. Single-writer discipline of commit `35f61b2` is preserved. |
-| D9 | Rails | max 4 children per call; max depth 1 (children cannot spawn); no `elicit` in any child profile; per-child step cap (default 10, hard 16); per-batch shared deadline (default 240 s, hard 480 s); per-child doom-loop + failure-nudge state; cancellation via task-tree `try/finally` + existing `_cancel_pending`. |
+| D8 | Mutation rule | **Full-profile children may read/write/edit the project through the existing project-scoped tools.** Project journals and the single event loop remain the write-coordination mechanism. |
+| D9 | Rails | Max 4 children per call; max depth 1; no `elicit` in any child profile; child-only `ask_root_agent`; optional caller step/deadline values; per-child doom-loop + failure-nudge state; cancellation via task-tree `try/finally` + existing `_cancel_pending`. |
 | D10 | Phasing | P1 = annotate/probe fan-out (fixed read+annotate profile). P2 = per-beat assembly workers (needs `docs/outline-editing-plan.md`). P3 = A/B render variants. |
 
-中文小结：产品形态锁定为"有界子任务扇出"，一个新 host 工具 `spawn_subtasks`；子代理是轻量
-受限循环（不是完整 AgentLoopV3），跑在会话已有的单事件循环上；预算从父会话按预留/结算
-划拨（复用 d7f941c 的 API）；协议只加两个事件 kind，子代理工具活动复用现有 kind + 可选
-`agent_id` 字段；plan mode 下 spawn 被封锁；子代理永不直接改共享文档。
+中文小结：产品形态是"有界子任务扇出"，一个新 host 工具 `spawn_subtasks`；每批最多 4 个
+直接子代理，子代理是轻量循环（不是完整 AgentLoopV3），跑在会话已有的单事件循环上；
+预算共享父会话的守卫；子代理可通过 `ask_root_agent` 请求 root 内部指导，但不能继续 spawn
+或向用户提问；full profile 子代理可以通过项目范围工具读写和修改项目。
 
 ---
 
@@ -57,8 +57,9 @@ vision, Veo polling), so serialization is pure user-visible latency:
 ### 1.2 What this is NOT
 
 - **Not free-form agent spawning.** There is no `create_agent(persona=...)`. The model
-  gets exactly one new verb, `spawn_subtasks`, whose children run a *host-fixed* tool
-  subset chosen by `tool_profile` (enum). The model picks goals; the host picks
+  gets exactly one new verb, `spawn_subtasks`, whose children run a host-selected tool
+  surface: full mode inherits the parent's project-scoped local tools, while legacy
+  `tool_profile` values remain restricted. The model picks goals; the host picks
   capabilities.
 - **Not a replacement for d7f941c's same-batch parallel dispatch.** That branch
   parallelized the tool calls of a *single model message*
@@ -71,15 +72,15 @@ vision, Veo polling), so serialization is pure user-visible latency:
   decides whether to ask (it has the `AskBridge`, `gemia/agent_loop_v3.py:306`).
 
 **Alternatives considered**
-- *Free-form `spawn_agent` with arbitrary system prompt + full toolset*: rejected.
-  Unbounded blast radius (a child could `run_shell`, `file_delete`, spawn again),
-  unreviewable plan-mode classification, and no video-domain payoff beyond the four
-  workloads above.
+- *Free-form `spawn_agent` with arbitrary system prompt + full host access*: still
+  rejected. The full child profile uses the existing project-scoped read/write/edit
+  tools and project journal; host credential paths and remote-session host tools
+  remain protected.
 - *Host-side batch APIs per workload* (e.g. a monolithic `annotate_all` tool):
   rejected — it hard-codes choreography the model should own (the same reasoning as
   `docs/outline-editing-plan.md` §8's ADR against a host-side `assemble_from_outline`),
-  and each new workload would need a new host tool. One generic bounded fan-out verb +
-  profiles covers all four.
+  and each new workload would need a new host tool. One generic fan-out verb +
+  profiles covers all four; larger workloads require separate root-owned calls.
 
 中文小结：目标是四类视频领域真实需要的并行工作（批量标注、逐 beat 粗剪工人、检索/探测
 扫射、A/B 渲染变体）。不做自由 spawn，不做工作负载专用大工具；一个受限扇出动词 + 固定
@@ -148,19 +149,19 @@ pure tool batch is not enough. But a full second `AgentLoopV3` is wrong:
 ```
 class SubtaskLoop:                     # gemia/subtasks.py (new)
     agent_id: str                      # e.g. "sub_1" (unique within the spawn call)
-    parent: AgentLoopV3                # never mutated; read plan_mode + client from it
+    parent: AgentLoopV3 | SubtaskLoop   # live context; nested fan-out is refused
     goal: str                          # child system+user prompt payload
     profile: SubtaskProfile            # frozenset of tool names + flags (§4)
-    guard: BudgetGuard                 # CHILD guard, max = the reserved slice (§5)
-    max_steps: int                     # model-call cap, default 10, hard 16 (§8)
+    guard: BudgetGuard                 # shared parent guard (§5)
+    max_steps: int | None              # optional caller limit; omitted = unlimited
     _messages: list[dict]              # own rolling transcript, never parent's
 ```
 
 - **Model calls**: `parent.client.stream_turn(...)` — the shared `GeminiClientV3`
   instance (`gemia/agent_loop_v3.py:284`) is stateless per call (messages passed in),
-  so sharing is safe on one loop. Child tool schemas = the subset of `TOOL_SCHEMAS`
-  (`gemia/tools/_schema.py:1718` builds `TOOL_NAMES` from it) whose names are in the
-  profile — the child model physically cannot see out-of-profile verbs.
+  so sharing is safe on one loop. Full-profile child schemas expose the parent's
+  project-scoped file read/write/edit and creative tools; legacy restricted profiles
+  remain opt-in.
 - **Dispatch**: same `DISPATCHER` table (`gemia/tools/__init__.py:198-200`), guarded by
   an explicit `if name not in profile.tools: -> E_SUBTASK_PROFILE tool_result`
   (fail-closed, mirroring `plan_mode.is_plan_safe`, `gemia/plan_mode.py:83-86`) —
@@ -177,7 +178,9 @@ class SubtaskLoop:                     # gemia/subtasks.py (new)
     `gemia/agent_loop_v3.py:1337`, which is only safe because it is serial);
   - `extra` = copy of parent extra **with `ask_bridge` removed** (the parent seeds it
     at `gemia/agent_loop_v3.py:308-309`; absence makes `elicit` structurally
-    impossible even if a profile bug ever let it through).
+    impossible). A child receives the separate child-only `ask_root_agent` schema;
+    `agent_loop` points to the current child so the dispatcher can identify the
+    caller, while `spawn_subtasks` remains forbidden there.
 - **No SSE text**: child text deltas accumulate into the child transcript only (D6).
   Child tool events emit through `parent._emit` with `agent_id` attached (§6).
 
@@ -186,8 +189,8 @@ class SubtaskLoop:                     # gemia/subtasks.py (new)
 - *Single-purpose hard-coded loops per workload* (e.g. an `AnnotateWorker` class with a
   fixed probe→vision→write script): rejected — every workload variation (bilingual
   annotation policy, per-beat ranking criteria) would become host code; the model
-  should own strategy inside a bounded capability envelope. The profile mechanism
-  gives the same safety with one implementation.
+  should own strategy inside the existing project-scoped capability envelope. The
+  profile mechanism gives legacy narrow modes while full mode keeps throughput high.
 - *Child talks to a cheaper/smaller model*: deferred, not rejected. `SubtaskLoop`
   takes the client from the parent today; a `model=` knob on the profile is a
   one-line extension once a second provider config exists. Not in P1 scope.
@@ -241,9 +244,10 @@ fail-closed 白名单校验。并发用会话现有单事件循环上的 asyncio
 ```python
 _tool(
     "spawn_subtasks",
-    "Fan out 1-4 bounded sub-agents that work IN PARALLEL on independent goals and "
-    "return structured results. Each child runs a restricted tool profile, cannot "
-    "ask the user, cannot spawn further children, and draws cost/time from THIS "
+    "Fan out up to 4 direct sub-agents that work IN PARALLEL on independent goals and "
+    "return structured results. Full-profile children inherit project-scoped "
+    "read/write/edit tools; children can ask the root for internal guidance but "
+    "cannot recursively fan out or ask the user, and draw cost/time from THIS "
     "session's budget. Use for: bulk media annotation/indexing, per-beat rough-cut "
     "candidate scouting, parallel library search/probe sweeps, A/B preview variants. "
     "Do NOT use for a single sequential task — call the tools directly instead.",
@@ -258,18 +262,16 @@ _tool(
                     "goal": {"type": "string",
                              "description": "Self-contained instruction for this child; include asset_ids explicitly."},
                     "tool_profile": {"type": "string",
-                                     "enum": ["annotate", "probe"],  # P2 adds "beat_scout"; P3 adds "render_variant"
-                                     "description": "Host-fixed capability set the child runs with."},
+                                     "enum": ["full", "annotate", "probe"],
+                                     "description": "Omit or use 'full' for the parent's full local tool set; legacy narrow modes remain available."},
                     "asset_ids": {"type": "array", "items": {"type": "string"},
                                   "description": "Assets this child is scoped to (informational; echoed into the child prompt)."},
-                    "max_cost_usd": {"type": "number",
-                                     "description": "Optional per-child spend ceiling; host clamps to the fair slice."},
                 },
-                "required": ["goal", "tool_profile"],
+                "required": ["goal"],
             },
         },
         "deadline_sec": {"type": "number",
-                         "description": "Shared wall-clock deadline for the whole batch (default 240, max 480)."},
+                         "description": "Optional caller-requested shared wall-clock deadline; omit for unlimited wait."},
     },
     ["subtasks"],
 ),
@@ -277,9 +279,9 @@ _tool(
 
 Budget table entry (`gemia/budget_guard.py:18` `_TOOL_COSTS`):
 `"spawn_subtasks": {"usd": 0.00, "eta_sec": 1.0}` — the verb itself is near-free;
-real cost flows through reservations (§5), and §5.3 defines the double-count rule.
+real child work is charged through the shared parent guard.
 
-### 4.2 Profiles (fixed frozensets in `gemia/subtasks.py`, plan_mode-style)
+### 4.2 Profiles (legacy narrow modes plus full mode)
 
 Derived by reading dispatcher behavior, same doctrine as
 `gemia/plan_mode.py:10-19` — names below cross-checked against `DISPATCHER`
@@ -294,13 +296,12 @@ PROFILE_PROBE = frozenset({
     "probe_media", "analyze_media", "search_library",
     "get_media_annotations", "get_timeline", "get_lumenframe", "get_safe_areas",
 })
+# Full mode is represented by ``None`` and inherits the parent's local tool set,
+# including project-scoped reads, writes, file edits, and creative edits.
 # P2: PROFILE_BEAT_SCOUT = PROFILE_PROBE | {"get_shotlist"}   (returns proposals only)
 # P3: PROFILE_RENDER_VARIANT = {"render_preview", "lumen_render", "extract_frame",
 #                               "probe_media", "get_timeline", "get_lumenframe"}
-FORBIDDEN_IN_ANY_PROFILE = frozenset({
-    "spawn_subtasks", "elicit", "remember", "log_note", "save_skill",
-    "file_delete", "run_shell", "build", "export", "project_export",
-})
+FORBIDDEN_IN_CHILDREN = frozenset({"elicit", "spawn_subtasks"})
 ```
 
 Notes:
@@ -310,8 +311,9 @@ Notes:
 - `extract_frame` registers derived assets — acceptable: children register into the
   shared registry deliberately (results must be addressable by the parent). Asset-id
   allocation is loop-confined, so no races (§3.2).
-- Test gate (mirrors `tests/test_plan_mode.py` exact-coverage style): every profile
-  ⊆ `TOOL_NAMES`, every profile ∩ `FORBIDDEN_IN_ANY_PROFILE` = ∅, and
+- Test gate (mirrors `tests/test_plan_mode.py` exact-coverage style): every legacy
+  profile ⊆ `TOOL_NAMES`, `elicit` and `spawn_subtasks` are unavailable to children,
+  child schemas include `ask_root_agent` and project file/edit tools, and
   `"spawn_subtasks" in PLAN_BLOCKED_TOOLS` — all asserted in `tests/test_subtasks.py`.
 
 ### 4.3 Structured result (what the parent's tool_result contains)
@@ -330,89 +332,42 @@ Total tool_result capped at 16 KB (truncate `summary`s round-robin past the cap)
 (`_ROLLING_USER_TURNS = 8`, `gemia/agent_loop_v3.py:82`).
 
 中文小结：`spawn_subtasks` 的 schema、预算表条目、两个 P1 档案（annotate/probe）与
-全局禁用名单全部给出；档案按"读派发器实现"原则划定并配 exact-coverage 测试；子任务
-结果为固定结构化 JSON，总量 16KB 封顶防冲爆上下文窗口。
+子任务结果仍为结构化 JSON；full profile 对项目读写和创作编辑开放，只有用户交互由父代理
+承担。
 
 ---
 
-## 5. Budget: reservation / settlement
+## 5. Budget and execution limits
 
-### 5.1 API changes to `gemia/budget_guard.py`
+Children share the parent session's `BudgetGuard`; the subtask module does not
+reserve a per-child slice or create a fresh budget pool. This keeps sibling work
+honest against the same session accounting and leaves paid-media production
+policy as the authoritative spend gate.
 
-1. Port `BudgetReservation` + `reserve()` + `commit_reserved()` verbatim from
-   `d7f941c:gemia/budget_guard.py:84,131,151` (§2.1).
-2. Add ONE new method (the adaptation the fan-out needs — d7f941c only reserved by
-   tool-name estimate):
+Execution is bounded at the fan-out boundary:
 
-```python
-def reserve_amount(self, label: str, *, usd: float, seconds: float
-                   ) -> tuple[BudgetDecision, BudgetReservation | None]:
-    """Amount-based reservation for host capabilities (subtask slices) that are
-    not a single _TOOL_COSTS row. Same atomic check-then-add as reserve()."""
-```
+- each `spawn_subtasks` call accepts **at most 4 direct children**;
+- children cannot recursively call `spawn_subtasks`;
+- omitted `max_steps` means the child may continue until it finishes, is cancelled,
+  or hits a real provider/session failure;
+- omitted `deadline_sec` means the dispatcher waits for every child;
+- an explicit caller-provided step or deadline value is honored;
+- cancellation owns the four direct child tasks and gathers every child;
+- the per-child identical-call doom-loop guard remains a no-progress detector, not
+  a workload-size cap.
 
-`commit_reserved()` settles amount reservations unchanged — its math never looks at
-`tool_name` (it is a label like `"spawn_subtasks:sub_1"` for snapshots/logs).
+Children may call the child-only `ask_root_agent` consultation tool when they need
+guidance about the root task or a decision. The root answers with text only; this
+does not open a user-facing question or another fan-out branch.
 
-No lock is needed around reserve/settle in v1: all callers live on the session loop
-(§3.2) and there is no `await` between check and add. (`d7f941c`'s
-`_parallel_budget_lock`, loop_d7f:287, guarded the same single-loop access and was
-already belt-and-suspenders; we keep the method body atomic instead.)
+The parent loop's existing production budget, credential protection, remote-session
+host restrictions, and plan-mode gate remain in force. Those are session/product
+boundaries, not artificial sub-agent throughput limits.
 
-### 5.2 Slicing arithmetic (host-fixed, not model-negotiable beyond `max_cost_usd`)
-
-At spawn time, with `N = len(subtasks)`:
-
-```
-remaining_usd  = guard.max_usd     - guard.spent_usd
-remaining_sec  = guard.max_seconds - guard.spent_seconds
-parent_floor   = 0.20 * max        (both axes — the parent must keep enough to
-                                    integrate results and finish the turn)
-pool_usd, pool_sec = remaining − parent_floor        # refuse spawn if ≤ 0
-slice_usd_i = min(subtask.max_cost_usd or pool_usd/N, pool_usd/N)
-slice_sec_i = pool_sec / N
-```
-
-For each child: `reserve_amount(f"spawn_subtasks:{agent_id}", usd=slice_usd_i,
-seconds=slice_sec_i)`; the child gets `BudgetGuard(max_usd=slice_usd_i,
-max_seconds=slice_sec_i)` and uses plain `check()`/`commit()`
-(`gemia/budget_guard.py:141,166`) internally, exactly like the parent loop does at
-`gemia/agent_loop_v3.py:1261,1388` — **a child cannot exceed its slice because its own
-guard gates it**, and the parent's totals already carry the reservation so sibling
-overspend is impossible by construction.
-
-Settlement on each child's completion (any status):
-`parent.guard.commit_reserved(res_i, actual_usd=child.guard.spent_usd,
-actual_seconds=child.guard.spent_seconds)` — unspent slice returns (negative delta,
-§2.1). A refused spawn (pool ≤ 0) surfaces the standard `budget_gate` semantics: the
-dispatcher raises a `GemiaError` with `error_code="E_BUDGET"` (already in
-`ERROR_CODES`, `gemia/v3_contract.py:85`) so the model reads a typed refusal.
-
-### 5.3 The double-count rule (MUST implement, easy to miss)
-
-The parent loop commits wall-elapsed seconds for every dispatched tool
-(`gemia/agent_loop_v3.py:1388` `self.budget.commit(tc.name, actual_seconds=elapsed)`).
-For `spawn_subtasks` that `elapsed` spans the whole batch — but the children ALREADY
-settled their seconds via `commit_reserved`. Rule: **the loop special-cases
-`spawn_subtasks` to `commit(tc.name, actual_seconds=0.0)`** (children's settlements are
-the truth; the ~1 s orchestration overhead is covered by the `_TOOL_COSTS` eta row).
-Test gate: a fake 2-child spawn where children settle 10 s each must leave
-`spent_seconds` within ±0.1 of 20.0.
-
-Accounting semantics locked: children settle the **sum** of their actual tool-seconds,
-not batch wall-clock. `budget_guard.py:144-147` defines the axis as "actual committed
-resources"; four parallel ffmpeg runs commit 4× the compute. Parallelism buys the user
-wall-clock, not budget headroom. (Alternative — charge wall-clock max of children:
-rejected; it would let a 4-way fan-out quadruple real resource burn under the same cap.)
-
-Known gap, explicitly out of scope: `BudgetGuard` does not meter model-token spend
-today (only `_TOOL_COSTS` rows). Child model calls are bounded by `max_steps` (§8)
-instead. Do not invent per-token pricing in this feature.
-
-中文小结：预算 = 父守卫预留 + 子守卫封顶 + 结算返还。切片算法固定：父保底 20%，余下均
-分，`max_cost_usd` 只能往下钳。关键坑：父循环在 1388 行会按墙钟给 spawn 记时，必须特判
-记 0，否则双重计费。时间按子任务实际执行秒数**求和**结算（资源诚实），并发赚墙钟不赚预算。
-模型 token 不计费是既有缺口，用步数上限兜底，本特性不扩大范围。
+中文小结：子代理共享父会话预算，不切片、不新建预算池；每次最多 4 个直接子代理，子代理
+不能继续扇出。默认不限制子代理步数和批次等待，调用方若明确传入 `max_steps` 或
+`deadline_sec` 则按调用方要求执行。子代理遇到真正阻塞时可通过 `ask_root_agent` 向 root
+请求内部指导，但不会转成用户提问。
 
 ---
 
@@ -533,57 +488,50 @@ turn through the plan gate).
 
 | Rail | Value | Grounding |
 |------|-------|-----------|
-| Max children per call | **4** (schema `maxItems` + host assert) | d7f941c judgment (loop_d7f:84); local ffmpeg contention + Vertex rate limits |
-| Max depth | **1** — `spawn_subtasks` ∉ every profile AND `SubtaskLoop` has no spawn path; assert `depth == 1` in constructor | D9; `FORBIDDEN_IN_ANY_PROFILE` §4.2 |
-| No user interaction | `elicit` ∉ profiles + `ask_bridge` stripped from child ctx extra | `gemia/agent_loop_v3.py:308-309`; §3.1 |
-| Child step cap | `max_steps` default **10**, hard **16** model calls | Children are single-purpose; the parent's "no step cap" contract (`agent_loop_v3.py:19-24`) exists for open-ended research turns, which children are not. Also the only bound on unmetered model-token spend (§5.3). |
+| Max children per call | **4** — schema `maxItems` and host validation agree | Bounded parallel batch; avoids unbounded provider fan-out |
+| Max depth | **1** — direct children cannot call `spawn_subtasks` | Keeps root ownership clear and bounds the task tree |
+| Child-to-root guidance | Child-only `ask_root_agent`; root returns text-only guidance | Internal consultation; never asks the user |
+| No user interaction | `elicit` remains unavailable to children; `ask_bridge` is not copied into child ctx | §3.1 |
+| Child step cap | **None by default**; an explicit caller `max_steps` is honored | The caller controls task shape; no host hard maximum is imposed |
 | Child doom loop | Same `_DOOM_LOOP_THRESHOLD = 3` byte-identical guard (`agent_loop_v3.py:136`, `_is_doom_loop` `:962`), per-child state; trips → child ends `status:"error"`, parent turn continues | Inherit semantics, isolate blast radius |
 | Child failure nudges | Same `(tool, code)` streak thresholds 5/8 (`agent_loop_v3.py:116,124`), per-child dict | Consistency with parent behavior |
-| Batch deadline | `deadline_sec` default **240 s**, hard **480 s**; enforced with `asyncio.wait(tasks, timeout=...)`; stragglers cancelled → `status:"timeout"` | A fan-out must never outlive the user's patience or the session time cap (600 s, `budget_guard.py:128`) |
-| Budget slice | Child's own `BudgetGuard` (§5.2) — structurally cannot overdraw | d7f941c reservation math |
-| Cancellation | The spawn dispatcher owns its child tasks in `try/finally: cancel + gather(return_exceptions=True)`. `asyncio.create_task` children are NOT auto-cancelled when the enclosing coroutine is cancelled — the finally block is mandatory, and it settles every reservation (spent-so-far) before re-raising | Covers: parent stream error (`agent_loop_v3.py:1076-1084` returns → task cancellation unwinds through the dispatcher), user closes session (`SessionRunner._cancel_pending`, `session_manager.py:226-232`), deadline expiry |
+| Batch deadline | **None by default**; an explicit caller deadline is honored; stragglers cancelled → `status:"timeout"` | The caller controls whether a batch should be bounded |
+| Budget | Shared parent `BudgetGuard`; paid-media production policy remains authoritative | Prevent duplicate/fresh budget pools while removing artificial child slices |
+| Cancellation | The spawn dispatcher owns its child tasks in `try/finally: cancel + gather(return_exceptions=True)`. `asyncio.create_task` children are NOT auto-cancelled when the enclosing coroutine is cancelled — the finally block is mandatory; explicit deadlines cancel stragglers and parent/session cancellation propagates | Covers: parent stream error (`agent_loop_v3.py:1076-1084` returns → task cancellation unwinds through the dispatcher), user closes session (`SessionRunner._cancel_pending`, `session_manager.py:226-232`), deadline expiry |
 | SSE replay pressure | Child `tool_exec_progress` coalesced to ≥1 s per child (wrapper around the progress cb) | `REPLAY_BUFFER_SIZE = 200` (`transport/sse.py:38`); 4 verbose children could evict a disconnected client's replay window (`replay_gap`, `sse.py:144-163`) |
 | Result flood | Per-child `summary` ≤1200 chars; whole tool_result ≤16 KB | §4.3; rolling window `_ROLLING_USER_TURNS = 8` (`agent_loop_v3.py:82`) |
 | Registry integrity | Children share the parent `AssetRegistry`; single-loop confinement makes `allocate_id`/`register_output` race-free; duplicate ids still raise (`_context.py:109-110`) | §3.2 |
-| Shared-document writes | NONE from children (D8). P2 workers return proposals; parent applies via normal timeline verbs serially | Single-writer discipline, commit `35f61b2` |
+| Project writes | Full-profile children may use project-scoped file and edit tools; the existing journal and event loop coordinate writes | Keeps read/write/edit productive without allowing credential/root paths |
 
 One deliberate non-rail: children do NOT get the parent's pre-delivery gate / visual
 self-check (`agent_loop_v3.py:1100-1151`). That gate protects *user-facing delivery*;
 the parent reviews child output before delivering, and the RC4 gate fires on the
 parent as usual after the spawn result returns.
 
-中文小结：护栏全表——4 个上限、深度 1、无 elicit、步数 10/16、doom-loop 与失败 nudge
-按子隔离继承、批次死线 240/480 秒、预算切片结构性不可透支、取消必须在 spawn 派发器的
-finally 里显式 cancel+结算（create_task 不会随父协程取消自动传播）、子进度事件 ≥1 秒
-合并保护 200 条回放环、结果 16KB 封顶、子代理不改共享文档。
+中文小结：护栏全表——每批最多 4 个直接子代理、深度 1、子代理可用 `ask_root_agent`
+但不能 `elicit` 或继续 spawn；子代理步数和批次死线仍可由调用方显式指定，doom-loop 与
+失败 nudge 按子隔离继承。取消必须在 spawn 派发器的 finally 里显式 cancel+结算，子进度
+事件 ≥1 秒合并保护回放环，结果 16KB 传输封顶；子代理仍可使用允许的项目读写和创作工具。
 
 ---
 
 ## 9. Phased delivery
 
-### Phase 1 — annotate/probe fan-out (one codex-session-sized slice)
+### Current implementation — full-profile bounded fan-out
 
-Scope: `spawn_subtasks` with `annotate` + `probe` profiles only; everything in §4–§8
-except P2/P3 profiles.
+Scope: `spawn_subtasks` with full, annotate, and probe profiles; up to four direct children,
+child-to-root consultation, optional caller step/deadline values, and project-scoped
+read/write/edit.
 
-Work packages (each lands with its test gate green; parity checklist §6.4 applies to WP4):
-1. **WP1 `budget_guard.py`**: port `BudgetReservation`/`reserve`/`commit_reserved`
-   from d7f941c + new `reserve_amount` + `spawn_subtasks` cost row.
-   Gate: ported d7f941c reservation tests + amount-reservation/settlement-return
-   tests in `tests/test_budget_guard.py`.
-2. **WP2 `gemia/subtasks.py`**: `SubtaskProfile` frozensets + `SubtaskLoop` (stream,
-   fail-closed dispatch, per-child rails) + the `spawn_subtasks` dispatcher (slicing,
-   task fan-out, deadline, cancellation-finally, settlement, structured results).
-   Gate: `tests/test_subtasks.py` — profile coverage asserts (§4.2), slice arithmetic,
-   deadline→timeout status, cancellation settles reservations, child doom-loop ends
-   child not parent, plan-flag mid-batch clamp, double-count rule (§5.3).
-3. **WP3 loop integration**: register schema (`_schema.py`) + `DISPATCHER` entry +
-   `PLAN_BLOCKED_TOOLS` entry + the `actual_seconds=0.0` special case at
-   `agent_loop_v3.py:1388`. Gate: `tests/test_plan_mode.py` exact-coverage green;
-   loop-level integration test with a fake client.
-4. **WP4 protocol + frontends**: contract kinds, exporter rerun, `EMIT_FILES` update,
-   web + CLI rendering. Gate: `tests/test_v3_contract.py` + CLI `npm test` green;
-   manual SSE transcript showing grouped child events.
+Implementation evidence:
+1. `gemia/subtasks.py` enforces `MAX_CHILDREN = 4`, rejects child fan-out, exposes
+   child-only `ask_root_agent`, and retains full-profile project read/write/edit tools.
+2. `gemia/tools/_schema.py` documents the four-child `maxItems` contract;
+   `tests/test_subtasks.py` covers the over-cap refusal, child refusal, root consultation,
+   and actual write dispatch.
+3. Focused verification: subtask, file, plan-mode, remote-protection, and capability
+   registry tests pass together; parent agent-loop/contract regressions are checked
+   separately so unrelated cross-repo drift remains visible.
 
 Primary user story to verify end-to-end: "annotate these 4 clips" → one spawn, four
 `annotate` children, `search_media` (per `docs/semantic-search-media-plan.md` §4.4)

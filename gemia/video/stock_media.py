@@ -84,6 +84,8 @@ def fetch_stock_media(
     orientation: str | None = None,
     safe_search: bool = True,
     import_to_media_library: bool = True,
+    result_id: str | None = None,
+    result_index: int | None = None,
 ) -> str:
     """Search and download the first matching stock asset.
 
@@ -101,7 +103,11 @@ def fetch_stock_media(
     results = [item for item in search.get("results") or [] if isinstance(item, dict) and item.get("download_url")]
     if not results:
         raise StockMediaError(f"No downloadable stock media found for query: {query}")
-    selected = _choose_best_result(results)
+    selected = _select_result(
+        results,
+        result_id=result_id,
+        result_index=result_index,
+    )
     downloaded = _download_result(selected, output_path)
     imported_asset = _maybe_import_to_media_library(downloaded, selected, import_to_media_library)
     _write_sidecar(downloaded, selected, search, imported_asset)
@@ -271,7 +277,36 @@ def _pixabay_image_result(item: dict[str, Any]) -> dict[str, Any]:
 def _largest_media_file(files: list[dict[str, Any]]) -> dict[str, Any]:
     if not files:
         return {}
-    return sorted(files, key=lambda item: int(item.get("width") or 0) * int(item.get("height") or 0), reverse=True)[0]
+    def dimensions(item: dict[str, Any]) -> tuple[int, int]:
+        return int(item.get("width") or 0), int(item.get("height") or 0)
+
+    # The delivery contract is 1080p.  Downloading a 4K/8K source for every
+    # three-second timeline window multiplies storage and decode cost without
+    # improving the final pixels.  Prefer the best landscape rendition inside
+    # 1920x1080; when only larger HD files exist choose the smallest one that
+    # still covers 1280x720, then fall back to the largest available file.
+    production_fit = [
+        item
+        for item in files
+        if 1280 <= dimensions(item)[0] <= 1920
+        and 720 <= dimensions(item)[1] <= 1080
+    ]
+    if production_fit:
+        return max(
+            production_fit,
+            key=lambda item: dimensions(item)[0] * dimensions(item)[1],
+        )
+    oversized = [
+        item
+        for item in files
+        if dimensions(item)[0] >= 1280 and dimensions(item)[1] >= 720
+    ]
+    if oversized:
+        return min(
+            oversized,
+            key=lambda item: dimensions(item)[0] * dimensions(item)[1],
+        )
+    return max(files, key=lambda item: dimensions(item)[0] * dimensions(item)[1])
 
 
 def _pixabay_best_video(videos: dict[str, Any]) -> dict[str, Any]:
@@ -288,6 +323,39 @@ def _choose_best_result(results: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         reverse=True,
     )[0]
+
+
+def _select_result(
+    results: list[dict[str, Any]],
+    *,
+    result_id: str | None,
+    result_index: int | None,
+) -> dict[str, Any]:
+    """Select the candidate the prior search exposed, or the ranked default.
+
+    Stable selection is required for a real production: repeating a fetch must
+    not silently import a different first result when the provider ordering
+    changes. ``result_id`` is preferred; ``result_index`` is a compact fallback
+    for providers whose candidate id is absent.
+    """
+
+    wanted_id = str(result_id or "").strip()
+    if wanted_id:
+        for item in results:
+            if str(item.get("id") or "") == wanted_id:
+                return item
+        raise StockMediaError(f"Requested stock result_id was not found: {wanted_id}")
+    if result_index is not None:
+        try:
+            index = int(result_index)
+        except (TypeError, ValueError) as exc:
+            raise StockMediaError("result_index must be an integer") from exc
+        if index < 0 or index >= len(results):
+            raise StockMediaError(
+                f"result_index {index} is outside the {len(results)} search results"
+            )
+        return results[index]
+    return _choose_best_result(results)
 
 
 def _download_result(result: dict[str, Any], output_path: str) -> Path:

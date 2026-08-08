@@ -38,9 +38,158 @@ def test_get_lumenframe_empty_doc(tmp_session: ToolContext) -> None:
     assert result["applied"] is True
     assert "canvas" in result
     assert "root_layers" in result
+    assert result["layer_details"] == []
+    assert result["layer_details_truncated"] is False
     assert "selection_ids" in result
     assert result["canvas"]["width"] == 1920
     assert result["canvas"]["height"] == 1080
+
+
+def test_get_lumenframe_returns_bounded_complex_layer_details(
+    tmp_session: ToolContext,
+) -> None:
+    inline_alpha = [1.0] * 4096
+    result = asyncio.run(
+        layer_module.dispatch_patch(
+            {
+                "ops": [
+                    {
+                        "op": "add_gradient",
+                        "id": "gradient_detail",
+                        "name": "Backdrop",
+                        "mode": "linear",
+                        "stops": [[0.0, "#101827"], [1.0, "#6EE7F9"]],
+                        "angle": 25,
+                        "duration": 3.0,
+                    },
+                    {
+                        "op": "set_transform",
+                        "layer_id": "gradient_detail",
+                        "x": 12,
+                        "y": -8,
+                        "scale": 1.25,
+                        "rotation": 15,
+                    },
+                    {
+                        "op": "set_opacity",
+                        "layer_id": "gradient_detail",
+                        "opacity": 0.4,
+                    },
+                    {
+                        "op": "set_blend_mode",
+                        "layer_id": "gradient_detail",
+                        "blend_mode": "multiply",
+                    },
+                    {
+                        "op": "clip_to_below",
+                        "layer_id": "gradient_detail",
+                        "enabled": True,
+                    },
+                    {
+                        "op": "add_effect",
+                        "layer_id": "gradient_detail",
+                        "effect": {
+                            "id": "blur_detail",
+                            "type": "gaussian_blur",
+                            "enabled": False,
+                            "params": {
+                                "radius": 12,
+                                "curve": list(range(100)),
+                            },
+                        },
+                    },
+                    {
+                        "op": "set_mask",
+                        "layer_id": "gradient_detail",
+                        "mask": {
+                            "kind": "pixel",
+                            "width": 64,
+                            "height": 64,
+                            "alpha": inline_alpha,
+                            "data": inline_alpha,
+                            "feather": 2,
+                        },
+                    },
+                    {
+                        "op": "add_shape",
+                        "id": "shape_detail",
+                        "name": "Orb",
+                        "kind": "ellipse",
+                        "fill": "#FF00AA",
+                        "rect": [0.1, 0.2, 0.9, 0.8],
+                        "duration": 2.0,
+                    },
+                ],
+            },
+            tmp_session,
+        )
+    )
+    assert result["applied"] is True
+
+    inspected = asyncio.run(layer_module.dispatch_get({}, tmp_session))
+    assert "Backdrop" in inspected["root_layers"]
+    assert "Orb" in inspected["root_layers"]
+    details = {item["id"]: item for item in inspected["layer_details"]}
+
+    gradient = details["gradient_detail"]
+    assert gradient["type"] == "gradient"
+    assert gradient["name"] == "Backdrop"
+    assert gradient["timing"] == {"start": 0.0, "duration": 3.0, "end": 3.0}
+    assert gradient["opacity"] == 0.4
+    assert gradient["blend_mode"] == "multiply"
+    assert gradient["clip_to_below"] is True
+    assert gradient["transform"] == {
+        "x": 12.0,
+        "y": -8.0,
+        "scale_x": 1.25,
+        "scale_y": 1.25,
+        "rotation": 15.0,
+        "anchor_x": 0.5,
+        "anchor_y": 0.5,
+    }
+    assert gradient["effects"][0]["id"] == "blur_detail"
+    assert gradient["effects"][0]["type"] == "gaussian_blur"
+    assert gradient["effects"][0]["enabled"] is False
+    assert gradient["effects"][0]["params"]["radius"] == 12
+    assert gradient["effects"][0]["params"]["curve"][-1] == {
+        "_truncated_items": 68,
+    }
+    assert gradient["mask"] == {
+        "kind": "pixel",
+        "invert": False,
+        "feather": 2.0,
+        "width": 64,
+        "height": 64,
+        "has_inline_data": True,
+    }
+    assert gradient["props"] == {
+        "mode": "linear",
+        "stops": [[0.0, "#101827"], [1.0, "#6EE7F9"]],
+        "angle": 25.0,
+    }
+    assert details["shape_detail"]["props"] == {
+        "kind": "ellipse",
+        "fill": "#FF00AA",
+        "rect": [0.1, 0.2, 0.9, 0.8],
+        "opacity_baked": False,
+    }
+
+
+def test_get_lumenframe_caps_layer_details(tmp_session: ToolContext) -> None:
+    doc = layer_module.get_lumendoc_snapshot(tmp_session)
+    doc["root"]["children"] = [
+        layer_module.new_layer("solid", id=f"detail_{index}")
+        for index in range(layer_module._LAYER_DETAILS_LIMIT + 2)
+    ]
+    assert layer_module._save_lumendoc(tmp_session, doc) is True
+
+    result = asyncio.run(layer_module.dispatch_get({}, tmp_session))
+    assert len(result["layer_details"]) == layer_module._LAYER_DETAILS_LIMIT
+    assert result["layer_details"][0]["id"] == "detail_0"
+    assert result["layer_details"][-1]["id"] == (
+        f"detail_{layer_module._LAYER_DETAILS_LIMIT - 1}"
+    )
+    assert result["layer_details_truncated"] is True
 
 
 def test_lumen_patch_add_single_layer(tmp_session: ToolContext) -> None:
@@ -663,6 +812,9 @@ def test_prompt_injection_placeholders_replaced() -> None:
         # Both placeholders should be replaced (not literally present)
         assert "{{lumenframe_ops}}" not in content
         assert "{{lumenframe}}" not in content
+        assert "{{search_engine}}" not in content
+        assert "Runtime web search (internal context; do not announce unless asked)" in content
+        assert "built_in_" in content
 
         # Should contain lumenframe sections
         assert "Layer Document" in content or "lumenframe" in content.lower()

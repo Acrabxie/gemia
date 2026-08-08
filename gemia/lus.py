@@ -52,7 +52,7 @@ PAID_GENERATION_TOOLS = frozenset({
 FIELD_ORDER = (
     "name", "version", "lus_version", "title", "description", "triggers",
     "domain", "tools_used", "parameters", "author", "created_at",
-    "updated_at", "language", "safety", "checksum",
+    "updated_at", "language", "safety", "kind", "point_library", "checksum",
 )
 
 _MAGIC_RE = re.compile(r"^#!lus/[1-9][0-9]*$")
@@ -211,6 +211,10 @@ class LusMeta:
     safety_requires_paid_generation: bool
     safety_mutates_project: bool
     checksum: str | None
+    # Optional package profile.  ``None`` preserves byte-exact v1 Skill
+    # round-trips; ``point_library`` is the v2 bundle manifest profile.
+    kind: str | None = None
+    point_library: dict[str, Any] | None = None
     extra: dict = field(default_factory=dict)  # unknown fields, round-trip
 
 
@@ -609,6 +613,22 @@ def _validate_meta_fields(
             warnings.append(LusWarning(
                 "W_LUS_UNKNOWN_FIELD", f"unknown safety key: {key}", field=f"safety.{key}"))
     # checksum (optional on read; malformed is a hard field error)
+    kind: str | None = None
+    if "kind" in mapping and mapping["kind"] is not None:
+        kind = _req_str(mapping, "kind", max_len=32)
+        if kind not in {"skill", "point_library"}:
+            raise _field_err("kind", "must be 'skill' or 'point_library'")
+    point_library: dict[str, Any] | None = None
+    if "point_library" in mapping and mapping["point_library"] is not None:
+        point_library = mapping["point_library"]
+        if not isinstance(point_library, dict):
+            raise _field_err("point_library", "must be a mapping")
+        if kind != "point_library":
+            raise _field_err("point_library", "requires kind: point_library")
+    if kind == "point_library" and point_library is None:
+        raise _field_err("point_library", "required for kind: point_library")
+
+    # checksum (optional on read; malformed is a hard field error)
     checksum: str | None = None
     if "checksum" in mapping and mapping["checksum"] is not None:
         checksum_raw = mapping["checksum"]
@@ -640,6 +660,8 @@ def _validate_meta_fields(
         safety_requires_paid_generation=safety_values["requires_paid_generation"],
         safety_mutates_project=safety_values["mutates_project"],
         checksum=checksum,
+        kind=kind,
+        point_library=point_library,
         extra=extra,
     )
 
@@ -942,6 +964,10 @@ def serialize_lus(meta: LusMeta, body: str) -> str:
         "requires_paid_generation": meta.safety_requires_paid_generation,
         "mutates_project": meta.safety_mutates_project,
     }, 0, out)
+    if meta.kind is not None:
+        _emit_entry("kind", meta.kind, 0, out)
+    if meta.point_library is not None:
+        _emit_entry("point_library", meta.point_library, 0, out)
     _emit_entry("checksum", checksum, 0, out)
     for key, value in (meta.extra or {}).items():
         _emit_entry(str(key), value, 0, out)

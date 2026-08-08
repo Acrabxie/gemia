@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from gemia.device_capabilities import DEVICE_CAPABILITY_NAMES
+
 
 def _tool(
     name: str,
@@ -55,7 +57,7 @@ _ASSET_ID = {
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     _tool(
         "generate_image",
-        "Create a new still image from a text prompt. Returns a new asset_id.",
+        "Create a new still image with GPT Image 2 through the OpenAI subscription bridge. This capability is exposed only when the selected provider is openai_subscription; it has no other-provider fallback. Returns a new asset_id.",
         {
             "prompt": {"type": "string", "description": "What the image should depict."},
             "aspect_ratio": {
@@ -473,6 +475,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "Cheap ffprobe-style physical metadata for a registered asset. Returns duration_ms, width, height, fps, codecs, channel count, sample rate, stream count, and file size. Use before trim/reframe/audio edits when exact media properties matter; it does not do semantic visual analysis.",
         {
             "asset_id": _ASSET_ID,
+            "verify_motion": {
+                "type": "boolean",
+                "description": "For video, decode sampled frames and prove real frame-to-frame motion rather than trusting the container. Use for formal production evidence.",
+            },
         },
         ["asset_id"],
     ),
@@ -551,6 +557,29 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         ["query"],
     ),
     _tool(
+        "stock_media",
+        "Search or fetch licensed public stock footage from the configured "
+        "Pexels/Pixabay connectors. Use action='search' to inspect real options "
+        "before spending generation budget, then action='fetch' to import one "
+        "usable result into this project with provider, source URL, attribution, "
+        "license, and a provenance sidecar. This is free media sourcing, not AI generation.",
+        {
+            "action": {
+                "type": "string",
+                "enum": ["search", "fetch"],
+                "description": "search returns candidates; fetch downloads and registers one project asset. Default search.",
+            },
+            "query": {"type": "string", "description": "Concrete visual search, preferably in English, e.g. 'rainy cyberpunk city aerial'."},
+            "provider": {"type": "string", "enum": ["auto", "pexels", "pixabay"], "description": "Configured licensed source. Default auto."},
+            "media_type": {"type": "string", "enum": ["video", "image"], "description": "Default video."},
+            "orientation": {"type": "string", "enum": ["landscape", "portrait", "square"], "description": "Optional source orientation."},
+            "limit": {"type": "integer", "description": "Search candidates, default 8 and max 20."},
+            "result_id": {"type": "string", "description": "For action='fetch', select the exact id returned by a prior search."},
+            "result_index": {"type": "integer", "description": "For action='fetch', select a zero-based candidate index when no stable id is available."},
+        },
+        ["query"],
+    ),
+    _tool(
         "assemble_shotlist",
         "Lay the filled storyboard onto the timeline: for every shot that has an asset_id, append a clip trimmed to its planned duration, align its on_screen_text as an overlay, apply its transition, and mark it placed. Call after filling shots (search_media / generate_*). Unfilled shots are skipped and reported. Use rebuild=true to clear the timeline and reassemble after revising the plan. Then inspect_timeline to review, or export to render.",
         {
@@ -560,7 +589,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _tool(
         "search_frames",
-        "Semantic footage search over real material (filename + probed visual/dialog labels), ranked by relevance. This is the '先搜真素材' step: fill a shot from raw footage before falling back to generate_video. Returns matching asset_ids ready to use. If it finds nothing, generate the shot instead. Probes frames live so it needs NO prior annotation — complements search_media (which queries saved annotations and returns timecodes). Stronger than search_library (a plain filename/label text match).",
+        "Semantic footage search over already available real material (filename + probed visual/dialog labels), ranked by relevance. This is the '先搜真素材' step: fill a shot from raw footage before falling back to generate_video. Returns matching asset_ids ready to use. It is NOT an import or registration tool for a specific external path; use copy_in for that and require asset_registered=true plus asset_id. If it finds nothing, generate the shot instead. Probes frames live so it needs NO prior annotation — complements search_media (which queries saved annotations and returns timecodes). Stronger than search_library (a plain filename/label text match).",
         {
             "query": {"type": "string", "description": "What the shot should show, e.g. 'city sunrise timelapse aerial'."},
             "kind": {"type": "string", "enum": ["video", "image", "any"], "description": "Media kind to search. Default video."},
@@ -579,6 +608,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "style": {"type": "string", "description": "Optional look/tone, e.g. 'cinematic promo, warm'."},
             "language": {"type": "string", "enum": ["zh", "en"], "description": "Language of the drafted text. Auto-detected from the theme if omitted."},
             "replace": {"type": "boolean", "description": "Replace the current shotlist (default true). false = return the draft without persisting."},
+            "fit_media": {"type": "boolean", "description": "Fit indexed time-ranged library evidence to the drafted outline. Default false; never generates or purchases media."},
         },
         ["theme"],
     ),
@@ -614,6 +644,12 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                                             "mood": {"type": "string", "description": "Optional emotion/tone tag, e.g. 'energetic','tense','hopeful','calm','inviting'."},
                                             "source": {"type": "string", "enum": ["search", "generate", "unset"], "description": "How to fill this shot. Prefer 'search'."},
                                             "search_query": {"type": "string", "description": "Query for search_frames/search_media when source='search'."},
+                                            "asset_id": {"type": "string", "description": "Optional registered media asset already chosen for this shot."},
+                                            "library_asset_id": {"type": "string", "description": "Persistent media-library identity for the chosen source."},
+                                            "source_in": {"type": "number", "description": "Chosen source start second from persistent evidence."},
+                                            "source_out": {"type": "number", "description": "Chosen source end second from persistent evidence."},
+                                            "evidence": {"type": "object", "description": "Traceable persistent evidence identity and ranking explanation."},
+                                            "alternatives": {"type": "array", "items": {"type": "object"}, "description": "Up to three traceable candidates not selected."},
                                             "transition_after": {
                                                 "type": "object",
                                                 "description": "Transition INTO the next shot (omit or kind='cut' for a hard cut).",
@@ -631,6 +667,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                     },
                 },
             },
+            "fit_media": {"type": "boolean", "description": "Fit indexed time-ranged library evidence before the single atomic shotlist write. Default false; never generates or purchases media."},
         },
         ["shotlist"],
     ),
@@ -644,6 +681,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "description": "Fields to merge, e.g. {asset_id, source, status, duration_sec, on_screen_text, narration, mood, search_query, description, transition_after, notes}.",
                 "properties": {
                     "asset_id": {"type": "string"},
+                    "library_asset_id": {"type": "string", "description": "Persistent media-library identity for the selected source."},
+                    "source_in": {"type": "number", "description": "Chosen source start second from persistent evidence."},
+                    "source_out": {"type": "number", "description": "Chosen source end second from persistent evidence."},
+                    "evidence": {"type": "object", "description": "Traceable evidence identity and ranking explanation."},
+                    "alternatives": {"type": "array", "items": {"type": "object"}, "description": "Up to three non-selected evidence candidates."},
                     "source": {"type": "string", "enum": ["search", "generate", "unset"]},
                     "status": {"type": "string", "enum": ["draft", "filled", "placed"]},
                     "duration_sec": {"type": "number"},
@@ -883,6 +925,24 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         [],
     ),
     _tool(
+        "prepare_roughcut",
+        "Prepare imported video/audio for editorial review without changing the timeline. Runs local Whisper transcription, detects pauses and filler words, ranks repeated takes, creates/reuses a low-resolution proxy, and checkpoints each asset so interrupted long batches can resume. This is local and does not spend generation budget. Use before storyboard fitting or timeline editing when the user has raw talking-head, interview, or repeated-take footage.",
+        {
+            "asset_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Media-library video/audio asset ids.",
+            },
+            "all": {"type": "boolean", "description": "Prepare all video/audio assets in the media library."},
+            "language": {"type": "string", "description": "Spoken language code or auto. Default auto."},
+            "create_proxies": {"type": "boolean", "description": "Create/reuse 540p local proxies for video. Default true."},
+            "proxy_resolution": {"type": "integer", "description": "Proxy height from 240 to 1080. Default 540."},
+            "resume": {"type": "boolean", "description": "Reuse matching completed checkpoints. Default true."},
+            "max_assets": {"type": "integer", "description": "Batch cap, maximum 100."},
+        },
+        [],
+    ),
+    _tool(
         "get_media_annotations",
         "Read persistent annotations for one media-library asset: asset summary, tags, labels, and timecoded markers.",
         {
@@ -1036,17 +1096,60 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
         ["command"],
     ),
-    # Session-scope file_list/read/write/copy/move/delete removed in favour of
+    # Session-scope file_list/read/write/copy/move removed in favour of
     # the machine-scope equivalents (list_dir, read_file, write_file, copy_in,
     # move_file, organize_files) to reduce tool count. Dispatch map in __init__
     # still routes them if called.
     _tool(
-        "build",
-        "Async submit code to a sandboxed subprocess. Supports Python (default), Node.js, Bash, Go, Ruby, Rust. Executes immediately in a new process group with workspace full r/w and network denied. Returns job_id immediately; use check_job or wait_for_job to poll status. Perfect for long-running code, iteration loops (see→modify→rerun), and skill development.",
+        "get_design_state",
+        "Read the persisted RealityContract and compact Creative IR for this ProductionRun. Use it before consequential design work or a targeted revision; it is the bridge from human intent to deterministic project code, not a generated shot-list dump.",
         {
+            "document": {
+                "type": "string",
+                "enum": ["both", "reality_contract", "creative_ir"],
+                "description": "Which production fact document to return. Default both.",
+            },
+        },
+        [],
+    ),
+    _tool(
+        "patch_design_state",
+        "Apply ONE small, revision-checked JSON-pointer patch to RealityContract or Creative IR. Use repeated semantic patches instead of replacing a giant JSON document. Contract patches define the real deliverable; Creative IR patches define stable beats, design systems, program inputs and the active human revision scope.",
+        {
+            "document": {
+                "type": "string",
+                "enum": ["reality_contract", "creative_ir"],
+            },
+            "operation": {
+                "type": "string",
+                "enum": ["set", "merge", "remove", "append"],
+            },
+            "path": {
+                "type": "string",
+                "description": "Non-root JSON pointer, e.g. /brief, /beats/opening, /systems/motion, /beat_order.",
+            },
+            "value": {
+                "type": ["object", "array", "string", "number", "boolean", "null"],
+                "description": "Patch value. Omit only for remove. One patch is capped at 64 KiB.",
+            },
+            "expected_revision": {
+                "type": "integer",
+                "description": "Document revision returned by get_design_state; prevents concurrent overwrite.",
+            },
+        },
+        ["document", "operation", "path", "expected_revision"],
+    ),
+    _tool(
+        "build",
+        "Run an incrementally authored, multi-file design program from the project workspace, or submit a small compatibility code string. Project entrypoints can import LumenFrame and keep complex timing, layout, motion, typography and rendering logic in deterministic code instead of one giant JSON/tool call. Returns job_id immediately; use check_job or wait_for_job for status.",
+        {
+            "entrypoint": {
+                "type": "string",
+                "description": "Preferred: project://design/... path to an existing persistent project program (for example project://design/main.py). Build it incrementally with write_file, then rerun this entrypoint after local revisions. A plain relative path refers only to the current session workspace. Mutually exclusive with code.",
+            },
             "code": {
                 "type": "string",
-                "description": "Source code to execute in sandbox (language determined by 'language' parameter).",
+                "description": "Compatibility path for a small source string. Mutually exclusive with entrypoint; do not put a whole production or giant generated JSON in this field.",
             },
             "language": {
                 "type": "string",
@@ -1062,6 +1165,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "items": {"type": "string"},
                 "description": "Command-line arguments to pass to the script.",
             },
+            "device_capabilities": {
+                "type": "array",
+                "items": {"type": "string", "enum": list(DEVICE_CAPABILITY_NAMES)},
+                "description": "Hardware capabilities the program actually needs. CPU and project files are implicit. GPU/media acceleration can run inside the sandbox; capture, peripherals and networking require the user-controlled host permission path and remain subject to macOS consent.",
+            },
             "timeout_sec": {
                 "type": "number",
                 "description": "Timeout in seconds (default 120, clamped to (0, 600]). Process killed if exceeded.",
@@ -1071,7 +1179,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "description": "Optional human-readable description for the job.",
             },
         },
-        ["code"],
+        [],
     ),
     _tool(
         "check_job",
@@ -1113,6 +1221,79 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
         ["job_id"],
+    ),
+    _tool(
+        "publish_cloud_guide",
+        "Upload one declarative Skill, Creator Workflow, or validated Point Library .lus bundle to the signed-in user's Lumeri Skill Cloud. Private is the default. Set visibility='public' and public_confirmed=true ONLY when the user explicitly asks to publish it on the public Lumeri website. Point Library bundles are stored as bytes and never executed by the cloud.",
+        {
+            "kind": {
+                "type": "string",
+                "enum": ["skill", "workflow", "point_library"],
+                "description": "Use point_library for a validated .lus bundle; skill for one reusable capability; workflow for ordered stages.",
+            },
+            "id": {
+                "type": "string",
+                "description": "Stable kebab-case id, at most 64 characters.",
+            },
+            "version": {
+                "type": "string",
+                "description": "Exact SemVer core version such as 1.0.0. Content changes require a new version.",
+            },
+            "title": {"type": "string", "description": "Creator-readable display title."},
+            "description": {
+                "type": "string",
+                "description": "One concise sentence describing when and why to use it.",
+            },
+            "definition": {
+                "type": "object",
+                "description": "Machine-readable contract. A skill needs non-empty steps or procedure; a workflow needs non-empty stages.",
+                "additionalProperties": True,
+            },
+            "instructions": {
+                "type": "string",
+                "description": "Full reusable execution guidance. Never include credentials or private absolute paths.",
+            },
+            "visibility": {
+                "type": "string",
+                "enum": ["private", "public"],
+                "description": "Default private. Public entries appear in the website Skill catalog.",
+            },
+            "public_confirmed": {
+                "type": "boolean",
+                "description": "Must be true for public visibility and only after the user explicitly requested public publishing.",
+            },
+            "bundle_base64": {
+                "type": "string",
+                "description": "For point_library only: exact base64-encoded .lus bundle bytes produced by the local package installer.",
+            },
+        },
+        ["kind", "id", "version", "title", "description", "definition", "instructions"],
+    ),
+    _tool(
+        "list_cloud_guides",
+        "List Skill Cloud entries available to the signed-in user: their private entries plus the public catalog, without loading full instructions.",
+        {
+            "kind": {
+                "type": "string",
+                "enum": ["skill", "workflow", "point_library"],
+                "description": "Optional kind filter. Omit to list both.",
+            },
+        },
+        [],
+    ),
+    _tool(
+        "load_cloud_guide",
+        "Load one exact account-owned or public Skill/Creator Workflow version, including its definition and instructions.",
+        {
+            "kind": {"type": "string", "enum": ["skill", "workflow", "point_library"]},
+            "id": {"type": "string", "description": "Exact kebab-case id."},
+            "version": {"type": "string", "description": "Exact SemVer core version."},
+            "content_sha256": {
+                "type": "string",
+                "description": "Optional exact content digest returned by list_cloud_guides. Pass it for public entries so the selected publisher/version cannot be confused with a same-id entry.",
+            },
+        },
+        ["kind", "id", "version"],
     ),
     _tool(
         "save_skill",
@@ -1157,7 +1338,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _tool(
         "recall_skills",
-        "Call this FIRST, before starting a task, to reuse prior know-how: returns the most relevant saved (distilled) and built-in library skills for your query/task, each with name + when_to_use + recipe steps. Reuse a matching skill instead of re-deriving it.",
+        "Call this FIRST, before starting a task, to reuse prior know-how: returns the most relevant saved (distilled) and built-in library skills for your query/task, each with name + when_to_use + recipe steps. Reuse a matching skill instead of re-deriving it. If a tool failure shows that recalled skills are steering the task down the wrong route, audit that result and call recall_skills again with routing_audit; give concrete failure evidence, positive replacement guidance, and only explicitly disproven skill names to avoid. That audit is remembered for the same task query so unchanged recalls do not return the same rejected pile.",
         {
             "query": {
                 "type": "string",
@@ -1171,12 +1352,36 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "type": "boolean",
                 "description": "Also search built-in library skills, not just user-distilled ones. Default true.",
             },
+            "routing_audit": {
+                "type": "object",
+                "description": "Optional main-model audit after a failed route. Stored only in this session and applied only to the same normalized query.",
+                "properties": {
+                    "failure_evidence": {
+                        "type": "string",
+                        "description": "Required concrete structured failure evidence showing why the previous route was unsuitable. Evidence is recorded but not used as positive search text.",
+                    },
+                    "guidance": {
+                        "type": "string",
+                        "description": "Positive description of the alternative capability or approach the sorter should prefer next.",
+                    },
+                    "avoid_skills": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Exact names of previously returned skills that evidence has disproven for this task. Do not list skills merely because one transient call failed.",
+                    },
+                },
+                "required": ["failure_evidence"],
+            },
+            "reset_routing_guidance": {
+                "type": "boolean",
+                "description": "Clear the current session's sorter guidance before this recall, for example after conditions changed or the prior route became valid again.",
+            },
         },
         [],
     ),
     _tool(
         "remember",
-        "Call this to REMEMBER a durable user fact or preference across sessions — a standing constraint, a stable preference, a name/handle, a recurring workflow choice. The fact is written to durable memory (MEMORY.md) and shown back to you in the 'What you remember' section of future sessions. Pass a 'title' to make it idempotent: re-remembering the same title UPDATES the note instead of duplicating it. Do NOT store secrets, tokens, passwords, or API keys — those are rejected. For short-lived per-turn progress, use log_note instead, not remember.",
+        "Remember a durable fact across sessions. In a Project, scope=auto writes to that Project's shared memory; use scope=global only for facts that apply across every Project. Outside a Project, auto writes global memory. Pass title to update the same fact instead of duplicating it. Never store secrets. Use log_note for short-lived progress.",
         {
             "content": {
                 "type": "string",
@@ -1190,16 +1395,26 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "type": "string",
                 "description": "Optional category hint, e.g. 'preference', 'constraint', 'fact', 'workflow'.",
             },
+            "scope": {
+                "type": "string",
+                "enum": ["auto", "project", "global"],
+                "description": "Memory scope. auto (default) means Project memory inside a Project, otherwise global memory.",
+            },
         },
         ["content"],
     ),
     _tool(
         "log_note",
-        "Append a short one-line note to TODAY'S daily log (a running breadcrumb of progress/decisions). Use for short-lived, in-this-session context worth recording — not for durable facts (use remember for those). Best-effort: empty or secret-looking notes are skipped, not stored. The host already auto-logs a turn summary at turn end; use this to add your own extra breadcrumb mid-turn.",
+        "Append one short breadcrumb. In a Project, scope=auto writes to the shared Project log; scope=global writes the cross-Project daily log. Use for short-lived progress and decisions, not durable facts. Empty or secret-looking notes are skipped.",
         {
             "text": {
                 "type": "string",
                 "description": "The note to append to today's daily log (collapsed to a single line).",
+            },
+            "scope": {
+                "type": "string",
+                "enum": ["auto", "project", "global"],
+                "description": "Log scope. auto (default) means Project log inside a Project, otherwise the global daily log.",
             },
         },
         ["text"],
@@ -1363,6 +1578,47 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             },
         },
         ["op"],
+    ),
+    _tool(
+        "point_library",
+        "Call an installed Lumeri Point Library package through its single semantic host surface. "
+        "Use library_id such as 'vector-motion' or 'grade', op:'catalog' first when the vocabulary "
+        "is unknown, then op:'create'/'adjust' for Shape A or op:'apply'/'describe' for Shape B. "
+        "The package supplies the professional taste floor, deterministic implementation, catalog, "
+        "verification evidence, and next step; do not bypass it with raw craft recipes.",
+        {
+            "library_id": {
+                "type": "string",
+                "description": "Installed Point Library id, for example vector-motion or grade.",
+            },
+            "op": {
+                "type": "string",
+                "enum": ["create", "adjust", "catalog", "apply", "describe"],
+                "description": "Library operation. catalog/describe are read-only vocabulary calls.",
+            },
+            "brief": {
+                "type": "object",
+                "description": "Semantic creative brief for create/adjust when the selected library uses it.",
+            },
+            "place": {
+                "type": "object",
+                "description": "Optional placement for a library that creates a document layer.",
+            },
+            "layer_id": {
+                "type": "string",
+                "description": "Existing library-created layer for an adjust operation.",
+            },
+            "feedback": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Human feedback phrases for a semantic adjustment.",
+            },
+            "payload": {
+                "type": "object",
+                "description": "Shape B payload forwarded only through its declared safe ops binding.",
+            },
+        },
+        ["library_id"],
     ),
     # ── creative "point libraries" (second layer; each = ONE creative verb,
     #    op: create|adjust|catalog, speak creative language not raw numbers) ──
@@ -1532,6 +1788,28 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         [],
     ),
     _tool(
+        "get_segment",
+        "Read one Clip's expandable SegmentDocument, including its internal timeline, layers, states, revisions and human reservations. Reading a legacy clip is zero-write and returns the implicit single-material structure.",
+        {"clip_id": {"type": "string", "description": "Top-level Clip to inspect."}},
+        ["clip_id"],
+    ),
+    _tool(
+        "segment_edit",
+        "Edit one Clip's SegmentDocument. Always call get_segment first and pass its expected_segment_revision. Agent edits are refused when a human reservation covers the entity_ref; branches never enter the main preview or export.",
+        {
+            "clip_id": {"type": "string"},
+            "action": {"type": "string", "enum": ["set_layer", "set_timeline", "set_state", "state_add", "state_copy", "state_delete", "state_reorder", "branch"]},
+            "entity_ref": {"type": "string", "description": "Layer, material or state id being edited."},
+            "entity_refs": {"type": "array", "items": {"type": "string"}, "description": "Additional entities touched by the same operation."},
+            "changes": {"type": "object"},
+            "expected_segment_revision": {"type": "integer"},
+            "new_state_id": {"type": "string"},
+            "index": {"type": "integer"},
+            "client_op_id": {"type": "string"},
+        },
+        ["clip_id", "action", "expected_segment_revision"],
+    ),
+    _tool(
         "timeline_delete_clip",
         "Remove a clip from the timeline. ripple=true closes the gap by shifting later clips on the same track left.",
         {
@@ -1636,18 +1914,13 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _tool(
         "inspect_timeline",
-        "Render the current project timeline as a low-res composited proxy and sample actual visual frames from it. Use after timeline/layout edits, before diagnosing visual timing/composition, or when you need to see what the timeline currently looks like. Accepts either a single time/frame or a range; returns image asset_ids and attaches a preview thumbnail for the next model turn.",
+        "Render the current project timeline as a low-res composited proxy and sample actual visual frames from it. Use after timeline/layout edits, before diagnosing visual timing/composition, or when you need to see what the timeline currently looks like. Pass the exact seconds to review in times_sec; returns image asset_ids and attaches a preview thumbnail for the next model turn.",
         {
-            "time_sec": {"type": "number", "description": "Single timeline time to inspect, in seconds. Alias: time."},
-            "time": {"type": "number", "description": "Alias for time_sec."},
-            "frame": {"type": "integer", "description": "Single 0-based project frame to inspect. Mutually exclusive with time_sec/time."},
-            "start_sec": {"type": "number", "description": "Start second for range sampling. Alias: start."},
-            "end_sec": {"type": "number", "description": "End second for range sampling, exclusive. Alias: end."},
-            "start": {"type": "number", "description": "Alias for start_sec."},
-            "end": {"type": "number", "description": "Alias for end_sec."},
-            "start_frame": {"type": "integer", "description": "Start frame for range sampling."},
-            "end_frame": {"type": "integer", "description": "End frame for range sampling, exclusive."},
-            "max_frames": {"type": "integer", "description": "Maximum sampled frames for a range, clamped to 1..12. Default 1."},
+            "times_sec": {
+                "type": "array",
+                "items": {"type": "number"},
+                "description": "One to twelve exact timeline positions to inspect, in seconds. Default [0].",
+            },
             "label": {"type": "string", "description": "Short label for render artifacts (default 'inspect')."},
         },
         [],
@@ -1706,11 +1979,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     # require explicit user approval via the ask mechanism before moving.
     _tool(
         "read_file",
-        "Read a text file from the user's machine (OUTSIDE the session "
-        "workspace). Returns {path, text, truncated, size}. Binary files return "
-        "a short note plus size instead of raw bytes. Read-only.",
+        "Read a text file. In a Project with a local folder, relative paths use that folder; "
+        "without one they use project://edit/. project://edit/... always refers to Lumeri's "
+        "private Project directory. Binary files return a short note plus size.",
         {
-            "path": {"type": "string", "description": "Absolute or ~-relative host path to read."},
+            "path": {"type": "string", "description": "Project-relative path, project://source/..., project://edit/..., or allowed absolute host path."},
             "max_bytes": {
                 "type": "integer",
                 "description": "Max bytes to read (default 2000000). Larger files are truncated.",
@@ -1720,12 +1993,11 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _tool(
         "write_file",
-        "Write (overwrite) or append a text file on the user's machine (OUTSIDE "
-        "the session workspace). Creates parent directories. Allowed without "
-        "approval. Returns {path, bytes_written}. Refuses system/credential "
-        "paths.",
+        "Write or append text. Relative paths use the selected local folder when present, "
+        "otherwise the Project's project://edit/ directory. "
+        "Mutations are recorded for Project undo/redo. Protected roots and credentials remain forbidden.",
         {
-            "path": {"type": "string", "description": "Absolute or ~-relative host path to write."},
+            "path": {"type": "string", "description": "Project-relative path, project://source/..., or project://edit/... path."},
             "content": {"type": "string", "description": "Text content to write."},
             "append": {
                 "type": "boolean",
@@ -1739,8 +2011,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "Copy an external file INTO the session workspace so it can be edited "
         "safely without touching the original. If the file is already at the "
         "target workspace path, it is treated as already copied and registered. "
-        "Recognized media files are registered as session assets. Returns "
-        "{workspace_path, name, size, asset_id?, kind?}.",
+        "Recognized media files are registered as session assets. For media "
+        "registration, success requires asset_registered=true and a non-empty "
+        "asset_id; copied=true or file presence alone is not registration. "
+        "Returns {workspace_path, name, size, asset_registered, asset_id?, kind?}.",
         {
             "path": {"type": "string", "description": "Host path of the external file to copy in."},
             "as_name": {
@@ -1756,9 +2030,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _tool(
         "list_dir",
-        "List a directory on the user's machine (OUTSIDE the session "
-        "workspace). Returns {path, entries:[{name, is_dir, size}], truncated}. "
-        "Read-only.",
+        "List a directory. Relative paths use the selected local folder when present, "
+        "otherwise the Project's project://edit/ directory. Read-only.",
         {
             "path": {"type": "string", "description": "Host directory path to list."},
             "max_entries": {
@@ -1769,12 +2042,23 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         ["path"],
     ),
     _tool(
+        "file_delete",
+        "Delete a file or folder inside the bound Project source/edit roots. The "
+        "item is moved into Lumeri's private Project history, so the user can undo "
+        "or redo it. The selected Project root itself and protected roots are refused.",
+        {
+            "path": {
+                "type": "string",
+                "description": "Project-relative path, project://source/..., or project://edit/... path to remove.",
+            },
+        },
+        ["path"],
+    ),
+    _tool(
         "move_file",
-        "MOVE/RENAME a file on the user's machine (OUTSIDE the session "
-        "workspace). This REQUIRES EXPLICIT USER APPROVAL: an approval prompt "
-        "is shown and awaited before anything moves. On approval returns "
-        "{status:'moved', src, dst}; otherwise {status:'declined'} and nothing "
-        "is moved. Refuses system/credential paths.",
+        "Move or rename a file/folder. Inside a bound Project source/edit root, "
+        "the Project grant is sufficient and the mutation is undoable. Outside "
+        "that boundary, existing host approval and protected-path rules apply.",
         {
             "src": {"type": "string", "description": "Host path of the file to move."},
             "dst": {"type": "string", "description": "Destination host path (new name/location)."},
@@ -1787,11 +2071,9 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _tool(
         "organize_files",
-        "Batch MOVE/RENAME several files at once with ONE approval listing all "
-        "moves. REQUIRES EXPLICIT USER APPROVAL before any move happens. On "
-        "approval executes each move and returns {status:'completed', moved, "
-        "results}; on decline returns {status:'declined'} and moves nothing. "
-        "Every src/dst is safety-checked first; a refusal aborts the batch.",
+        "Batch move/rename several files. Project-contained moves use the bound "
+        "folder grant and each mutation is undoable; moves outside the Project "
+        "keep the existing host approval and protected-path rules.",
         {
             "moves": {
                 "type": "array",
@@ -1866,8 +2148,9 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "-> spec. Control types: select {options} single-choice; multi_select "
         "{options, min?, max?} returns a list; text {placeholder?, multiline?, "
         "pattern?, min_length?, max_length?}; slider {min, max, step?, default?} "
-        "returns a number; panel {fields: {key->spec}, description?} a grouped form; "
-        "custom_panel {schema} an extensible schema-driven form. 'options' may be a "
+        "returns a number; panel {fields: {key->spec}, description?} a grouped form. "
+        "Custom panels require a host-registered validator and are not available to "
+        "model-authored asks. 'options' may be a "
         "list of strings or of {label, value} objects.",
         {
             "reason": {
@@ -1889,25 +2172,54 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "type": "object",
                 "description": (
                     "Map of control_key -> control spec. Each spec has a 'type' "
-                    "(select|multi_select|text|slider|panel|custom_panel) plus that "
+                    "(select|multi_select|text|slider|panel) plus that "
                     "type's parameters."
                 ),
-            },
-            "timeout": {
-                "type": "number",
-                "description": "Optional seconds to wait before falling back to control defaults.",
             },
         },
         ["reason", "title", "controls"],
     ),
     _tool(
+        "verify_delivery",
+        "Evaluate the ProductionRun against its persisted RealityContract and the exact canonical "
+        "preview/export graph, contract-required inspected frames, verified source motion, provenance, "
+        "audio, budget and technical gates. Call only after project_export moved the run "
+        "to verifying. A passing report moves the run to ready_for_review; it never marks "
+        "human acceptance.",
+        {
+            "export_asset_id": {"type": "string"},
+            "preview_asset_id": {"type": "string"},
+            "inspection_asset_ids": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"type": "string"},
+            },
+            "review_checks": {
+                "type": "object",
+                "additionalProperties": {"type": "boolean"},
+                "description": "Boolean pass/fail for every agent_review_checks name in the current RealityContract.",
+            },
+            "review_notes": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+                "description": "Concrete visual observation for every contract-required review check.",
+            },
+        },
+        ["export_asset_id", "preview_asset_id", "inspection_asset_ids", "review_checks", "review_notes"],
+    ),
+    _tool(
         "spawn_subtasks",
-        "Fan out 1-4 bounded sub-agents that work IN PARALLEL on independent goals and "
-        "return structured results. Each child runs a restricted tool profile, cannot "
-        "ask the user, cannot spawn further children, and draws cost/time from THIS "
-        "session's budget. Use for: bulk media annotation/indexing, per-beat rough-cut "
-        "candidate scouting, parallel library search/probe sweeps, A/B preview variants. "
-        "Do NOT use for a single sequential task — call the tools directly instead.",
+        "Fan out sub-agents that work IN PARALLEL on independent goals and return "
+        "structured results. You may start at most 4 direct children per call; "
+        "children cannot spawn further children. "
+        "Each full-profile child has the SAME local tool set as the parent, including "
+        "project-scoped file reads, writes, edits, and creative edits. Use for: "
+        "bulk media annotation/indexing, per-beat rough-cut candidate scouting, parallel "
+        "library search/probe sweeps, A/B preview variants, any embarrassingly-parallel "
+        "workload. For tasks requiring full VIDEO UNDERSTANDING (visual analysis, scene "
+        "recognition, frame-level reasoning), set model to a multimodal model such as "
+        "'gemini-3.5-flash'. Do NOT use for a single sequential task — call the tools "
+        "directly instead.",
         {
             "subtasks": {
                 "type": "array",
@@ -1919,23 +2231,62 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                         "goal": {"type": "string",
                                  "description": "Self-contained instruction for this child; include asset_ids explicitly."},
                         "tool_profile": {"type": "string",
-                                         "enum": ["annotate", "probe"],
-                                         "description": "Host-fixed capability set the child runs with."},
+                                         "enum": ["full", "annotate", "probe"],
+                                         "description": "Capability set. Omit or 'full' for the parent's full tool list."},
+                        "model": {"type": "string",
+                                  "description": "Model override for this child. Use a multimodal model (e.g. 'gemini-3.5-flash') when the task needs to understand video content."},
                         "asset_ids": {"type": "array", "items": {"type": "string"},
                                       "description": "Assets this child is scoped to (informational; echoed into the child prompt)."},
-                        "max_cost_usd": {"type": "number",
-                                         "description": "Optional per-child spend ceiling; host clamps to the fair slice."},
+                        "max_steps": {"type": "integer",
+                                      "description": "Optional caller-requested model-call limit for this child. Omit to let the child continue until it finishes or hits a failure guard."},
                     },
-                    "required": ["goal", "tool_profile"],
+                    "required": ["goal"],
                 },
             },
             "deadline_sec": {"type": "number",
-                             "description": "Shared wall-clock deadline for the whole batch (default 240, max 480)."},
+                             "description": "Optional caller-requested wall-clock deadline for the whole batch. Omit to wait for all children."},
         },
         ["subtasks"],
     ),
 ]
 
+
+TOOL_SCHEMAS.extend([
+    _tool(
+        "install_point_library",
+        "Install and atomically activate a local or cloud-loaded Point Library .lus bundle.",
+        {
+            "path": {"type": "string", "description": "Local .lus bundle path."},
+            "bundle_base64": {"type": "string", "description": "Exact bundle bytes returned by load_cloud_guide."},
+        },
+        [],
+    ),
+    _tool(
+        "list_point_libraries",
+        "List installed and built-in Point Library packages with version, active state, catalog count, and verification status.",
+        {},
+        [],
+    ),
+    _tool(
+        "rollback_point_library",
+        "Activate one exact previously installed Point Library version without deleting package bytes.",
+        {
+            "library_id": {"type": "string", "description": "Point Library id."},
+            "version": {"type": "string", "description": "Exact installed SemVer version to activate."},
+        },
+        ["library_id", "version"],
+    ),
+    _tool(
+        "publish_point_library",
+        "Upload one locally validated Point Library .lus bundle to the signed-in user's Skill Cloud. Private is the default; public requires explicit confirmation.",
+        {
+            "path": {"type": "string", "description": "Local .lus bundle path."},
+            "visibility": {"type": "string", "enum": ["private", "public"]},
+            "public_confirmed": {"type": "boolean", "description": "Required true only after an explicit public-publishing request."},
+        },
+        ["path"],
+    ),
+])
 
 TOOL_NAMES: list[str] = [t["function"]["name"] for t in TOOL_SCHEMAS]
 

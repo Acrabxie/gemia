@@ -9,6 +9,7 @@ from gemia.agent_loop_v3 import AgentLoopV3
 from gemia.turn_compaction import (
     compact_settled_tool_blocks,
     estimate_message_tokens,
+    sanitize_tool_protocol_pairs,
     settled_tool_blocks,
 )
 from gemia.turn_ledger import TurnLedger
@@ -108,6 +109,111 @@ def test_compaction_never_removes_a_user_message_between_settled_blocks() -> Non
         and message.get("content") == "CURRENT USER REQUEST"
         for message in result.messages
     )
+
+
+def test_rolling_window_drops_tool_outputs_orphaned_by_user_cutoff(
+    tmp_path: Path,
+) -> None:
+    loop = AgentLoopV3(
+        session_id="rolling_protocol_pairs",
+        output_dir=tmp_path,
+        gemini_client=_CaptureConversationClient(),  # type: ignore[arg-type]
+        emit_event=lambda event: None,
+    )
+    messages: list[dict[str, Any]] = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "old_call",
+                    "type": "function",
+                    "function": {"name": "build", "arguments": "{}"},
+                }
+            ],
+        }
+    ]
+    for index in range(9):
+        messages.append({"role": "user", "content": f"user-{index}"})
+        if index == 1:
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": "old_call",
+                    "content": '{"ok":true}',
+                }
+            )
+    messages.extend(
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "recent_call",
+                        "type": "function",
+                        "function": {"name": "build", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "recent_call",
+                "content": '{"ok":true}',
+            },
+        ]
+    )
+    loop._messages = messages
+
+    loop._trim_rolling_window()
+
+    assert loop._messages[0] == {"role": "user", "content": "user-2"}
+    assert all(
+        message.get("tool_call_id") != "old_call" for message in loop._messages
+    )
+    assert any(
+        message.get("tool_call_id") == "recent_call" for message in loop._messages
+    )
+
+
+def test_protocol_sanitizer_drops_both_incomplete_pair_directions() -> None:
+    messages = [
+        {"role": "user", "content": "start"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "complete",
+                    "type": "function",
+                    "function": {"name": "build", "arguments": "{}"},
+                },
+                {
+                    "id": "missing-output",
+                    "type": "function",
+                    "function": {"name": "build", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "complete", "content": '{"ok":true}'},
+        {"role": "tool", "tool_call_id": "missing-call", "content": '{"ok":true}'},
+        {"role": "user", "content": "continue"},
+    ]
+
+    sanitized = sanitize_tool_protocol_pairs(messages)
+
+    calls = [
+        call["id"]
+        for message in sanitized
+        for call in (message.get("tool_calls") or [])
+    ]
+    outputs = [
+        message["tool_call_id"]
+        for message in sanitized
+        if message.get("role") == "tool"
+    ]
+    assert calls == ["complete"]
+    assert outputs == ["complete"]
 
 
 class _CaptureConversationClient:

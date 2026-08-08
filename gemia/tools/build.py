@@ -39,11 +39,13 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from gemia.device_capabilities import resolve_device_capabilities
 from gemia.sandbox_v4 import build_v4_sandbox_command, is_sandbox_disabled
 from gemia.tools._context import ToolContext
 from gemia.tools.run_shell import _minimal_env
@@ -86,13 +88,15 @@ atexit.register(_kill_all_tracked_processes)
 
 
 async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
-    """Async submit code to sandbox (supports multiple languages).
+    """Async submit a project entrypoint or compatibility code blob.
 
     Args:
-        code: required, source code string (language determined by 'language' param)
-        language: optional, default "python3". Supported: "python3", "node", "bash", etc.
-        filename: optional, default "script.py", must be simple name (no path separators)
+        entrypoint: preferred, existing relative path in the project workspace
+        code: compatibility source string; mutually exclusive with entrypoint
+        language: optional, inferred from entrypoint or defaults to "python3"
+        filename: optional compatibility-code filename, with no path separators
         args: optional, list of string arguments to pass to script
+        device_capabilities: optional host capability requests
         timeout_sec: optional, default 120, clamped to (0, 600]
         note: optional, human-readable description
 
@@ -108,15 +112,82 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         }
 
     Raises:
-        ValueError: if >3 pending builds, or filename has path separators,
-                   or timeout out of range, or code empty
+        ValueError: if >3 pending builds, the entrypoint escapes the project,
+                   both/neither code and entrypoint are provided, or arguments
+                   are invalid
         RuntimeError: if sandbox not enforced
     """
     code = str(args.get("code") or "").strip()
-    if not code:
-        raise ValueError("build requires non-empty 'code' argument")
+    entrypoint = str(args.get("entrypoint") or "").strip()
+    if bool(code) == bool(entrypoint):
+        raise ValueError("build requires exactly one of 'entrypoint' or non-empty 'code'")
 
-    language = str(args.get("language") or "python3").strip().lower()
+    workspace = Path(ctx.output_dir).resolve()
+    project_program_root: Path | None = None
+    if ctx.project is not None:
+        project_program_root = (
+            ctx.project.store.project_dir(ctx.project.project_id) / "design"
+        ).resolve()
+    entrypoint_path: Path | None = None
+    project_revision_commit: dict[str, Any] | None = None
+    if entrypoint:
+        if entrypoint.startswith("project://"):
+            relative = entrypoint[len("project://") :].lstrip("/")
+            if project_program_root is None or not relative.startswith("design/"):
+                raise ValueError(
+                    "project entrypoint must use project://design/... in a persistent project"
+                )
+            candidate = project_program_root / relative[len("design/") :]
+            allowed_root = project_program_root
+        else:
+            raw_entrypoint = Path(entrypoint).expanduser()
+            if raw_entrypoint.is_absolute():
+                raise ValueError(
+                    "entrypoint must be relative or use project://design/..."
+                )
+            candidate = workspace / raw_entrypoint
+            allowed_root = workspace
+        try:
+            entrypoint_path = candidate.resolve(strict=True)
+            entrypoint_path.relative_to(allowed_root)
+        except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+            raise ValueError(
+                "entrypoint must resolve to an existing file inside its project "
+                f"workspace: {entrypoint!r}"
+            ) from exc
+        if not entrypoint_path.is_file():
+            raise ValueError(f"entrypoint must be a file, got {entrypoint!r}")
+        if project_program_root is not None:
+            production_store = ctx.extra.get("production_store")
+            durable_project_id = str(ctx.extra.get("project_id") or "")
+            run_id = str(ctx.extra.get("run_id") or "")
+            if production_store is not None and durable_project_id and run_id:
+                project_revision_commit = production_store.observe_design_program(
+                    durable_project_id,
+                    run_id,
+                    design_root=project_program_root,
+                    trace_id=str(ctx.extra.get("active_trace_id") or "") or None,
+                )
+
+    requested_language = str(args.get("language") or "").strip().lower()
+    suffix_languages = {
+        ".py": "python3",
+        ".js": "node",
+        ".mjs": "node",
+        ".sh": "bash",
+        ".go": "go",
+        ".rb": "ruby",
+        ".rs": "rust",
+    }
+    language = requested_language
+    if not language and entrypoint_path is not None:
+        language = suffix_languages.get(entrypoint_path.suffix.lower(), "")
+        if not language:
+            raise ValueError(
+                "cannot infer language from entrypoint suffix; pass 'language' explicitly"
+            )
+    if not language:
+        language = "python3"
     # Normalize language names
     if language in ("node", "nodejs", "javascript", "js"):
         language = "node"
@@ -129,7 +200,7 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         )
 
     filename = str(args.get("filename") or "script.py").strip()
-    if "/" in filename or "\\" in filename:
+    if code and ("/" in filename or "\\" in filename):
         raise ValueError(f"filename must not contain path separators, got {filename!r}")
 
     script_args = args.get("args")
@@ -151,8 +222,22 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
 
     note = str(args.get("note") or "").strip()
     if not note:
-        # Default to first line of code or first 60 chars
-        note = (code.split("\n")[0][:60]) if code else "Python build"
+        note = (
+            f"Run design program {entrypoint}"
+            if entrypoint
+            else code.split("\n")[0][:60]
+        )
+
+    requested_capabilities = args.get("device_capabilities")
+    if requested_capabilities is None:
+        requested_capabilities = []
+    elif not isinstance(requested_capabilities, list):
+        raise ValueError("device_capabilities must be a list")
+    unrestricted_host = is_sandbox_disabled()
+    capability_plan = resolve_device_capabilities(
+        (str(value) for value in requested_capabilities),
+        unrestricted_host=unrestricted_host,
+    )
 
     # Check pending limit: max 3 concurrent builds. _PROCESSES also holds
     # background shell jobs — count only this family's, by job_id prefix.
@@ -185,9 +270,15 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     job_dir = Path(ctx.output_dir) / "builds" / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write script
-    script_path = job_dir / filename
-    script_path.write_text(code, encoding="utf-8")
+    # Compatibility code is still supported, but a real design program lives
+    # as incrementally editable project files and runs by entrypoint.
+    if entrypoint_path is None:
+        script_path = job_dir / filename
+        script_path.write_text(code, encoding="utf-8")
+        source_mode = "inline_code"
+    else:
+        script_path = entrypoint_path
+        source_mode = "project_entrypoint"
 
     # Prepare log files
     stdout_log = job_dir / "stdout.log"
@@ -197,24 +288,26 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     # sandbox (POST /settings/sandbox), run the raw command with full system
     # access and report enforced=False honestly — do NOT raise.
     # Map language to interpreter
-    interpreters = {
-        "python3": "/usr/bin/env python3",
-        "python": "/usr/bin/env python3",
-        "node": "/usr/bin/env node",
-        "bash": "/bin/bash",
-        "go": "/usr/bin/env go run",
-        "ruby": "/usr/bin/env ruby",
-        "rust": "/usr/bin/env rustc",
+    interpreters: dict[str, list[str]] = {
+        "python3": [sys.executable],
+        "python": [sys.executable],
+        "node": ["/usr/bin/env", "node"],
+        "bash": ["/bin/bash"],
+        "go": ["/usr/bin/env", "go", "run"],
+        "ruby": ["/usr/bin/env", "ruby"],
+        "rust": ["/usr/bin/env", "rustc"],
     }
-    interpreter = interpreters.get(language, "/usr/bin/env python3")
-    
-    if is_sandbox_disabled():
-        cmd = interpreter.split() + [str(script_path), *script_args]
+    interpreter = interpreters.get(language, [sys.executable])
+    program_cmd = [*interpreter, str(script_path), *script_args]
+
+    if unrestricted_host:
+        cmd = program_cmd
         enforced = False
     else:
         cmd, enforced = build_v4_sandbox_command(
-            interpreter.split() + [str(script_path), *script_args],
+            program_cmd,
             workspace_dir=ctx.output_dir,
+            allow_gpu=capability_plan.allow_gpu,
         )
         if not enforced:
             raise RuntimeError(
@@ -224,6 +317,24 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
 
     # Start process with new session (process group isolation)
     deadline = time.monotonic() + timeout_sec
+    child_env = _minimal_env()
+    if language in ("python", "python3"):
+        repository_root = Path(__file__).resolve().parents[2]
+        python_paths = [
+            script_path.parent,
+            workspace,
+            workspace / ".site-packages",
+            repository_root,
+        ]
+        child_env["PYTHONPATH"] = os.pathsep.join(
+            str(path) for path in python_paths if path.exists()
+        )
+        child_env["PYTHONDONTWRITEBYTECODE"] = "1"
+        child_env["LUMERI_DESIGN_PROGRAM"] = "1"
+        child_env["LUMERI_PROJECT_ROOT"] = str(
+            project_program_root.parent if project_program_root is not None else workspace
+        )
+        child_env["LUMERI_RUN_WORKSPACE"] = str(workspace)
     try:
         with open(stdout_log, "w") as out_f, open(stderr_log, "w") as err_f:
             proc = subprocess.Popen(
@@ -231,7 +342,7 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
                 stdout=out_f,
                 stderr=err_f,
                 cwd=str(ctx.output_dir),
-                env=_minimal_env(),
+                env=child_env,
                 start_new_session=True,  # Process group isolation
             )
     except Exception as e:
@@ -247,10 +358,18 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     return {
         "job_id": job_id,
         "status": "submitted",
-        "script_path": str(script_path.relative_to(ctx.output_dir)),
-        "stdout_log": str(stdout_log.relative_to(ctx.output_dir)),
-        "stderr_log": str(stderr_log.relative_to(ctx.output_dir)),
+        "script_path": (
+            "project://design/" + str(script_path.resolve().relative_to(project_program_root))
+            if project_program_root is not None
+            and script_path.resolve().is_relative_to(project_program_root)
+            else str(script_path.resolve().relative_to(workspace))
+        ),
+        "stdout_log": str(stdout_log.resolve().relative_to(workspace)),
+        "stderr_log": str(stderr_log.resolve().relative_to(workspace)),
         "sandbox_enforced": enforced,
+        "source_mode": source_mode,
+        "device_capabilities": capability_plan.to_receipt(),
+        "project_revision_commit": project_revision_commit,
         "summary": note,
     }
 

@@ -452,6 +452,9 @@ class Layer:
     keyframes: dict[str, KeyframeTrack] = field(default_factory=dict)
     position: tuple[int, int] = (0, 0)
     expressions: dict[str, dict] = field(default_factory=dict)  # property_name -> {"expr": str, ...}
+    # ``None`` disables clipping; an empty/missing id represents an enabled
+    # clipping mask with no available source and therefore yields transparency.
+    clip_source_id: str | None = None
 
     def is_active(self, frame_index: int) -> bool:
         if frame_index < self.start_frame:
@@ -524,21 +527,50 @@ class LayerStack:
     def remove_layer(self, layer_id: str) -> None:
         self.layers = [layer for layer in self.layers if layer.id != layer_id]
 
-    def render_frame(self, frame_index: int) -> RGBAFrame:
+    def _placed_layers(self, frame_index: int):
+        """Yield active layers after transform, mask, opacity, and clipping."""
         if frame_index < 0 or frame_index >= self.total_frames:
             raise IndexError(f"Frame index {frame_index} outside [0, {self.total_frames}).")
-
-        canvas = np.zeros((self.height, self.width, 4), dtype=np.float32)
-        for layer in sorted(self.layers, key=lambda item: (item.z_index, item.id)):
+        # Source alpha is kept in canvas coordinates after the source's own
+        # transform, mask and opacity.  This makes clipping deterministic even
+        # when the clipped layer and its source have different geometry.
+        ordered_layers = sorted(self.layers, key=lambda item: (item.z_index, item.id))
+        clip_source_ids = {
+            layer.clip_source_id
+            for layer in ordered_layers
+            if layer.clip_source_id
+        }
+        layer_alpha: dict[str, np.ndarray] = {}
+        for layer in ordered_layers:
             if not layer.is_active(frame_index):
                 continue
             content = layer.frame_content(frame_index)
             placed = _fit_to_canvas(content, self.width, self.height, layer.position_value(frame_index))
             opacity = float(np.clip(layer.property_value("opacity", frame_index, self.fps), 0.0, 1.0))
-            if opacity <= 0.0:
-                continue
             placed = placed.copy()
             placed[..., 3:4] *= opacity
+            if layer.clip_source_id is not None:
+                source_alpha = layer_alpha.get(layer.clip_source_id)
+                if source_alpha is None:
+                    placed[..., 3:4] = 0.0
+                else:
+                    placed[..., 3:4] *= source_alpha
+            if layer.id in clip_source_ids:
+                layer_alpha[layer.id] = placed[..., 3:4].copy()
+            yield layer, placed
+
+    def render_layer_frame(self, frame_index: int, layer_id: str) -> RGBAFrame:
+        """Return one layer's canonical placed contribution before blending."""
+        for layer, placed in self._placed_layers(frame_index):
+            if layer.id == layer_id:
+                return placed.astype(np.float32)
+        return np.zeros((self.height, self.width, 4), dtype=np.float32)
+
+    def render_frame(self, frame_index: int) -> RGBAFrame:
+        canvas = np.zeros((self.height, self.width, 4), dtype=np.float32)
+        for layer, placed in self._placed_layers(frame_index):
+            if not np.any(placed[..., 3] > 0.0):
+                continue
             canvas = _blend_colors(canvas, placed, layer.blend_mode)
         return canvas.astype(np.float32)
 

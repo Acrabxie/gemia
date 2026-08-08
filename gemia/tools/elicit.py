@@ -10,8 +10,8 @@ Flow (human-in-the-loop):
   4. The answer is validated against the schema; the validated values are returned
      as this tool's result, so the model continues the turn with the answer in hand.
 
-If no answer arrives within the timeout (e.g. no frontend attached), the dispatcher
-falls back to per-control defaults so the loop never hangs forever.
+Blocking questions never time out into defaults. They remain pending until a valid
+answer arrives or the user cancels the turn.
 
 Errors follow the stable code + message pattern (``E_ELICIT_*`` / ``E_ASK_*``).
 """
@@ -33,7 +33,6 @@ from gemia.tools.ask import (
     TextControl,
     SliderControl,
     PanelControl,
-    CustomPanelControl,
     validate_ask_answer,
 )
 
@@ -45,7 +44,6 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         title: human-readable title
         description: optional longer description
         controls: ``{control_key: control_spec}`` (see the tool schema)
-        timeout: optional seconds to wait before falling back to defaults
     """
     controls_spec = args.get("controls") or {}
     if not controls_spec:
@@ -109,24 +107,23 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
 
     bridge = extra.get("ask_bridge")
     if bridge is None:
-        # No HITL bridge wired into this context (legacy / test path): emit nothing
-        # and hand the question back so a caller can route it however it likes.
         return {
-            "status": "question_emitted",
+            "error": "required user decision cannot be requested: ask bridge unavailable",
+            "error_code": "E_ASK_UNAVAILABLE",
             "question_id": question.question_id,
             "question": question.to_dict(),
-            "note": "no ask bridge in tool context; cannot await an answer here",
         }
 
-    timeout = args.get("timeout")
     raw = await bridge.emit_and_wait(
         question.to_dict(),
-        timeout=float(timeout) if timeout is not None else None,
+        required=True,
     )
-
-    fallback_used = raw is None
-    if fallback_used:
-        raw = _default_answers(controls)
+    if raw is None:
+        return {
+            "error": "required user decision ended without an answer",
+            "error_code": "E_ASK_CANCELLED",
+            "question_id": question.question_id,
+        }
 
     answer = AskAnswer(
         question_id=question.question_id,
@@ -139,14 +136,14 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
             "error": f"validation failed: {error}",
             "error_code": "E_ELICIT_INVALID_ANSWER",
             "question_id": question.question_id,
-            "fallback_used": fallback_used,
+            "fallback_used": False,
         }
 
     return {
         "status": "answer_received",
         "question_id": question.question_id,
         "answers": validated,
-        "fallback_used": fallback_used,
+        "fallback_used": False,
     }
 
 
@@ -187,7 +184,10 @@ def _build_one(key_or_index: Any, spec: dict[str, Any]) -> Any:
         }
         return PanelControl(fields=fields, description=spec.get("description", ""))
     if ctrl_type == AskControlType.CUSTOM_PANEL:
-        return CustomPanelControl(schema=spec.get("schema", {}))
+        raise ValueError(
+            "custom_panel requires a host-registered validator and is unavailable "
+            "for model-authored elicit calls"
+        )
 
     raise ValueError(f"unsupported control type: {ctrl_type!r} (control {key_or_index!r})")
 
@@ -229,34 +229,6 @@ def _explicit_defaults(spec: dict[str, Any]) -> dict[str, Any]:
             return {}
         result[key] = value
     return result
-
-
-# ── default-answer synthesis (no-frontend / timeout fallback) ───────────────
-
-
-def _default_answers(controls: dict[str, Any]) -> dict[str, Any]:
-    """Best-effort valid answer for each control, used when no user answer arrives."""
-    out: dict[str, Any] = {}
-    for key, ctrl in controls.items():
-        out[key] = _default_for(ctrl)
-    return out
-
-
-def _default_for(ctrl: Any) -> Any:
-    if isinstance(ctrl, SelectControl):
-        if ctrl.default is not None:
-            return ctrl.default
-        return ctrl.options[0]["value"] if ctrl.options else None
-    if isinstance(ctrl, MultiSelectControl):
-        need = max(0, int(ctrl.min or 0))
-        return [opt["value"] for opt in ctrl.options[:need]]
-    if isinstance(ctrl, TextControl):
-        return ""
-    if isinstance(ctrl, SliderControl):
-        return ctrl.default if ctrl.default is not None else ctrl.min
-    if isinstance(ctrl, PanelControl):
-        return {fk: _default_for(fc) for fk, fc in ctrl.fields.items()}
-    return {}  # custom_panel: schema-driven, cannot infer a default
 
 
 __all__ = ["dispatch"]

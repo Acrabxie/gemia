@@ -6,6 +6,9 @@
  *   POST /sessions/{id}/turn                    {"message": "..."} (202)
  *   GET  /sessions/{id}/stream                  EventSource + last_event_id replay
  *   GET  /sessions/{id}/assets/{aid}            preview URL for the asset
+ *   POST /sessions/{id}/resume                  restore durable runner
+ *   GET  /projects/{pid}/artifacts/{aid}         persistent preview URL
+ *   POST /projects/{pid}/runs/{rid}/review       human acceptance/revision
  *   POST /sessions/{id}/close                   teardown
  *
  * Invariants (mirror the agent loop's promises):
@@ -13,18 +16,81 @@
  *     banner — never silent drop.
  *   - Tool execution is presented as a high-level activity state; raw tool
  *     payloads and model work logs never enter the user-facing stream.
- *   - All asset previews load from /sessions/{id}/assets/{aid}. Tool
- *     results expose asset_id/kind/asset_url, never local filesystem paths.
+ *   - Durable project previews load from /projects/{pid}/artifacts/{aid};
+ *     /sessions/{id}/assets/{aid} remains a v1 compatibility alias.
  */
 
-(function () {
+(async function () {
   "use strict";
+  const apiFetch = (...args) => window.LumeriApi["fetch"](...args);
+  const authGate = window.LumeriAuthGate;
+  if (!authGate) return;
+
+  const authGateView = authGate.createDomView(document);
+  const authGateRequest = async (method, path, payload) => {
+    const response = await apiFetch(path, {
+      method,
+      headers: payload === undefined ? undefined : { "Content-Type": "application/json" },
+      body: payload === undefined ? undefined : JSON.stringify(payload),
+    });
+    let data = {};
+    try { data = await response.json(); } catch {}
+    return { ok: response.ok, status: response.status, data };
+  };
+  let initialAuthSession;
+  try {
+    initialAuthSession = await authGate.waitForWorkspaceAccess({
+      request: authGateRequest,
+      view: authGateView,
+      openExternal: (url) => window.open(
+        url,
+        "lumeri-account-login",
+        "popup,width=520,height=720,noopener,noreferrer",
+      ),
+    });
+  } catch (error) {
+    authGateView.showError(error && error.message ? error.message : "Lumeri 登录服务暂不可用");
+    return;
+  }
+  authGate.revealWorkspace(document);
+  let currentAuthSession = initialAuthSession;
+
+  function normalizedByokProvider(value) {
+    const provider = String(value || "").trim().toLowerCase();
+    return provider === "anthropic" ? "claude" : provider;
+  }
+
+  function byokAllowed() {
+    return currentAuthSession?.cloud_login_enabled !== true
+      || (
+        currentAuthSession?.account?.age_band === "18_plus"
+        && currentAuthSession?.account?.provider_mode === "byok"
+      );
+  }
+
+  // The personal iPad package owns its workspace locally. Its model request is
+  // one-shot and never creates a Mac session/project/timeline.
+  const isLocalWorkspace = globalThis.__lumeriLocalWorkspace === true;
 
   const $ = (sel) => document.querySelector(sel);
+  const isQuantaSurface = String(location.pathname || "").startsWith("/quanta");
+  const surfaceProductName = isQuantaSurface ? "Lumeri Quanta" : "Lumeri Video";
+  const surfaceStoragePrefix = isQuantaSurface ? "lumeri:quanta" : "lumeri:v3";
+  const pageParams = new URLSearchParams(location.search || "");
+  const cliPreviewSessionId = pageParams.get("mode") === "cli-preview"
+    ? (pageParams.get("session") || "").trim()
+    : "";
+  const isCliPreview = !!cliPreviewSessionId;
+  const segmentWindowClipId = (pageParams.get("clip") || "").trim();
+  const segmentWindowSessionId = (pageParams.get("session") || "").trim();
+  const isSegmentWindow = pageParams.get("mode") === "segment-window" && !!segmentWindowSessionId && !!segmentWindowClipId;
+  document.documentElement.classList.toggle("cli-preview", isCliPreview);
+  document.documentElement.classList.toggle("quanta-surface", isQuantaSurface);
+  document.title = isCliPreview ? `${surfaceProductName} · CLI Preview` : surfaceProductName;
 
   // Inline the icon sprite once so every <use href="#i-*"> resolves, including
   // ones rendered before the fetch lands (SVG <use> re-resolves on DOM insert).
-  fetch("/video/icons.svg")
+  apiFetch("/video/icons.svg")
     .then((r) => (r.ok ? r.text() : ""))
     .then((t) => {
       if (!t) return;
@@ -38,18 +104,66 @@
   const els = {
     sessionLabel: $("#session-id-label"),
     connPill: $("#connection-pill"),
+    projectBtn: $("#project-btn"),
+    projectNameLabel: $("#project-name-label"),
+    newProjectBtn: $("#new-project-btn"),
     newSessionBtn: $("#new-session-btn"),
+    projectSidebar: $("#project-sidebar"),
+    projectSidebarBody: $("#project-sidebar-body"),
     timeline: $("#timeline"),
     emptyState: $("#empty-state"),
     assetGrid: $("#asset-grid"),
+    deliveryReviewMaster: $("#delivery-review-master"),
+    deliveryReviewVideo: $("#delivery-review-video"),
+    deliveryReviewMeta: $("#delivery-review-meta"),
+    deliveryReviewOpen: $("#delivery-review-open"),
+    timelinePreviewEmpty: $("#timeline-preview-empty"),
+    directCanvasShell: $("#direct-canvas-shell"),
+    directCanvasSpace: $("#direct-canvas-space"),
+    directCanvasVideo: $("#direct-canvas-video"),
+    directCanvasImage: $("#direct-canvas-image"),
+    directCanvasLayerPreview: $("#direct-canvas-layer-preview"),
+    directSelectionBox: $("#direct-selection-box"),
+    directSelectionName: $("#direct-selection-name"),
+    canvasMicroInspector: $("#canvas-micro-inspector"),
+    directGuideX: $("#direct-guide-x"),
+    directGuideY: $("#direct-guide-y"),
+    segmentWorkspace: $("#segment-workspace"),
+    segmentTitle: $("#segment-title"),
+    segmentPresence: $("#segment-presence"),
+    segmentWindowBtn: $("#segment-window-btn"),
+    segmentSaveBtn: $("#segment-save-btn"),
+    segmentBack: $("#segment-back"),
+    segmentCanvas: $("#segment-canvas"),
+    segmentCanvasObject: $("#segment-canvas-object"),
+    segmentCanvasLabel: $("#segment-canvas-label"),
+    segmentCanvasKind: $("#segment-canvas-kind"),
+    segmentSelectionReadout: $("#segment-selection-readout"),
+    segmentLayers: $("#segment-layers"),
+    segmentStates: $("#segment-states"),
+    segmentStateCount: $("#segment-state-count"),
+    segmentStateAdd: $("#segment-state-add"),
+    segmentStateCopy: $("#segment-state-copy"),
+    segmentStateDelete: $("#segment-state-delete"),
+    segmentStateUp: $("#segment-state-up"),
+    segmentStateDown: $("#segment-state-down"),
+    segmentRevisionLabel: $("#segment-revision-label"),
+    segmentPropertiesForm: $("#segment-properties-form"),
+    segmentStateVisibility: $("#segment-state-visibility"),
+    segmentStateVisibilityList: $("#segment-state-visibility-list"),
+    segmentInnerTimeline: $("#segment-inner-timeline"),
+    segmentAgentNote: $("#segment-agent-note"),
     mediaLibraryGrid: $("#media-library-grid"),
     libraryRefreshBtn: $("#library-refresh-btn"),
+    libraryRoughcutBtn: $("#library-roughcut-btn"),
     libraryAnnotateBtn: $("#library-annotate-btn"),
+    roughcutJobStatus: $("#roughcut-job-status"),
     uploadInput: $("#upload-input"),
     uploadBtn: $("#upload-btn"),
     promptInput: $("#prompt-input"),
-    voiceInputBtn: $("#voice-input-btn"),
     voiceInputStatus: $("#voice-input-status"),
+    skillSpaceSelection: $("#skill-space-selection"),
+    composerContext: $("#composer-context"),
     sendBtn: $("#send-btn"),
     inputShell: $("#input-shell"),
     sandboxBtn: $("#sandbox-toggle-btn"),
@@ -57,21 +171,93 @@
     planBar: $("#plan-bar"),
     askDock: $("#ask-dock"),
     slashMenu: $("#slash-menu"),
-    historyToggleBtn: $("#history-toggle-btn"),
-    historyDrawer: $("#history-drawer"),
-    historyDrawerBody: $("#history-drawer-body"),
+    appMain: $("#app-main"),
+    railHistory: $("#rail-history"),
+    chatScrollBottom: $("#chat-scroll-bottom"),
+    productionStrip: $("#production-strip"),
+    productionState: $("#production-state-label"),
+    productionRevision: $("#production-revision-label"),
+    productionBudget: $("#production-budget-label"),
+    productionMix: $("#production-mix-label"),
+    productionBlockers: $("#production-blockers"),
+    productionReview: $("#production-review"),
+    reviewStartSec: $("#review-start-sec"),
+    reviewEndSec: $("#review-end-sec"),
+    reviewNote: $("#review-note"),
+    reviewWatchedFullVideo: $("#review-watched-full-video"),
+    reviewCreativeChecks: [...document.querySelectorAll("[data-review-dimension]")],
+    requestChangesBtn: $("#request-changes-btn"),
+    approveProductionBtn: $("#approve-production-btn"),
+    productionReviewStatus: $("#production-review-status"),
   };
+
+  function applySurfaceIdentity() {
+    const brandTitle = document.querySelector("#app-header .brand h1");
+    if (brandTitle) brandTitle.textContent = surfaceProductName;
+    const authTitle = document.getElementById("auth-title");
+    if (authTitle) authTitle.textContent = `登录 ${surfaceProductName}`;
+    if (!isQuantaSurface) return;
+    document.querySelectorAll('img[src="/video/lumeri-mark.svg"]').forEach((image) => {
+      image.src = "/video/quanta-mark.svg";
+      image.alt = "Lumeri Quanta";
+    });
+    const favicon = document.querySelector('link[rel~="icon"]');
+    if (favicon) favicon.href = "/video/quanta-favicon.svg";
+    const previewLabel = document.querySelector("#preview-module-title .label");
+    const previewMeta = document.querySelector('[data-workspace-module="preview"] .workspace-module-meta');
+    const emptyTitle = document.querySelector("#empty-state .empty-title");
+    const emptySub = document.querySelector("#empty-state .empty-sub");
+    if (previewLabel) previewLabel.textContent = "画布";
+    if (previewMeta) previewMeta.textContent = "离散状态";
+    if (emptyTitle) emptyTitle.textContent = "开始构建离散视频";
+    if (emptySub) emptySub.textContent = "在右侧描述内容、状态与交互";
+    if (els.timelinePreviewEmpty) els.timelinePreviewEmpty.textContent = "当前 Project 暂无离散状态";
+    if (els.promptInput) els.promptInput.placeholder = "描述你想要的离散视频，或输入 / 唤起命令…";
+    const suggestions = [
+      ["起草一个三段式产品讲解，每段分两步出现", "三段式产品讲解"],
+      ["把当前内容整理为可逐步展开的离散状态", "整理为离散状态"],
+      ["为每个状态补齐停留时间和前进方式", "补齐状态节奏"],
+      ["检查状态树里是否有不可达或空白状态", "检查状态树"],
+    ];
+    document.querySelectorAll("#rail-empty .suggest-chip").forEach((chip, index) => {
+      if (!suggestions[index]) return;
+      chip.dataset.suggest = suggestions[index][0];
+      chip.textContent = suggestions[index][1];
+    });
+  }
+  applySurfaceIdentity();
 
   /** @typedef {{ asset_id: string, kind: string, summary: string, source: "user"|"tool", final?: boolean }} AssetEntry */
 
   const state = {
     sessionId: null,
+    projectId: null,
+    projectName: null,
+    projectSourceRoot: null,
+    runId: null,
+    projectRevision: 0,
+    productionRevision: 0,
+    productionState: null,
+    productionOutcome: null,
+    productionBudget: null,
+    productionBlockers: [],
+    productionDelivery: null,
+    productionAcceptance: null,
+    productionAssetMix: null,
+    chatOnly: false,
     eventSource: null,
     turnInProgress: false,
     turns: [],                  // array of TurnRecord
     currentTurn: null,          // TurnRecord (also last in turns[])
     selectedClipId: null,       // direct-edit: currently selected clip
     ptDrag: null,               // direct-edit: active drag/trim gesture
+    directEditPending: false,   // one serialized Project edit at a time
+    canvasEdit: null,           // selected media geometry + active local gesture
+    lumenFrameCanvas: null,     // canonical LumenFrame canvas/layer metadata
+    selectedLumenLayerId: null, // direct-edit: selected top-level LumenFrame layer
+    lumenFrameFetchInFlight: false,
+    lumenFrameRequestedFrame: null,
+    lumenFrameForceRefreshPending: false,
     /** @type {AssetEntry[]} */
     assets: [],
     /** @type {string[]} */
@@ -79,29 +265,179 @@
     uploadStatus: null,
     lastEventId: null,
     reconnectTimer: null,
+    serverInstanceId: null,
+    recoveringSession: false,
     projectTimeline: null,      // fetched from /sessions/{id}/timeline
+    projectQuanta: null,        // fetched from /sessions/{id}/quanta
+    selectedQuantaStateId: null,
     timelinePollTimer: null,
     mediaLibrary: [],
+    sessionNonMediaAssets: [],
+    librarySection: "media",
+    libraryFocusName: "",
     mediaAnnotations: new Map(), // media-library asset_id -> annotations[]
+    roughcutManifests: new Map(), // media-library asset_id -> persisted review manifest
+    roughcutJob: null,
+    roughcutPollTimer: null,
     mediaLibraryStatus: "idle",
+    skillCloudArtifacts: [],
+    skillCloudStatus: "idle",
+    _followChatBottom: true,    // false while the creator is reading above
     planMode: false,            // mirrors the backend per-session flag
     planReady: false,           // a turn completed while planning → offer approval
     pendingAsk: null,           // {question_id, question} while elicit awaits
     sessionTitle: null,         // auto-generated title
+    activeHistoryId: null,      // selected legacy/chat-only history snapshot
     userMessageCount: 0,        // user message counter for auto-title triggers
     stopPending: false,
     // Background shell jobs (run_shell run_in_background=true), keyed by
     // job_id: {job_id, status, summary, exit_code, elapsed_sec, output_tail,
     // _killing}. Fed by background_task_update SSE + GET /sessions/{id} tasks.
     backgroundTasks: new Map(),
+    segmentWorkspace: {
+      open: false,
+      clipId: null,
+      segmentRef: null,
+      revision: 0,
+      projectRevision: 0,
+      document: null,
+      selectedEntityRef: null,
+      selectedStateId: null,
+      touched: new Set(),
+      pending: false,
+      saved: false,
+      clientInstanceId: (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function")
+        ? globalThis.crypto.randomUUID() : `client-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      channel: null,
+      popup: isSegmentWindow,
+    },
   };
 
-  function newTurn(userMessage) {
+  // Skill Space choices are isolated by runtime session. Switching Projects
+  // can restore that session's explicit choices, but never imports another
+  // session's capabilities into the active prompt.
+  const skillSpaceSelections = new Map();
+  const composerContextSelections = new Map();
+
+  function normalizeSkillSpaceRefs(value) {
+    if (!Array.isArray(value)) return [];
+    const seen = new Set();
+    return value.slice(0, 12).flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const kind = String(item.kind || "").trim().toLowerCase();
+      const id = String(item.id || "").trim();
+      const version = String(item.version || "").trim();
+      const contentSha256 = String(item.content_sha256 || "").trim().toLowerCase();
+      const key = `${kind}:${id}@${version}:${contentSha256}`;
+      if (!["skill", "workflow"].includes(kind) || !id || !version || seen.has(key)) return [];
+      seen.add(key);
+      return [{
+        kind,
+        id,
+        version,
+        title: String(item.title || id).trim().slice(0, 120),
+        description: String(item.description || "").trim().slice(0, 500),
+        publisher: String(item.publisher || "").trim().slice(0, 120),
+        visibility: String(item.visibility || "private").trim().toLowerCase(),
+        access: String(item.access || "owned").trim().toLowerCase(),
+        content_sha256: /^[a-f0-9]{64}$/.test(contentSha256) ? contentSha256 : "",
+      }];
+    });
+  }
+
+  function skillSpaceKey(item) {
+    return `${item.kind}:${item.id}@${item.version}:${item.content_sha256 || ""}`;
+  }
+
+  function selectedSkillSpaceArtifacts() {
+    if (!state.sessionId) return [];
+    return normalizeSkillSpaceRefs([...(skillSpaceSelections.get(state.sessionId)?.values() || [])]);
+  }
+
+  function skillSpaceAgentMessage(message, refs) {
+    const selected = normalizeSkillSpaceRefs(refs);
+    if (!selected.length) return message;
+    const lines = selected.map((item) => (
+      `- ${item.kind}:${item.id}@${item.version}`
+      + (item.content_sha256 ? ` content_sha256=${item.content_sha256}` : "")
+      + ` title=${JSON.stringify(item.title)}`
+    ));
+    return `${message}\n\n[Skill Space · this session only]\n${lines.join("\n")}\nLoad each exact selection with load_cloud_guide before applying it.`;
+  }
+
+  const COMPOSER_CONTEXT_KINDS = new Set(["timeline_clip", "canvas_layer", "outline_scene", "outline_shot"]);
+
+  function normalizeComposerContextRefs(value) {
+    if (!Array.isArray(value)) return [];
+    const seen = new Set();
+    return value.slice(0, 12).flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const kind = String(item.kind || "").trim().toLowerCase();
+      const id = String(item.id || "").trim().slice(0, 160);
+      const key = `${kind}:${id}`;
+      const safeId = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
+      if (!COMPOSER_CONTEXT_KINDS.has(kind) || !safeId.test(id) || seen.has(key)) return [];
+      seen.add(key);
+      const ref = {
+        kind,
+        id,
+        label: String(item.label || id).trim().slice(0, 160),
+      };
+      for (const field of ["asset_id", "track_id", "scene_id", "layer_type"]) {
+        const safe = String(item[field] || "").trim().slice(0, 160);
+        if (safeId.test(safe)) ref[field] = safe;
+      }
+      const surface = String(item.surface || "").trim().toLowerCase();
+      if (["timeline", "preview", "outline"].includes(surface)) ref.surface = surface;
+      for (const field of ["start", "duration", "frame"]) {
+        const number = Number(item[field]);
+        if (Number.isFinite(number) && number >= 0) ref[field] = Number(number.toFixed(6));
+      }
+      return [ref];
+    });
+  }
+
+  function composerContextKey(item) {
+    return `${item.kind}:${item.id}`;
+  }
+
+  function selectedComposerContextRefs() {
+    if (!state.sessionId) return [];
+    return normalizeComposerContextRefs([...(composerContextSelections.get(state.sessionId)?.values() || [])]);
+  }
+
+  function composerAgentMessage(message, skillRefs, contextRefs) {
+    const withSkills = skillSpaceAgentMessage(message, skillRefs);
+    const selected = normalizeComposerContextRefs(contextRefs);
+    if (!selected.length) return withSkills;
+    const lines = selected.map((item) => {
+      const details = ["asset_id", "track_id", "scene_id", "layer_type", "surface", "start", "duration", "frame"]
+        .filter((field) => item[field] !== undefined)
+        .map((field) => `${field}=${JSON.stringify(item[field])}`)
+        .join(" ");
+      return `- kind=${item.kind} ref=${JSON.stringify(item.id)} label=${JSON.stringify(item.label)}${details ? ` ${details}` : ""}`;
+    });
+    return `${withSkills}\n\n[Workspace context · current Project/session only]\n${lines.join("\n")}\nResolve only these exact references from the current Project state. Do not infer or import context from other sessions or the shared asset library.`;
+  }
+
+  function makeClientTurnId() {
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    return `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  }
+
+  function newTurn(userMessage, startedAt = Date.now(), skillSpace = [], workspaceContext = []) {
+    const sentAt = Number(startedAt);
     return {
       userMessage,
+      skillSpace: normalizeSkillSpaceRefs(skillSpace),
+      workspaceContext: normalizeComposerContextRefs(workspaceContext),
+      clientTurnId: makeClientTurnId(),
+      startedAt: Number.isFinite(sentAt) && sentAt > 0 ? sentAt : Date.now(),
+      completedAt: null,
       assistantText: "",
-      pendingAssistantText: "", // held until the host knows it is a final reply
+      pendingAssistantText: "", // canonical text buffer; safe rounds may also render live
       streaming: false,
+      streamRetryText: "",
       toolCalls: new Map(),     // call_id -> ToolCallState
       orderedCallIds: [],
       guidance: [],             // user steering messages inside this same turn
@@ -261,171 +597,7 @@
     return "active";
   }
 
-  // ── Markdown renderer ───────────────────────────────────────────────
-
-  function renderMarkdown(src) {
-    if (!src) return "";
-    const text = String(src);
-
-    // Extract fenced code blocks before any other processing
-    const codeBlocks = [];
-    const withPlaceholders = text.replace(/^```(\w*)\n([\s\S]*?)^```/gm, (_, lang, code) => {
-      const idx = codeBlocks.length;
-      codeBlocks.push(`<pre class="md-code-block"><code class="lang-${escapeHTML(lang || "text")}">${escapeHTML(code.replace(/\n$/, ""))}</code></pre>`);
-      return `\x00CB${idx}\x00`;
-    });
-
-    // Split into block-level chunks by double newline
-    const blocks = withPlaceholders.split(/\n{2,}/);
-    const out = [];
-
-    for (let i = 0; i < blocks.length; i++) {
-      const block = blocks[i];
-
-      // Code block placeholder
-      if (/^\x00CB\d+\x00$/.test(block.trim())) {
-        out.push(codeBlocks[+block.trim().slice(3, -1)]);
-        continue;
-      }
-
-      // Heading
-      const hm = block.match(/^(#{1,6})\s+(.+)$/m);
-      if (hm && block.trim().startsWith("#")) {
-        const lvl = hm[1].length;
-        out.push(`<h${lvl} class="md-h">${mdInline(hm[2])}</h${lvl}>`);
-        continue;
-      }
-
-      // Horizontal rule
-      if (/^(\s*[-*_]){3,}\s*$/.test(block.trim())) {
-        out.push(`<hr class="md-hr">`);
-        continue;
-      }
-
-      // Blockquote
-      if (block.trim().startsWith(">")) {
-        const inner = block.replace(/^>\s?/gm, "");
-        out.push(`<blockquote class="md-blockquote">${renderMarkdown(inner)}</blockquote>`);
-        continue;
-      }
-
-      // Table
-      const tableLines = block.trim().split("\n");
-      if (tableLines.length >= 2 && tableLines[0].includes("|") && /^[\s|:-]+$/.test(tableLines[1])) {
-        out.push(mdTable(tableLines));
-        continue;
-      }
-
-      // Unordered list
-      if (/^[\t ]*[-*+]\s/.test(block.trim())) {
-        out.push(mdList(block, "ul"));
-        continue;
-      }
-
-      // Ordered list
-      if (/^[\t ]*\d+[.)]\s/.test(block.trim())) {
-        out.push(mdList(block, "ol"));
-        continue;
-      }
-
-      // Paragraph (may contain inline code block placeholders on their own line)
-      const lines = block.split("\n");
-      const paraLines = [];
-      for (const ln of lines) {
-        if (/^\x00CB\d+\x00$/.test(ln.trim())) {
-          if (paraLines.length) {
-            out.push(`<p>${mdInline(paraLines.join("\n"))}</p>`);
-            paraLines.length = 0;
-          }
-          out.push(codeBlocks[+ln.trim().slice(3, -1)]);
-        } else {
-          paraLines.push(ln);
-        }
-      }
-      if (paraLines.length) {
-        out.push(`<p>${mdInline(paraLines.join("\n"))}</p>`);
-      }
-    }
-    return out.join("\n");
-  }
-
-  function mdInline(s) {
-    let r = escapeHTML(s);
-    // Inline code (must come before bold/italic to avoid conflicts)
-    r = r.replace(/`([^`\n]+?)`/g, '<code class="md-inline-code">$1</code>');
-    // Entity references — before bold/italic so underscore-delimited IDs
-    // (v_001, s0_shot0) are not consumed by emphasis rules.
-    r = r.replace(/\b(v_\d+|img_\d+|aud_\d+|lot_\d+)\b/g,
-      '<span class="md-entity" data-entity-kind="asset" data-entity-id="$1" role="link" tabindex="0">$1</span>');
-    r = r.replace(/\b(clip_[a-f0-9]{8,16})\b/g,
-      '<span class="md-entity" data-entity-kind="clip" data-entity-id="$1" role="link" tabindex="0">$1</span>');
-    r = r.replace(/\b(s\d+_shot\d+)\b/g,
-      '<span class="md-entity" data-entity-kind="shot" data-entity-id="$1" role="link" tabindex="0">$1</span>');
-    r = r.replace(/\b(scene\d+)\b/g,
-      '<span class="md-entity" data-entity-kind="scene" data-entity-id="$1" role="link" tabindex="0">$1</span>');
-    // Images
-    r = r.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img class="md-img" alt="$1" src="$2">');
-    // Links
-    r = r.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a class="md-link" href="$2" target="_blank" rel="noopener">$1</a>');
-    // Bold + italic
-    r = r.replace(/\*\*\*(.+?)\*\*\*/g, "<strong><em>$1</em></strong>");
-    // Bold
-    r = r.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-    r = r.replace(/__(.+?)__/g, "<strong>$1</strong>");
-    // Italic
-    r = r.replace(/\*(.+?)\*/g, "<em>$1</em>");
-    r = r.replace(/_(.+?)_/g, "<em>$1</em>");
-    // Strikethrough
-    r = r.replace(/~~(.+?)~~/g, "<del>$1</del>");
-    // Line break (trailing double space or backslash)
-    r = r.replace(/  \n/g, "<br>");
-    r = r.replace(/\\\n/g, "<br>");
-    // Single newlines within a paragraph → <br>
-    r = r.replace(/\n/g, "<br>");
-    return r;
-  }
-
-  function mdList(block, tag) {
-    const lines = block.split("\n");
-    const items = [];
-    for (const ln of lines) {
-      const m = tag === "ul"
-        ? ln.match(/^[\t ]*[-*+]\s+(.*)/)
-        : ln.match(/^[\t ]*\d+[.)]\s+(.*)/);
-      if (m) items.push(`<li>${mdInline(m[1])}</li>`);
-      else if (items.length) {
-        items[items.length - 1] = items[items.length - 1].replace("</li>", `<br>${mdInline(ln.trim())}</li>`);
-      }
-    }
-    return `<${tag} class="md-list">${items.join("")}</${tag}>`;
-  }
-
-  function mdTable(lines) {
-    const parseRow = (ln) => ln.replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
-    const headers = parseRow(lines[0]);
-    const alignRow = parseRow(lines[1]);
-    const aligns = alignRow.map((c) => {
-      if (c.startsWith(":") && c.endsWith(":")) return "center";
-      if (c.endsWith(":")) return "right";
-      return "left";
-    });
-    let html = '<table class="md-table"><thead><tr>';
-    for (let i = 0; i < headers.length; i++) {
-      html += `<th style="text-align:${aligns[i] || "left"}">${mdInline(headers[i])}</th>`;
-    }
-    html += "</tr></thead><tbody>";
-    for (let r = 2; r < lines.length; r++) {
-      if (!lines[r].trim()) continue;
-      const cells = parseRow(lines[r]);
-      html += "<tr>";
-      for (let i = 0; i < headers.length; i++) {
-        html += `<td style="text-align:${aligns[i] || "left"}">${mdInline(cells[i] || "")}</td>`;
-      }
-      html += "</tr>";
-    }
-    html += "</tbody></table>";
-    return html;
-  }
+  const renderMarkdown = window.LumeriV3Markdown.createRenderer({ escapeHTML });
 
   function lastEventStorageKey(sessionId) {
     return `lumeri:v3:last-event:${sessionId}`;
@@ -454,32 +626,65 @@
     state.reconnectTimer = null;
   }
 
+  function syncComposerAction() {
+    const text = els.promptInput.value.trim();
+    const hasText = text.length > 0;
+    const hasContext = selectedComposerContextRefs().length > 0;
+    const shortcut = hasText ? parseSlashName(text) : null;
+    els.sendBtn.disabled = shortcut
+      ? false
+      : !state.sessionId || state.stopPending || state.recoveringSession;
+    els.sendBtn.classList.toggle("is-voice", !state.turnInProgress && !voiceInput.listening && !hasText && !hasContext);
+    els.sendBtn.classList.toggle("is-stop", state.turnInProgress && !hasText && !hasContext);
+    els.sendBtn.classList.toggle("is-listening", !!voiceInput.listening);
+    if (state.turnInProgress && !hasText && !hasContext && !voiceInput.listening) {
+      els.sendBtn.querySelector("use")?.setAttribute("href", "#i-stop-solid");
+      els.sendBtn.setAttribute("aria-label", "停止当前执行");
+      els.sendBtn.title = "停止当前执行";
+      els.sendBtn.disabled = state.stopPending;
+    } else if (voiceInput.listening) {
+      els.sendBtn.querySelector("use")?.setAttribute("href", "#i-mic");
+      els.sendBtn.setAttribute("aria-label", "停止语音输入");
+      els.sendBtn.title = "停止语音输入";
+      els.sendBtn.disabled = false;
+    } else if (hasText || hasContext) {
+      els.sendBtn.querySelector("use")?.setAttribute("href", "#i-send");
+      const label = shortcut ? "执行快捷指令" : state.turnInProgress ? "引导当前执行" : "发送";
+      els.sendBtn.setAttribute("aria-label", label);
+      els.sendBtn.title = label;
+    } else {
+      els.sendBtn.querySelector("use")?.setAttribute("href", "#i-mic");
+      els.sendBtn.setAttribute("aria-label", "语音输入");
+      els.sendBtn.title = "语音输入";
+    }
+  }
+
   function render() {
     els.sessionLabel.textContent = state.sessionTitle || state.sessionId || "—";
+    if (els.projectNameLabel) {
+      els.projectNameLabel.textContent = state.projectName || "Project";
+    }
+    syncProjectSidebarSelection();
     const busy = !state.sessionId || state.turnInProgress;
-    els.sendBtn.disabled = !state.sessionId;
     els.uploadBtn.disabled = busy;
     els.inputShell.classList.toggle("is-steering", state.turnInProgress);
     els.inputShell.classList.toggle("is-working", state.turnInProgress);
-    if (state.turnInProgress && !voiceInput.listening) {
-      els.voiceInputBtn.querySelector("use")?.setAttribute("href", "#i-pause");
-      els.voiceInputBtn.setAttribute("aria-label", "停止当前执行");
-      els.voiceInputBtn.title = "停止当前执行";
-      els.voiceInputBtn.disabled = state.stopPending;
-    } else if (!state.turnInProgress && !voiceInput.listening) {
-      els.voiceInputBtn.querySelector("use")?.setAttribute("href", "#i-mic");
-      els.voiceInputBtn.setAttribute("aria-label", "语音输入");
-      els.voiceInputBtn.title = "语音输入";
-      els.voiceInputBtn.disabled = false;
-    }
-    els.promptInput.placeholder = "描述你想要的视频，或输入 / 唤起命令…";
-    els.sendBtn.title = state.turnInProgress ? "引导当前执行" : "发送";
-    els.sendBtn.setAttribute("aria-label", state.turnInProgress ? "引导当前执行" : "发送");
-    document.querySelectorAll(".pt-action-btn, .pt-edit-btn").forEach((b) => { b.disabled = busy; });
+    renderSkillSpaceSelection();
+    renderComposerContext();
+    syncComposerAction();
+    els.promptInput.placeholder = isQuantaSurface
+      ? "描述你想要的离散视频，或输入 / 唤起命令…"
+      : "描述你想要的视频，或输入 / 唤起命令…";
+    document.querySelectorAll(".pt-action-btn").forEach((b) => { b.disabled = busy; });
+    document.querySelectorAll(".pt-edit-btn").forEach((b) => {
+      b.disabled = !state.sessionId || state.directEditPending;
+    });
     updateEditHint();   // selection-aware split/delete rule wins over the blanket disable above
 
     const railEmpty = document.getElementById("rail-empty");
-    if (!state.turns.length) {
+    const hasTimelineClips = !!state.projectTimeline?.tracks?.some((track) => (track.clips || []).length);
+    const hasSurfacePreview = isQuantaSurface ? quantaHasStates() : (!!currentTimelinePreview() || hasTimelineClips);
+    if (!state.turns.length && !hasSurfacePreview) {
       els.timeline.hidden = true;
       els.emptyState.hidden = false;
       if (railEmpty) railEmpty.hidden = false;
@@ -491,14 +696,159 @@
     }
 
     // 有素材就自动展开左侧时间轴抽屉（一次性，之后尊重用户手动开合）。
-    if (!state._drawerAutoShown && state.assets && state.assets.length > 0) {
+    if (!isQuantaSurface && !state._drawerAutoShown && state.assets && state.assets.length > 0) {
       state._drawerAutoShown = true;
       toggleDrawer(true);
     }
 
+    if (isQuantaSurface) renderQuantaCanvas();
+    else renderDeliveryReviewMaster();
     renderAssets();
     renderMediaLibrary();
+    renderProductionUi();
     renderPlanUi();
+    autoScrollChat();
+  }
+
+  const PRODUCTION_STATE_LABELS = {
+    created: "已创建",
+    preflight: "生产预检",
+    sourcing: "素材准备",
+    rough_cut: "粗剪",
+    sound_pass: "声音制作",
+    visual_pass: "视觉制作",
+    rendering: "正在渲染",
+    verifying: "正在质检",
+    ready_for_review: "等待你的审片",
+    revising: "按反馈返修",
+    accepted: "已确认可以发布",
+    blocked: "生产受阻",
+    cancelled: "已取消",
+    failed: "生产失败",
+  };
+
+  function budgetView(raw) {
+    const b = raw && typeof raw === "object" ? raw : {};
+    const limit = Number(b.limit_usd ?? b.max_usd ?? b.hard_cap_usd ?? b.budget_max_usd ?? 15);
+    const spent = Number(b.spent_usd ?? b.actual_usd ?? b.committed_usd ?? 0);
+    const reserved = Number(b.reserved_usd ?? b.pending_usd ?? 0);
+    return {
+      limit: Number.isFinite(limit) && limit > 0 ? limit : 15,
+      spent: Number.isFinite(spent) && spent >= 0 ? spent : 0,
+      reserved: Number.isFinite(reserved) && reserved >= 0 ? reserved : 0,
+    };
+  }
+
+  function applyProductionSnapshot(data) {
+    if (!data || typeof data !== "object") return;
+    if (data.project_id !== undefined) state.projectId = data.project_id || null;
+    if (data.run_id !== undefined) state.runId = data.run_id || null;
+    if (data.project_revision !== undefined) {
+      const revision = Number(data.project_revision);
+      if (Number.isFinite(revision) && revision >= 0) state.projectRevision = Math.floor(revision);
+    }
+    if (data.production_revision !== undefined) {
+      const revision = Number(data.production_revision);
+      if (Number.isFinite(revision) && revision >= 0) state.productionRevision = Math.floor(revision);
+    }
+    if (data.production_state !== undefined) state.productionState = data.production_state || null;
+    if (data.outcome !== undefined) state.productionOutcome = data.outcome || null;
+    if (data.budget !== undefined) state.productionBudget = data.budget || null;
+    if (data.budget_ledger !== undefined) state.productionBudget = data.budget_ledger || null;
+    if (Array.isArray(data.blockers)) state.productionBlockers = data.blockers;
+    if (data.delivery !== undefined) state.productionDelivery = data.delivery || null;
+    if (data.acceptance !== undefined) state.productionAcceptance = data.acceptance || null;
+    if (data.asset_mix !== undefined) state.productionAssetMix = data.asset_mix || null;
+    if (data.source_mix !== undefined) state.productionAssetMix = data.source_mix || null;
+    if (data.chat_only !== undefined) state.chatOnly = !!data.chat_only;
+  }
+
+  function renderProductionUi() {
+    if (!els.productionStrip) return;
+    const visible = !!(state.projectId || state.runId || state.chatOnly);
+    els.productionStrip.hidden = !visible;
+    if (!visible) return;
+
+    const pState = String(state.productionState || "created");
+    els.productionStrip.classList.toggle("is-blocked", ["blocked", "failed"].includes(pState));
+    els.productionStrip.classList.toggle("is-accepted", pState === "accepted");
+
+    if (state.chatOnly && !state.projectId) {
+      els.productionState.textContent = "仅聊天记录 · 工程未保存";
+      els.productionRevision.textContent = "—";
+      els.productionBudget.textContent = "无生产账本";
+      els.productionMix.hidden = true;
+      els.productionBlockers.hidden = false;
+      els.productionBlockers.innerHTML = "这是一条旧记录，只能恢复对话，不能伪装成已经恢复的工程。";
+      els.productionReview.hidden = true;
+      els.productionStrip.classList.remove("is-warning", "is-accepted");
+      return;
+    }
+
+    els.productionState.textContent = PRODUCTION_STATE_LABELS[pState] || pState;
+    els.productionRevision.textContent = `r${state.projectRevision || 0}`;
+    const b = budgetView(state.productionBudget);
+    els.productionBudget.textContent = b.reserved > 0
+      ? `$${b.spent.toFixed(2)} + $${b.reserved.toFixed(2)}预留 / $${b.limit.toFixed(2)}`
+      : `$${b.spent.toFixed(2)} / $${b.limit.toFixed(2)}`;
+    els.productionStrip.classList.toggle("is-warning", b.spent + b.reserved >= Math.min(12, b.limit));
+
+    const mix = state.productionAssetMix;
+    if (mix && typeof mix === "object" && Object.keys(mix).length) {
+      const labels = {
+        total: "素材",
+        video: "视频",
+        image: "图片",
+        audio: "音频",
+        lottie: "动效",
+        external: "外部/公开",
+        generated: "生成",
+        generated_video: "生成视频",
+        generated_image: "生成图片",
+        generated_audio: "生成音频",
+        derived: "本地派生",
+        missing: "缺失",
+      };
+      const order = ["total", "video", "image", "audio", "external", "generated_video", "generated_image", "generated_audio", "derived", "missing"];
+      const parts = order
+        .filter((kind) => kind === "generated_video" ? mix[kind] !== undefined : Number(mix[kind]) > 0)
+        .map((kind) => `${labels[kind]} ${Number(mix[kind])}`);
+      if (mix.provenance_complete === true) parts.push("来源完整");
+      else if (mix.provenance_complete === false) parts.push("来源待补齐");
+      els.productionMix.textContent = parts.join(" · ");
+      els.productionMix.hidden = !parts.length;
+    } else {
+      const counts = new Map();
+      for (const asset of state.assets) {
+        const kind = asset.source_class || asset.origin || asset.source || "素材";
+        counts.set(kind, (counts.get(kind) || 0) + 1);
+      }
+      const parts = [...counts].map(([kind, count]) => `${kind} ${count}`);
+      els.productionMix.textContent = parts.join(" · ");
+      els.productionMix.hidden = !parts.length;
+    }
+
+    const blockers = (state.productionBlockers || []).slice(0, 3).map((item) => {
+      if (typeof item === "string") return item;
+      return String(item?.message || item?.summary || item?.code || "未说明的阻塞项");
+    });
+    els.productionBlockers.hidden = !blockers.length;
+    els.productionBlockers.innerHTML = blockers.length
+      ? `<strong>阻塞：</strong>${blockers.map(escapeHTML).join("；")}`
+      : "";
+
+    els.productionReview.hidden = pState !== "ready_for_review";
+    const reviewBusy = els.productionReview.dataset.submitting === "1";
+    const deliveryReady = !!currentReviewMaster();
+    els.requestChangesBtn.disabled = reviewBusy;
+    els.approveProductionBtn.disabled = reviewBusy || !deliveryReady;
+    if (pState === "ready_for_review" && !deliveryReady && !reviewBusy) {
+      els.productionReviewStatus.dataset.autoStatus = "delivery-missing";
+      els.productionReviewStatus.textContent = "正式审片母版不可用，已禁止确认发布。";
+    } else if (els.productionReviewStatus.dataset.autoStatus === "delivery-missing") {
+      delete els.productionReviewStatus.dataset.autoStatus;
+      els.productionReviewStatus.textContent = "";
+    }
   }
 
   // Plan-mode toggle button + hint/approval bar. Signature-guarded like
@@ -540,12 +890,26 @@
   function renderTurn(turn, idx) {
     const callsHtml = buildCallGroups(turn).map(renderCallGroup).join("");
     const bannersHtml = turn.banners.map(renderBanner).join("");
+    const isActiveTurn = state.turnInProgress && turn === state.currentTurn;
     const guidanceHtml = (turn.guidance || []).map((text) =>
-      `<div class="turn-guidance"><span class="turn-guidance-label">引导</span>${escapeHTML(text)}</div>`
+      `<div class="turn-guidance${isActiveTurn ? " is-active" : ""}" role="status" aria-label="Lumeri 进度反馈">
+        <span class="turn-guidance-mark" aria-hidden="true"></span>${escapeHTML(text)}
+      </div>`
     ).join("");
     const hasAssistant = turn.assistantText || turn.streaming;
     const assistantHtml = hasAssistant
       ? `<div class="assistant-bubble${turn.streaming ? " streaming" : ""}">${renderMarkdown(turn.assistantText)}</div>`
+      : "";
+    const shouldShowMark = isActiveTurn || hasAssistant;
+    const workElapsed = formatWorkElapsed(turn, isActiveTurn);
+    const streamRetry = isActiveTurn && turn.streamRetryText
+      ? ` · ${escapeHTML(turn.streamRetryText)}`
+      : "";
+    const assistantMarkHtml = shouldShowMark
+      ? `<div class="assistant-workmark${isActiveTurn ? " is-active" : " is-static"}"${isActiveTurn ? ' role="status" aria-live="polite" aria-label="Lumeri 正在生成"' : ' aria-hidden="true"'}>
+          <img src="/video/${isActiveTurn ? "lumeri-working.svg" : "lumeri-working-static.svg"}" alt="" aria-hidden="true" />
+          ${isActiveTurn ? "Working" : ""}${streamRetry}${workElapsed ? ` <span>${escapeHTML(workElapsed)}</span>` : ""}
+        </div>`
       : "";
     const actionsHtml = (hasAssistant && turn.assistantText && !turn.streaming)
       ? `<div class="assistant-actions">
@@ -557,13 +921,43 @@
           </button>
         </div>`
       : "";
+    // Retract only makes sense for the newest settled turn: the backend
+    // anchors on its last real user message, so older bubbles can't match.
+    const canRetract = idx === state.turns.length - 1 && !state.turnInProgress;
+    const sentTime = formatSentTime(turn);
+    const sentTimeTitle = formatSentTime(turn, { full: true });
+    const userActionsHtml = `<div class="user-actions">
+          ${sentTime ? `<time class="message-sent-time" datetime="${new Date(turn.startedAt).toISOString()}" title="发送于 ${escapeHTML(sentTimeTitle)}">${escapeHTML(sentTime)}</time>` : ""}
+          <button type="button" class="assistant-action-btn" data-copy-user="${idx}" title="复制">
+            <svg aria-hidden="true"><use href="#i-copy"/></svg>
+          </button>
+          ${canRetract ? `<button type="button" class="assistant-action-btn" data-retract-user="${idx}" title="撤回">
+            <svg aria-hidden="true"><use href="#i-undo"/></svg>
+          </button>` : ""}
+        </div>`;
+    const skillSpaceHtml = normalizeSkillSpaceRefs(turn.skillSpace).length
+      ? `<div class="turn-skill-space" aria-label="此消息使用的 Skill Space 能力">
+          ${normalizeSkillSpaceRefs(turn.skillSpace).map((item) => `
+            <span><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-spark"/></svg>${escapeHTML(item.title)}</span>`).join("")}
+        </div>`
+      : "";
+    const workspaceContextHtml = normalizeComposerContextRefs(turn.workspaceContext).length
+      ? `<div class="turn-workspace-context" aria-label="此消息引用的当前工程内容">
+          ${normalizeComposerContextRefs(turn.workspaceContext).map((item) => `
+            <span>${escapeHTML(composerContextKindLabel(item.kind))} · ${escapeHTML(item.label)}</span>`).join("")}
+        </div>`
+      : "";
     return `
       ${idx ? '<div class="turn-divider" role="separator"></div>' : ""}
       <div class="user-bubble">${renderMarkdown(turn.userMessage)}</div>
+      ${skillSpaceHtml}
+      ${workspaceContextHtml}
+      ${userActionsHtml}
       ${guidanceHtml}
       ${callsHtml}
       ${bannersHtml}
       ${assistantHtml}
+      ${assistantMarkHtml}
       ${actionsHtml}
     `;
   }
@@ -587,12 +981,17 @@
       const activityText = safeActivityText(tc.activityText);
       const progressReport = safeProgressReport(tc.progressReport);
       const previous = groups[groups.length - 1];
-      if (previous?.category === category) {
+      // The model-authored activity text names the purpose of a batch. Use it
+      // as the archive key so one purpose can contain reading, searching,
+      // editing, and execution steps without being split by tool category.
+      // Calls without a safe purpose retain the old category fallback.
+      const key = activityText ? `purpose:${activityText}` : `category:${category}`;
+      if (previous?.key === key) {
         previous.calls.push(tc);
         if (!previous.progressReport && progressReport) previous.progressReport = progressReport;
         if (!previous.activityText && activityText) previous.activityText = activityText;
       } else {
-        groups.push({ calls: [tc], category, activityText, progressReport });
+        groups.push({ calls: [tc], category, activityText, progressReport, key });
       }
     }
     return groups;
@@ -602,16 +1001,39 @@
     const last = group.calls[group.calls.length - 1];
     const progressReport = safeProgressReport(group.progressReport);
     const reportHtml = progressReport
-      ? `<div class="midturn-report" aria-label="Lumeri 阶段汇报">
-          <span class="midturn-report-label">Lumeri</span>
+      ? `<div class="midturn-report" aria-label="阶段汇报">
           <div>${renderMarkdown(progressReport)}</div>
         </div>`
       : "";
-    return reportHtml + renderToolCall({
+    const groupedCall = {
       ...last,
       activityText: group.activityText || last.activityText,
       status: callGroupStatus(group.calls),
-    });
+    };
+    if (group.calls.length === 1) {
+      return reportHtml + renderToolCall(groupedCall);
+    }
+
+    const label = activityLabel(groupedCall);
+    const phase = activityPhase(groupedCall.status);
+    const category = group.category || toolCategory(last.tool_name);
+    const iconId = CATEGORY_ICON[category] || "i-gear";
+    const open = phase === "active" || phase === "attention" || phase === "waiting";
+    const detailHtml = group.calls.map((tc) => renderToolCall({
+      ...tc,
+      // The leader owns the purpose summary. Children describe only their
+      // high-level kind and status, keeping tool names and arguments private.
+      activityText: "",
+    })).join("");
+    return `${reportHtml}
+      <details class="activity-archive activity-archive--${phase}"${open ? " open" : ""}>
+        <summary class="activity-archive-head" aria-label="${escapeHTML(label)}">
+          <svg class="activity-icon" aria-hidden="true"><use href="#${iconId}"/></svg>
+          <span class="activity-desc">${escapeHTML(label)}</span>
+          <span class="activity-archive-count">${group.calls.length} 项</span>
+        </summary>
+        <div class="activity-archive-items">${detailHtml}</div>
+      </details>`;
   }
 
   // Quanta pager links are the ONE user entry point surfaced from a tool
@@ -646,91 +1068,180 @@
   }
 
   function renderBanner(banner) {
-    const cls = banner.kind === "budget" ? "banner-budget"
-              : banner.kind === "turn_error" ? "banner-turn-error"
-              : banner.kind === "plan" ? "banner-plan"
-              : banner.kind === "info" ? "banner-info"
-              : "banner-unknown";
-    return `<div class="banner ${cls}">${escapeHTML(banner.text)}</div>`;
+    // This is host copy, not Lumeri-authored conversation. Source alone is
+    // enough to distinguish it: calm blue text, with no severity container.
+    return `<div class="system-message" data-system-kind="${escapeHTML(banner.kind)}">${escapeHTML(banner.text)}</div>`;
   }
 
   function renderAssets() {
-    // Guard: only touch the DOM when the asset set actually changed. render() runs
-    // on every SSE event (see es.onmessage) and every 3s timeline poll; without
-    // this guard each call reset assetGrid.innerHTML, destroying and recreating
-    // every <video>/<audio>/<img> and forcing the browser to re-fetch each
-    // /sessions/{id}/assets/{aid}. While a turn streamed that was several
-    // re-fetches per second per asset — the "endless /assets/v_002 requests".
-    const sig = !state.assets.length
-      ? "empty"
-      : state.sessionId + "|" + state.assets.map((a) =>
-          `${a.asset_id}:${a.kind}:${a.final ? 1 : 0}:${a.source}:${a.summary || ""}`
-        ).join(",");
-    if (sig === state._assetsSig) return;
-    state._assetsSig = sig;
+    // The preview is a timeline monitor, never an asset browser. Source media,
+    // extracted frames and intermediate outputs belong in the Library only.
+    if (state._assetsSig === "timeline-preview-only") return;
+    state._assetsSig = "timeline-preview-only";
+    els.assetGrid.innerHTML = "";
+    els.assetGrid.hidden = true;
+  }
 
-    if (!state.assets.length) {
-      els.assetGrid.innerHTML = "";
-      return;
+  const MEDIA_LIBRARY_KINDS = new Set(["video", "image", "audio", "lottie"]);
+  const NON_MEDIA_ASSET_EXTENSIONS = new Set([
+    "svg", "pdf", "md", "txt", "csv", "doc", "docx", "ppt", "pptx",
+    "xls", "xlsx", "ttf", "otf", "woff", "woff2", "zip", "3mf", "stl",
+    "obj", "glb", "gltf",
+  ]);
+
+  function isTesterManagedWorkspace() {
+    return document.documentElement.dataset.lumeriTesterManaged === "true";
+  }
+
+  function testerSessionLibraryAssets() {
+    if (!isTesterManagedWorkspace() || !state.sessionId) return [];
+    return state.assets
+      .filter((asset) => asset?.asset_id)
+      .map((asset) => {
+        const assetId = String(asset.asset_id);
+        const mediaKind = String(asset.kind || inferKindFromAssetId(assetId));
+        const previewSrc = `/sessions/${encodeURIComponent(state.sessionId)}/assets/${encodeURIComponent(assetId)}`;
+        return {
+          ...asset,
+          asset_id: assetId,
+          name: String(asset.summary || assetId),
+          media_kind: mediaKind,
+          preview_src: previewSrc,
+          thumbnail_src: mediaKind === "image" ? previewSrc : "",
+          tester_session_asset: true,
+        };
+      });
+  }
+
+  function fileExtension(name) {
+    const match = String(name || "").toLowerCase().match(/\.([a-z0-9]+)$/);
+    return match ? match[1] : "";
+  }
+
+  function isMediaLibraryAsset(asset) {
+    return MEDIA_LIBRARY_KINDS.has(String(asset?.media_kind || ""));
+  }
+
+  function libraryAssetsForSection() {
+    const managedAssets = testerSessionLibraryAssets();
+    const libraryAssets = isTesterManagedWorkspace() ? managedAssets : state.mediaLibrary;
+    if (state.librarySection === "media") {
+      return libraryAssets.filter(isMediaLibraryAsset);
     }
-    els.assetGrid.innerHTML = state.assets.map((a) => {
-      const url = `/sessions/${state.sessionId}/assets/${a.asset_id}`;
-      const playerHtml = a.kind === "image"
-        ? `<img src="${url}" alt="${a.asset_id}" />`
-        : a.kind === "audio"
-          ? `<audio src="${url}" controls preload="metadata"></audio>`
-          : `<div class="asset-player"><video src="${url}" controls preload="metadata"${a.final ? " autoplay muted" : ""}></video>`
-            + `<button class="asset-play" type="button" aria-label="播放" title="播放">`
-            + `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5z"/></svg></button></div>`;
-      return `
-        <div class="asset-card${a.final ? " final" : ""}" data-asset-id="${a.asset_id}">
-          ${playerHtml}
-          <div class="asset-meta">
-            ${a.final ? `<svg class="asset-final" viewBox="0 0 24 24" role="img" aria-label="最终成片"><use href="#i-check-circle"/></svg>` : ""}
-            <span class="asset-id">${a.asset_id}</span> · ${escapeHTML(a.source)} · ${escapeHTML(a.summary || "")}
-          </div>
+    const byName = new Map();
+    if (!isTesterManagedWorkspace()) {
+      state.sessionNonMediaAssets.forEach((asset) => byName.set(String(asset.name || "").toLowerCase(), asset));
+    }
+    libraryAssets.filter((asset) => !isMediaLibraryAsset(asset)).forEach((asset) => {
+      byName.set(String(asset.name || "").toLowerCase(), asset);
+    });
+    return [...byName.values()];
+  }
+
+  function librarySectionsHtml() {
+    const media = state.librarySection === "media";
+    return `<div class="library-sections" role="tablist" aria-label="素材类型">
+      <button type="button" class="library-section${media ? " active" : ""}" role="tab" aria-selected="${media}" data-library-section="media">媒体素材</button>
+      <button type="button" class="library-section${media ? "" : " active"}" role="tab" aria-selected="${!media}" data-library-section="non-media">非媒体素材</button>
+    </div>`;
+  }
+
+  function syncLibrarySectionUi() {
+    document.querySelectorAll("[data-library-section]").forEach((button) => {
+      const active = button.dataset.librarySection === state.librarySection;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    const media = state.librarySection === "media";
+    if (els.libraryRoughcutBtn) els.libraryRoughcutBtn.hidden = !media;
+    if (els.libraryAnnotateBtn) els.libraryAnnotateBtn.hidden = !media;
+    document
+      .querySelectorAll('[data-workspace-module="library"] .workspace-module-meta')
+      .forEach((meta) => { meta.textContent = media ? "媒体素材" : "非媒体素材"; });
+  }
+
+  function formatLibraryFileSize(value) {
+    const bytes = Number(value || 0);
+    if (!Number.isFinite(bytes) || bytes <= 0) return "";
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  function renderNonMediaLibraryCards(assets) {
+    return assets.map((asset) => {
+      const assetId = String(asset.asset_id || asset.id || "");
+      const name = String(asset.name || "未命名文件");
+      const extension = fileExtension(name);
+      const previewSrc = String(asset.preview_src || "");
+      const selected = !!state.libraryFocusName && name.toLowerCase() === state.libraryFocusName.toLowerCase();
+      const thumb = extension === "svg" && previewSrc
+        ? `<img class="library-thumb library-file-thumb" src="${escapeHTML(previewSrc)}" alt="" loading="lazy" />`
+        : `<div class="library-thumb blank" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#i-file"/></svg></div>`;
+      const meta = [extension ? extension.toUpperCase() : "文件", formatLibraryFileSize(asset.file_size_bytes)]
+        .filter(Boolean).join(" · ");
+      return `<div class="library-card library-file-card${selected ? " selected" : ""}"
+          data-library-asset="${escapeHTML(assetId)}"
+          data-library-name="${escapeHTML(name)}"
+          ${selected ? 'aria-current="true"' : ""}
+          title="${escapeHTML(name)}">
+        ${thumb}
+        <div class="library-card-body">
+          <div class="library-title">${escapeHTML(name.replace(/\.[a-z0-9]+$/i, ""))}</div>
+          <div class="library-meta">${escapeHTML(meta)}</div>
         </div>
-      `;
+      </div>`;
     }).join("");
   }
 
-  // Centre play toggle on video cards. Delegated once — it survives the
-  // innerHTML swaps renderAssets does. Native controls stay for scrubbing.
-  els.assetGrid.addEventListener("click", (e) => {
-    const btn = e.target.closest(".asset-play");
-    if (!btn) return;
-    const video = btn.parentElement.querySelector("video");
-    if (!video) return;
-    if (video.paused || video.ended) { video.muted = false; video.play().catch(() => {}); }
-    else video.pause();
-  });
-  // media events don't bubble — capture phase keeps the overlay in sync
-  ["play", "pause", "ended"].forEach((ev) => {
-    els.assetGrid.addEventListener(ev, (e) => {
-      const wrap = e.target.closest ? e.target.closest(".asset-player") : null;
-      if (!wrap) return;
-      const playing = ev === "play";
-      wrap.classList.toggle("playing", playing);
-      const b = wrap.querySelector(".asset-play");
-      if (b) { b.setAttribute("aria-label", playing ? "暂停" : "播放"); b.title = playing ? "暂停" : "播放"; }
-    }, true);
-  });
+  function scrollFocusedLibraryAsset() {
+    if (!state.libraryFocusName) return;
+    window.requestAnimationFrame(() => {
+      const card = [...document.querySelectorAll("[data-library-name]")].find(
+        (item) => String(item.dataset.libraryName || "").toLowerCase() === state.libraryFocusName.toLowerCase()
+      );
+      card?.scrollIntoView({ block: "nearest" });
+    });
+  }
+
+  function openNonMediaLibraryLink(link) {
+    const href = String(link?.getAttribute("href") || "");
+    if (!href.startsWith("sandbox:")) return false;
+    const rawPath = decodeURIComponent(href.slice("sandbox:".length));
+    const name = rawPath.split("/").filter(Boolean).pop() || String(link.textContent || "");
+    if (!NON_MEDIA_ASSET_EXTENSIONS.has(fileExtension(name))) return false;
+    state.librarySection = "non-media";
+    state.libraryFocusName = name;
+    toggleTray(true)?.then(() => {
+      renderMediaLibrary();
+      if (stageTabs.includes("library")) refreshPanel("library");
+      scrollFocusedLibraryAsset();
+    });
+    return true;
+  }
 
   function renderMediaLibrary() {
     if (!els.mediaLibraryGrid) return;
+    syncLibrarySectionUi();
     if (state.mediaLibraryStatus === "loading") {
       els.mediaLibraryGrid.innerHTML = `<p class="placeholder">加载中…</p>`;
       return;
     }
-    if (state.mediaLibraryStatus === "signed-out") {
+    if (state.mediaLibraryStatus === "signed-out" && state.librarySection === "media") {
       els.mediaLibraryGrid.innerHTML = `<p class="placeholder">登录后可用</p>`;
       return;
     }
-    if (!state.mediaLibrary.length) {
-      els.mediaLibraryGrid.innerHTML = `<p class="placeholder">暂无素材</p>`;
+    const visibleAssets = libraryAssetsForSection();
+    if (!visibleAssets.length) {
+      els.mediaLibraryGrid.innerHTML = `<p class="placeholder">${state.librarySection === "media" ? "暂无媒体素材" : "暂无非媒体素材"}</p>`;
       return;
     }
-    els.mediaLibraryGrid.innerHTML = state.mediaLibrary.map((asset) => {
+    if (state.librarySection === "non-media") {
+      els.mediaLibraryGrid.innerHTML = renderNonMediaLibraryCards(visibleAssets);
+      scrollFocusedLibraryAsset();
+      return;
+    }
+    els.mediaLibraryGrid.innerHTML = visibleAssets.map((asset) => {
       const assetId = asset.asset_id || asset.id || "";
       const summary = asset.annotation_summary || {};
       const kind = asset.media_kind || "media";
@@ -742,6 +1253,7 @@
       const moreTags = allTags.length - shownTags.length;
       const markerCount = Number(summary.count || 0);
       const anns = state.mediaAnnotations.get(assetId) || [];
+      const roughcut = state.roughcutManifests.get(assetId);
       const annHtml = anns.length
         ? `<div class="annotation-list">${anns.map(renderAnnotation).join("")}</div>`
         : "";
@@ -763,15 +1275,18 @@
             <div class="library-title">${escapeHTML(title)}</div>
             <div class="library-meta">${escapeHTML(kindLabel)}${kind === "image" ? "" : (formatMediaDuration(asset.duration) ? " · " + escapeHTML(formatMediaDuration(asset.duration)) : "")}</div>
             ${tagsHtml}
-            <div class="library-card-actions">
+            ${asset.tester_session_asset ? "" : `<div class="library-card-actions">
+              ${kind === "video" || kind === "audio" ? `<button type="button" class="library-small-btn icon-btn" title="粗剪准备" aria-label="粗剪准备" data-library-roughcut="${escapeHTML(assetId)}"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-wand"/></svg></button>` : ""}
               <button type="button" class="library-small-btn icon-btn" title="标注" aria-label="标注" data-library-annotate="${escapeHTML(assetId)}"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-wand"/></svg></button>
-              <button type="button" class="library-small-btn icon-btn" title="标记" aria-label="标记" data-library-load="${escapeHTML(assetId)}"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-marker"/></svg></button>
-            </div>
+              <button type="button" class="library-small-btn icon-btn" title="复核" aria-label="复核" data-library-load="${escapeHTML(assetId)}"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-marker"/></svg></button>
+            </div>`}
             ${annHtml}
+            ${roughcut ? renderRoughcutReview(asset, roughcut) : ""}
           </div>
         </div>
       `;
     }).join("");
+    wireRoughcutControls(els.mediaLibraryGrid);
   }
 
   const LIBRARY_KIND_LABEL = { video: "视频", image: "图片", audio: "音频" };
@@ -821,7 +1336,135 @@
     return `${n.toFixed(1)}s`;
   }
 
+  function renderRoughcutReview(asset, manifest) {
+    const assetId = asset.asset_id || asset.id || "";
+    const take = manifest.take || {};
+    const takeLabel = take.user_decision === "select" || take.selected
+      ? "推荐主条"
+      : take.user_decision === "reject" ? "已排除" : `备选 · 第 ${take.rank || 1} 名`;
+    const suggestions = (manifest.cleanup_suggestions || []).map((item) => `
+      <div class="roughcut-row ${escapeHTML(item.review_status || "pending")}">
+        <button type="button" class="roughcut-time" data-roughcut-seek="${Number(item.start_sec || 0)}">${escapeHTML(formatSeconds(item.start_sec))}</button>
+        <span class="roughcut-copy">${escapeHTML(item.label || item.kind)}</span>
+        <span class="roughcut-review-actions">
+          <button type="button" data-roughcut-review="accept" data-roughcut-type="cleanup" data-roughcut-id="${escapeHTML(item.id)}" data-roughcut-asset="${escapeHTML(assetId)}">接受</button>
+          <button type="button" data-roughcut-review="reject" data-roughcut-type="cleanup" data-roughcut-id="${escapeHTML(item.id)}" data-roughcut-asset="${escapeHTML(assetId)}">保留</button>
+        </span>
+      </div>`).join("");
+    const segments = (manifest.transcript?.segments || []).map((segment) => `
+      <div class="roughcut-transcript-row">
+        <button type="button" class="roughcut-time" data-roughcut-seek="${Number(segment.start_sec || 0)}">${escapeHTML(formatSeconds(segment.start_sec))}</button>
+        <input type="text" value="${escapeHTML(segment.corrected_text || segment.text || "")}" aria-label="转写文本" data-roughcut-transcript-input="${escapeHTML(segment.id)}" />
+        <button type="button" data-roughcut-review="correct" data-roughcut-type="transcript" data-roughcut-id="${escapeHTML(segment.id)}" data-roughcut-asset="${escapeHTML(assetId)}">保存</button>
+      </div>`).join("");
+    const player = asset.media_kind === "audio"
+      ? `<audio class="roughcut-preview" src="${escapeHTML(asset.preview_src || "")}" controls preload="metadata"></audio>`
+      : `<video class="roughcut-preview" src="${escapeHTML(asset.preview_src || "")}" controls preload="metadata"></video>`;
+    return `
+      <section class="roughcut-review" aria-label="粗剪复核">
+        <div class="roughcut-summary"><strong>${escapeHTML(takeLabel)}</strong><span>质量 ${Math.round(Number(manifest.score || 0) * 100)}</span></div>
+        ${player}
+        <div class="roughcut-take-actions">
+          <button type="button" data-roughcut-review="select" data-roughcut-type="take" data-roughcut-id="take" data-roughcut-asset="${escapeHTML(assetId)}">选为主条</button>
+          <button type="button" data-roughcut-review="alternative" data-roughcut-type="take" data-roughcut-id="take" data-roughcut-asset="${escapeHTML(assetId)}">保留备选</button>
+          <button type="button" data-roughcut-review="reject" data-roughcut-type="take" data-roughcut-id="take" data-roughcut-asset="${escapeHTML(assetId)}">排除</button>
+        </div>
+        ${segments ? `<details class="roughcut-section"><summary>转写 · ${(manifest.transcript?.segments || []).length} 段</summary>${segments}</details>` : ""}
+        <details class="roughcut-section" ${suggestions ? "open" : ""}><summary>建议清理 · ${(manifest.cleanup_suggestions || []).length} 处</summary>${suggestions || `<p class="placeholder">未发现需要清理的停顿或口头禅</p>`}</details>
+      </section>`;
+  }
+
+  function wireRoughcutControls(root) {
+    if (!root) return;
+    root.querySelectorAll("[data-library-roughcut], [data-panel-lib-roughcut]").forEach((button) => {
+      button.onclick = (event) => {
+        event.stopPropagation();
+        const assetId = button.dataset.libraryRoughcut || button.dataset.panelLibRoughcut;
+        startRoughcutPreparation(assetId).catch((err) => {
+          state.errors.push(`粗剪准备失败: ${err.message}`);
+          render();
+        });
+      };
+    });
+    root.querySelectorAll("[data-library-load], [data-panel-lib-load]").forEach((button) => {
+      button.onclick = (event) => {
+        event.stopPropagation();
+        const assetId = button.dataset.libraryLoad || button.dataset.panelLibLoad;
+        Promise.all([loadMediaAnnotations(assetId), loadRoughcutManifest(assetId)]).then(() => refreshPanel("library")).catch((err) => {
+          state.errors.push(`复核加载失败: ${err.message}`);
+          render();
+        });
+      };
+    });
+    root.querySelectorAll("[data-roughcut-review]").forEach((button) => {
+      button.onclick = (event) => {
+        event.stopPropagation();
+        reviewRoughcut(button).then(() => refreshPanel("library")).catch((err) => {
+          state.errors.push(`复核保存失败: ${err.message}`);
+          render();
+        });
+      };
+    });
+    root.querySelectorAll("[data-roughcut-seek]").forEach((button) => {
+      button.onclick = (event) => {
+        event.stopPropagation();
+        const player = button.closest(".library-card")?.querySelector(".roughcut-preview");
+        if (player) { player.currentTime = Number(button.dataset.roughcutSeek || 0); player.play().catch(() => {}); }
+      };
+    });
+  }
+
+  function formatWorkElapsed(turn, active) {
+    if (!turn?.startedAt) return "";
+    const end = active ? Date.now() : turn.completedAt;
+    if (!end) return "";
+    const seconds = Math.max(0, Math.floor((end - turn.startedAt) / 1000));
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    const rest = seconds % 60;
+    return `${minutes}m${String(rest).padStart(2, "0")}s`;
+  }
+
+  function formatSentTime(turn, { full = false } = {}) {
+    if (!turn?.startedAt) return "";
+    const sentAt = new Date(turn.startedAt);
+    if (Number.isNaN(sentAt.getTime())) return "";
+    const options = full
+      ? { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }
+      : { hour: "2-digit", minute: "2-digit" };
+    return new Intl.DateTimeFormat(undefined, options).format(sentAt);
+  }
+
   // ── event handlers (one per kind, no silent drop) ──────────────────
+  function autoScrollChat() {
+    const rail = els.railHistory;
+    if (!rail) return;
+    if (state._followChatBottom) {
+      rail.scrollTop = rail.scrollHeight;
+    }
+    syncChatScrollButton();
+  }
+
+  function chatIsNearBottom() {
+    const rail = els.railHistory;
+    return !rail || rail.scrollHeight - rail.scrollTop - rail.clientHeight < 80;
+  }
+
+  function syncChatScrollButton() {
+    if (!els.chatScrollBottom) return;
+    els.chatScrollBottom.hidden = chatIsNearBottom();
+  }
+
+  function scrollChatToBottom({ smooth = true } = {}) {
+    const rail = els.railHistory;
+    if (!rail) return;
+    state._followChatBottom = true;
+    rail.scrollTo({
+      top: rail.scrollHeight,
+      behavior: smooth ? "smooth" : "auto",
+    });
+    syncChatScrollButton();
+  }
 
   const handlers = {
     turn_start: () => {
@@ -840,32 +1483,45 @@
       t.pendingAssistantText = "";
       t.streaming = false;
     },
-    turn_cancelled: (ev) => {
+    turn_cancelled: () => {
       dismissAskDock();
       state.turnInProgress = false;
       state.stopPending = false;
       const t = state.currentTurn;
       if (!t) return;
+      t.completedAt = Date.now();
       for (const tc of t.toolCalls.values()) {
         if (tc.status === "pending" || tc.status === "running") tc.status = "cancelled";
       }
       t.pendingAssistantText = "";
       t.streaming = false;
       t.complete = true;
-      t.banners.push({
-        kind: "info",
-        text: String(ev.message || "已停止当前执行，已经完成的进度会保留"),
-      });
       autoSaveSession();
     },
     model_text_delta: (ev) => {
       const t = state.currentTurn;
       if (!t) return;
-      // A provider can emit private-looking lead-in text immediately before a
-      // tool call. Hold all deltas until the turn completes; a following tool
-      // proposal discards the buffer, while a text-only turn releases it as the
-      // final user-facing reply.
-      t.pendingAssistantText += ev.delta;
+      t.streamRetryText = "";
+      // The backend marks only tool-free, user-visible rounds as streamable.
+      // Unmarked deltas stay buffered because they may still become a tool
+      // preamble and must never flash in the assistant reply.
+      t.pendingAssistantText += String(ev.delta || "");
+      if (ev.display === "stream") {
+        t.assistantText = stripActivityMarkup(t.pendingAssistantText);
+        t.streaming = true;
+      }
+    },
+    model_stream_reset: (ev) => {
+      const t = state.currentTurn;
+      if (!t) return;
+      t.assistantText = "";
+      t.pendingAssistantText = "";
+      t.streaming = false;
+      t.streamRetryText = `Reconnecting ${Number(ev.retry) || 1}/${Number(ev.max_retries) || 1}`;
+      for (const [callId, call] of t.toolCalls) {
+        if (call.status === "pending") t.toolCalls.delete(callId);
+      }
+      t.orderedCallIds = t.orderedCallIds.filter((callId) => t.toolCalls.has(callId));
     },
     model_tool_call_start: (ev) => {
       const t = state.currentTurn;
@@ -875,6 +1531,7 @@
       t.assistantText = "";
       t.pendingAssistantText = "";
       t.streaming = false;
+      t.streamRetryText = "";
       t.toolCalls.set(ev.call_id, {
         call_id: ev.call_id,
         tool_name: ev.tool_name,
@@ -916,6 +1573,9 @@
           kind: ev.result?.kind || inferKindFromAssetId(assetId),
           summary: ev.result?.summary || "",
           source: "tool",
+          source_class: ev.result?.source_class || ev.result?.origin || null,
+          origin: ev.result?.origin || null,
+          provenance: ev.result?.provenance || null,
           final: false,
         });
       }
@@ -959,12 +1619,8 @@
       if (!state.planMode) state.planReady = false;
     },
     completion_check: () => {
-      // Host-side one-shot goal check re-prompts the model for a FINAL reply
-      // (goal-check / visual self-check / failure disclosure). The text the
-      // model streamed before this gate was only a draft — discard it so the
-      // post-gate round becomes the single user-facing message. Left as-is,
-      // model_text_delta would APPEND the gate round onto the draft and the
-      // user sees the same answer twice (natural reply + report-style restate).
+      // Receive-only compatibility for replaying events from an older backend.
+      // Current AgentLoopV3 never emits completion_check.
       const t = state.currentTurn;
       if (!t) return;
       t.assistantText = "";
@@ -973,15 +1629,16 @@
     },
     turn_wrapup: (ev) => {
       // This is Lumeri's hand-off, not a generic host banner. For an
-      // incomplete-goal stop the backend deliberately released the model's
-      // own closing report just before this event; preserve that richer text.
-      // Other stop reasons may leave a partial stream fragment, so use the
+      // interrupted turn the backend may already have released the model's
+      // own closing report; preserve that richer text. Other stop reasons may
+      // leave a partial stream fragment, so use the
       // backend's deterministic wrap-up instead of presenting a broken draft.
       dismissAskDock();
       const t = state.currentTurn;
       state.turnInProgress = false;
       state.stopPending = false;
       if (!t) return;
+      t.completedAt = Date.now();
       const modelReport = ev.reason === "incomplete_goal"
         ? stripActivityMarkup(t.pendingAssistantText).trim()
         : "";
@@ -1006,6 +1663,97 @@
       // rather than waiting for the next poll interval.
       fetchProjectTimeline({ force: true });
     },
+    segment_content: (ev) => {
+      const s = segmentWorkspaceState();
+      if (!s.open || String(ev.clip_id || "") !== String(s.clipId || "")) return;
+      fetchSegmentWorkspace(s.clipId).catch(() => {});
+    },
+    segment_reservation: (ev) => {
+      const s = segmentWorkspaceState();
+      if (!s.open || String(ev.clip_id || "") !== String(s.clipId || "")) return;
+      if (s.document) {
+        s.document.reservations = ev.reservations || s.document.reservations || {};
+        s.document.handback_required = !!ev.handback_required;
+        renderSegmentWorkspace();
+      }
+    },
+    segment_saved: (ev) => {
+      const s = segmentWorkspaceState();
+      if (String(ev.clip_id || "") !== String(s.clipId || "")) return;
+      s.saved = true;
+      if (s.popup) window.close();
+    },
+    segment_branch_ready: (ev) => {
+      if (String(ev.clip_id || "") === String(segmentWorkspaceState().clipId || "")) {
+        state.errors.push("比较分支已准备好；它不会进入正式预览或导出");
+      }
+    },
+    segment_view: (ev) => {
+      const s = segmentWorkspaceState();
+      if (ev.client_instance_id && ev.client_instance_id === s.clientInstanceId) return;
+      if (!s.open || String(ev.clip_id || "") !== String(s.clipId || "")) return;
+      const view = ev.view || {};
+      if (view.selectedEntityRef) { s.selectedEntityRef = String(view.selectedEntityRef); renderSegmentWorkspace(); }
+      if (Number.isFinite(Number(view.zoom)) && !s.applyingView) {
+        s.applyingView = true;
+        setPps(Number(view.zoom));
+        s.applyingView = false;
+      }
+      if (Number.isFinite(Number(view.playhead)) && !s.applyingView) {
+        s.applyingView = true;
+        setPlayhead(Number(view.playhead));
+        s.applyingView = false;
+      }
+      if (view.layout && typeof view.layout === "object" && typeof workspaceSizes === "object") {
+        workspaceSizes = { ...workspaceSizes, ...view.layout };
+        applyWorkspaceLayout();
+      }
+    },
+    production_state_changed: (ev) => {
+      applyProductionSnapshot(ev);
+      if (ev.state !== undefined && ev.production_state === undefined) {
+        state.productionState = ev.state || null;
+      }
+      if (!["ready_for_review", "accepted"].includes(String(state.productionState || ""))) {
+        state.productionDelivery = null;
+        unloadDeliveryReviewMaster();
+      }
+      autoSaveSession();
+    },
+    project_revision_committed: (ev) => {
+      applyProductionSnapshot(ev);
+      if (!currentReviewMaster()) {
+        state.productionDelivery = null;
+        unloadDeliveryReviewMaster();
+      }
+      // Any commit makes previews/evidence for an older revision stale.  The
+      // authoritative timeline is fetched immediately instead of leaving a
+      // visually plausible but old canvas on screen.
+      fetchProjectTimeline({ force: true });
+      autoSaveSession();
+    },
+    budget_updated: (ev) => {
+      applyProductionSnapshot(ev);
+      if (ev.budget) state.productionBudget = ev.budget;
+      autoSaveSession();
+    },
+    delivery_ready: (ev) => {
+      applyProductionSnapshot(ev);
+      state.productionDelivery = ev.delivery || null;
+      if (!ev.production_state) state.productionState = "ready_for_review";
+      autoSaveSession();
+    },
+    acceptance_updated: (ev) => {
+      applyProductionSnapshot(ev);
+      state.productionAcceptance = ev.acceptance || ev;
+      if (ev.action === "approve" && !ev.production_state) state.productionState = "accepted";
+      if (ev.action === "request_changes" && !ev.production_state) state.productionState = "revising";
+      if (ev.action === "request_changes" || !currentReviewMaster()) {
+        state.productionDelivery = null;
+        unloadDeliveryReviewMaster();
+      }
+      autoSaveSession();
+    },
     background_task_update: (ev) => {
       // Background shell job status change (running → done/failed). Arrives
       // mid-turn AND between turns; authoritative, so it clears any
@@ -1026,10 +1774,30 @@
       scheduleTasksPanelRefresh();
     },
     protocol_hello: (ev) => {
-      // Per-connection id-less frame at the top of every stream. The web
-      // client is served BY the backend, so a mismatch is near-impossible —
-      // record it for debugging, no banner.
       state.protocolVersion = ev.protocol_version;
+      const nextInstanceId = String(ev.server_instance_id || "");
+      const restarted = !!(
+        state.serverInstanceId
+        && nextInstanceId
+        && state.serverInstanceId !== nextInstanceId
+      );
+      state.serverInstanceId = nextInstanceId || state.serverInstanceId;
+      if (restarted && state.sessionId && !state.recoveringSession) {
+        const sessionId = state.sessionId;
+        state.recoveringSession = true;
+        state.turnInProgress = false;
+        state.stopPending = false;
+        refreshSessionState().catch((err) => {
+          if (state.sessionId === sessionId) {
+            state.errors.push(`session recovery failed: ${err.message}`);
+          }
+        }).finally(() => {
+          if (state.sessionId === sessionId) {
+            state.recoveringSession = false;
+            render();
+          }
+        });
+      }
     },
     replay_gap: (ev) => {
       const text = "连接已恢复，正在同步最新状态";
@@ -1059,10 +1827,14 @@
       state.turnInProgress = false;
       state.stopPending = false;
       if (!t) return;
+      t.completedAt = Date.now();
       t.assistantText = stripActivityMarkup(t.pendingAssistantText);
       t.pendingAssistantText = "";
       t.streaming = false;
       t.complete = true;
+      t.outcome = ev.outcome || "progressed";
+      state.productionOutcome = t.outcome;
+      applyProductionSnapshot(ev);
       // Backend now sends only user-facing deliverables in final_asset_ids
       // (usually export outputs). Mark every listed deliverable as final.
       const finals = ev.deliverable_asset_ids || ev.final_asset_ids || [];
@@ -1072,7 +1844,15 @@
       }
       // Refresh timeline after every completed turn — verb results may have
       // updated the project even if no timeline_op event was fired this turn.
-      fetchProjectTimeline({ force: true });
+      const refresh = fetchProjectTimeline({ force: true });
+      if (ev.last_edited_clip_id) {
+        refresh.then(() => {
+          const focusId = String(ev.last_edited_clip_id || "");
+          const s = segmentWorkspaceState();
+          if (s.open && s.document?.handback_required && !s.saved) return;
+          focusEntity("clip", focusId);
+        }).catch(() => {});
+      }
       // While planning, a completed turn means the plan text is on screen —
       // surface the approval bar.
       if (state.planMode) state.planReady = true;
@@ -1088,6 +1868,7 @@
       state.stopPending = false;
       const t = state.currentTurn;
       if (t) {
+        t.completedAt = Date.now();
         t.streaming = false;
         t.complete = true;
         // An "incomplete_goal" stop is not a failure — the model has already
@@ -1096,7 +1877,8 @@
         // Genuine host failures (budget, doom loop, stream error) still show
         // the turn_error banner.
         if (ev.reason !== "incomplete_goal") {
-          t.banners.push({ kind: "turn_error", text: "本轮任务暂时暂停" });
+          const errorReason = String(ev.error || ev.message || "未知错误");
+          t.banners.push({ kind: "turn_error", text: `Error: ${errorReason}` });
         }
       }
     },
@@ -1121,6 +1903,75 @@
     if (String(assetId).startsWith("img_")) return "image";
     if (String(assetId).startsWith("aud_")) return "audio";
     return "video";
+  }
+
+  function artifactUrl(assetId) {
+    if (state.projectId) {
+      return `/projects/${encodeURIComponent(state.projectId)}/artifacts/${encodeURIComponent(assetId)}`;
+    }
+    return `/sessions/${encodeURIComponent(state.sessionId || "")}/assets/${encodeURIComponent(assetId)}`;
+  }
+
+  function currentReviewMaster() {
+    if (!["ready_for_review", "accepted"].includes(String(state.productionState || ""))) return null;
+    const delivery = state.productionDelivery;
+    const master = delivery && typeof delivery === "object" ? delivery.review_master : null;
+    if (!master || typeof master !== "object") return null;
+    if (Number(delivery.project_revision) !== Number(state.projectRevision)) return null;
+    if (Number(master.project_revision) !== Number(state.projectRevision)) return null;
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(String(master.asset_id || ""))) return null;
+    if (!/^[0-9a-f]{64}$/.test(String(master.sha256 || ""))) return null;
+    return master;
+  }
+
+  function currentTimelinePreview() {
+    const reviewMaster = currentReviewMaster();
+    if (reviewMaster) return reviewMaster;
+    const playable = state.assets.filter((asset) => {
+      if (String(asset?.kind || "") !== "video") return false;
+      if (asset?.final) return true;
+      const sourceKind = typeof asset?.source === "object"
+        ? String(asset.source?.kind || "")
+        : String(asset?.source || "");
+      const summary = String(asset?.summary || "");
+      return sourceKind === "derived_preview"
+        || /timeline preview|timeline inspection composited draft/i.test(summary);
+    });
+    return playable[playable.length - 1] || null;
+  }
+
+  function unloadDeliveryReviewMaster() {
+    if (!els.deliveryReviewVideo) return;
+    try { els.deliveryReviewVideo.pause(); } catch {}
+    els.deliveryReviewVideo.removeAttribute("src");
+    delete els.deliveryReviewVideo.dataset.assetId;
+    try { els.deliveryReviewVideo.load(); } catch {}
+    if (els.deliveryReviewMaster) els.deliveryReviewMaster.hidden = true;
+    if (els.timelinePreviewEmpty) els.timelinePreviewEmpty.hidden = false;
+  }
+
+  function renderDeliveryReviewMaster() {
+    if (!els.deliveryReviewMaster || !els.deliveryReviewVideo) return;
+    if (renderDirectCanvas()) return;
+    bindTimelinePreviewSync();
+    const preview = currentTimelinePreview();
+    if (!preview) {
+      if (els.deliveryReviewVideo.dataset.assetId) unloadDeliveryReviewMaster();
+      else els.deliveryReviewMaster.hidden = true;
+      if (els.timelinePreviewEmpty) els.timelinePreviewEmpty.hidden = false;
+      return;
+    }
+    const assetId = String(preview.asset_id);
+    const url = artifactUrl(assetId);
+    if (els.deliveryReviewVideo.dataset.assetId !== assetId) {
+      try { els.deliveryReviewVideo.pause(); } catch {}
+      els.deliveryReviewVideo.src = url;
+      els.deliveryReviewVideo.dataset.assetId = assetId;
+      els.deliveryReviewVideo.load();
+    }
+    if (els.timelinePreviewEmpty) els.timelinePreviewEmpty.hidden = true;
+    els.deliveryReviewMaster.hidden = false;
+    syncTimelinePreviewToPlayhead();
   }
 
   // ── ask dock (declarative answering) ────────────────────────────────
@@ -1302,7 +2153,7 @@
     dock.querySelectorAll(".ask-field-error").forEach((e) => { e.textContent = ""; });
 
     try {
-      const res = await fetch(`/sessions/${state.sessionId}/ask_response`, {
+      const res = await apiFetch(`/sessions/${state.sessionId}/ask_response`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1356,6 +2207,10 @@
   }
 
   function connectSse(sessionId) {
+    if (isLocalWorkspace) {
+      setConnPill("iPad 本地工作区", "live");
+      return;
+    }
     if (state.eventSource) {
       state.eventSource.close();
       state.eventSource = null;
@@ -1364,14 +2219,19 @@
     const qs = lastId ? `?last_event_id=${encodeURIComponent(lastId)}` : "";
     const es = new EventSource(`/sessions/${sessionId}/stream${qs}`);
     es.onopen = () => {
+      if (state.sessionId !== sessionId || state.eventSource !== es) return;
       clearReconnectTimer();
       setConnPill("live", "live");
     };
     es.onerror = () => {
+      if (state.sessionId !== sessionId || state.eventSource !== es) return;
       setConnPill("reconnecting", "reconnecting");
       scheduleReconnect(1500);
     };
     es.onmessage = (e) => {
+      // A closed EventSource may still have one queued callback. Never let an
+      // event from the session we just left mutate the newly selected chat.
+      if (state.sessionId !== sessionId || state.eventSource !== es) return;
       try {
         if (e.lastEventId) saveLastEventId(sessionId, e.lastEventId);
         const ev = JSON.parse(e.data);
@@ -1398,6 +2258,9 @@
     snap: true,
     playhead: 0,
     scrubbing: false,
+    scrub: null,
+    scrubFrame: 0,
+    zoomAnchor: null,
     drag: null,
     markers: [],            // {time,label,color} — client-side only (no backend marker model yet)
     extraTracks: [],        // client-added empty display lanes (no backend add_track op)
@@ -1411,8 +2274,9 @@
     wave: new Map(),        // assetId -> number[] peaks
     waveBusy: new Set(),
     audioCtx: null,
+    previewSyncBound: false,
   };
-  const TL_RULER_H = 26, TL_TRACK_H = 58, TL_MIN_CONTENT = 30;
+  const TL_RULER_H = 26, TL_TRACK_H = 58, TL_LANE_PAD = 10, TL_MIN_CONTENT = 30;
   const TL_MARKER_COLORS = ["#ff3b4e", "#ffb13b", "#4ea1ff", "#7a5cff", "#2fd178"];
   const TL_CLIP_COLOR = {
     video:   ["#1d4a34", "#37a06a"],
@@ -1431,18 +2295,48 @@
   const tlHeaders = () => document.getElementById("ptl-headers");
   const timeToX = (t) => t * TL.pps;
   const pxToTime = (px) => px / TL.pps;
+  const timelineUiScale = () => {
+    const value = Number.parseFloat(getComputedStyle(tlPanel() || document.documentElement)
+      .getPropertyValue("--timeline-ui-scale"));
+    return Number.isFinite(value) ? value : 1;
+  };
+  const timelineTrackHeight = () => TL_TRACK_H * timelineUiScale();
+  const timelineLanePad = () => TL_LANE_PAD * timelineUiScale();
+
+  function applyTimelineTrackScale() {
+    if (!TL.built || state.ptDrag) return;
+    const content = tlContent(), headers = tlHeaders();
+    if (!content || !headers) return;
+    const trackHeight = timelineTrackHeight();
+    const lanePad = timelineLanePad();
+    const heads = headers.querySelectorAll(".ptl-head");
+    const lanes = content.querySelectorAll(".ptl-lane");
+    content.style.height = `${lanes.length * trackHeight + lanePad * 2}px`;
+    headers.style.paddingTop = `${lanePad}px`;
+    headers.style.paddingBottom = `${lanePad}px`;
+    heads.forEach((head) => { head.style.height = `${trackHeight}px`; });
+    lanes.forEach((lane, index) => {
+      lane.style.top = `${lanePad + index * trackHeight}px`;
+      lane.style.height = `${trackHeight}px`;
+    });
+    sizeRuler();
+    drawRuler();
+  }
 
   function fmtTC(s) {
     if (!isFinite(s) || s < 0) s = 0;
     const fps = Math.round((TL.model && TL.model.fps) || 30);
-    const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
     const f = Math.floor((s - Math.floor(s)) * fps);
-    return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}:${String(f).padStart(2, "0")}`;
+    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}:${String(f).padStart(2, "0")}`;
   }
 
   function trackCompatible(mediaKind, trackKind) {
     if (mediaKind === "audio") return trackKind === "audio";
-    return trackKind === "video" || trackKind === "overlay" || trackKind === "text";
+    if (mediaKind === "video") return trackKind === "video";
+    if (mediaKind === "image") return trackKind === "video" || trackKind === "overlay";
+    if (mediaKind === "text" || mediaKind === "lottie") return trackKind === "overlay";
+    return false;
   }
 
   // Build the model the editor lays out: real tracks if present, else default
@@ -1457,12 +2351,12 @@
         { id: "A1", kind: "audio", name: "音频", clips: [] },
       ];
     }
-    const rank = (k) => (k === "audio" ? 2 : k === "overlay" || k === "text" ? 0 : 1);
+    const rank = (k) => (k === "audio" ? 1 : 0);
     tracks = tracks.map((t, i) => ({ ...t, _i: i })).sort((a, b) => rank(a.kind) - rank(b.kind) || a._i - b._i);
     let lastEnd = 0;
     for (const t of tracks) for (const c of (t.clips || [])) lastEnd = Math.max(lastEnd, (c.start || 0) + (c.duration || 0));
     const contentDur = Math.max(d.duration || 0, lastEnd, TL_MIN_CONTENT);
-    return { tracks, duration: d.duration || 0, contentDur, fps: d.fps || 30, width: d.width || 1920, height: d.height || 1080, patch_seq: d.patch_seq || 0 };
+    return { tracks, duration: d.duration || 0, mediaEnd: lastEnd, contentDur, fps: d.fps || 30, width: d.width || 1920, height: d.height || 1080, patch_seq: d.patch_seq || 0 };
   }
 
   function buildTimelineShell() {
@@ -1486,7 +2380,7 @@
         <div class="ptl-sep"></div>
         <button class="ptl-btn ptl-ico-btn ptl-toggle" id="ptl-snap" title="吸附对齐" aria-label="吸附对齐"><svg viewBox="0 0 16 16"><path d="M4 2.5v5a4 4 0 0 0 8 0v-5"/><path d="M4 2.5h2.4M9.6 2.5H12M4 6h2.4M9.6 6H12"/></svg></button>
         <div class="ptl-spacer"></div>
-        <div class="ptl-tc" id="ptl-tc">00:00:00</div>
+        <div class="ptl-tc" id="ptl-tc">00:00:00:00</div>
         <div class="ptl-zoom">
           <button class="ptl-btn ptl-ico-btn" id="ptl-zoom-out" title="缩小 (−)"><svg viewBox="0 0 16 16"><circle cx="6.8" cy="6.8" r="3.8"/><path d="M9.6 9.6 13.5 13.5"/><path d="M5 6.8h3.6"/></svg></button>
           <input type="range" id="ptl-zoom" class="ptl-range" min="${TL.minPps}" max="${TL.maxPps}" value="${TL.pps}" />
@@ -1503,6 +2397,7 @@
           <div class="ptl-scroll" id="ptl-scroll"><div class="ptl-content" id="ptl-content"></div></div>
         </div>
       </div>
+      <form class="micro-inspector ptl-micro-inspector" id="timeline-micro-inspector" aria-label="时间微调" hidden></form>
       <div class="pt-quick-actions" id="pt-quick-actions">
         <button class="pt-action-btn" data-cmd="export the project at 1080p quality" title="导出 1080p"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-export"/></svg>1080p</button>
         <button class="pt-action-btn" data-cmd="export the project as draft quality" title="导出草稿"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-export"/></svg>草稿</button>
@@ -1514,8 +2409,16 @@
     TL.built = true;
     loadMarkers();
 
-    document.getElementById("ptl-undo").onclick = () => { if (editingEnabled()) postTimelineOp({ op: "undo", steps: 1 }); };
-    document.getElementById("ptl-redo").onclick = () => { /* backend exposes no redo op yet */ };
+    document.getElementById("ptl-undo").onclick = () => {
+      if (!editingEnabled()) return;
+      if (selectedLumenFrameLayer()) postLumenFrameOp({ op: "undo", steps: 1 });
+      else postTimelineOp({ op: "undo", steps: 1 });
+    };
+    document.getElementById("ptl-redo").onclick = () => {
+      if (!editingEnabled()) return;
+      if (selectedLumenFrameLayer()) postLumenFrameOp({ op: "redo", steps: 1 });
+      else postTimelineOp({ op: "redo", steps: 1 });
+    };
     document.getElementById("ptl-split").onclick = splitSelected;
     document.getElementById("ptl-delete").onclick = deleteSelected;
     document.getElementById("ptl-marker").onclick = () => addMarker(TL.playhead);
@@ -1531,6 +2434,9 @@
     const scroll = tlScroll();
     let hydrateQueued = false;
     scroll.addEventListener("scroll", () => {
+      if (TL.zoomAnchor) {
+        TL.zoomAnchor.time = pxToTime(scroll.scrollLeft + TL.zoomAnchor.px);
+      }
       drawRuler();
       tlHeaders().style.transform = `translateY(${-scroll.scrollTop}px)`;
       // clips scrolled into view lazily extract their frames (rAF-throttled)
@@ -1555,13 +2461,67 @@
     scroll.addEventListener("wheel", (e) => wheelZoom(e, scroll), { passive: false });
 
     const ruler = tlRuler();
-    const seek = (clientX) => {
-      const r = ruler.getBoundingClientRect();
-      setPlayhead(Math.max(0, pxToTime(scroll.scrollLeft + (clientX - r.left))));
+    const rememberZoomAnchor = (clientX) => {
+      const r = scroll.getBoundingClientRect();
+      const px = Math.max(0, Math.min(r.width, clientX - r.left));
+      TL.zoomAnchor = { time: pxToTime(scroll.scrollLeft + px), px };
     };
-    ruler.addEventListener("pointerdown", (e) => { try { ruler.setPointerCapture(e.pointerId); } catch {} TL.scrubbing = true; seek(e.clientX); });
-    ruler.addEventListener("pointermove", (e) => { if (TL.scrubbing) seek(e.clientX); });
-    ruler.addEventListener("pointerup", () => { TL.scrubbing = false; });
+    const seek = (clientX) => {
+      rememberZoomAnchor(clientX);
+      const r = scroll.getBoundingClientRect();
+      const px = Math.max(0, Math.min(r.width, clientX - r.left));
+      setPlayhead(pxToTime(scroll.scrollLeft + px));
+    };
+    const scrubStep = () => {
+      const scrub = TL.scrub;
+      if (!scrub) { TL.scrubFrame = 0; return; }
+      const r = scroll.getBoundingClientRect();
+      const edge = Math.min(r.width / 2, 54 * timelineUiScale());
+      let targetVelocity = 0;
+      if (scrub.clientX < r.left + edge) {
+        targetVelocity = -18 * Math.min(1, (r.left + edge - scrub.clientX) / Math.max(1, edge));
+      } else if (scrub.clientX > r.right - edge) {
+        targetVelocity = 18 * Math.min(1, (scrub.clientX - (r.right - edge)) / Math.max(1, edge));
+      }
+      scrub.velocity = scrub.velocity * 0.72 + targetVelocity * 0.28;
+      if (Math.abs(scrub.velocity) > 0.1) {
+        const before = scroll.scrollLeft;
+        scroll.scrollLeft += scrub.velocity;
+        if (scroll.scrollLeft !== before) seek(scrub.clientX);
+      }
+      TL.scrubFrame = requestAnimationFrame(scrubStep);
+    };
+    const startScrub = (e, surface) => {
+      if (e.button !== 0 || e.target.closest(".ptl-clip")) return;
+      if (TL.scrubFrame) cancelAnimationFrame(TL.scrubFrame);
+      TL.scrubbing = true;
+      TL.scrub = { pointerId: e.pointerId, surface, clientX: e.clientX, velocity: 0 };
+      scroll.classList.add("is-scrubbing");
+      try { surface.setPointerCapture(e.pointerId); } catch {}
+      seek(e.clientX);
+      TL.scrubFrame = requestAnimationFrame(scrubStep);
+      e.preventDefault();
+    };
+    const moveScrub = (e) => {
+      rememberZoomAnchor(e.clientX);
+      if (!TL.scrub || TL.scrub.pointerId !== e.pointerId) return;
+      TL.scrub.clientX = e.clientX;
+      seek(e.clientX);
+    };
+    const finishScrub = (e) => {
+      if (!TL.scrub || (e && TL.scrub.pointerId !== e.pointerId)) return;
+      TL.scrub = null;
+      TL.scrubbing = false;
+      scroll.classList.remove("is-scrubbing");
+      if (TL.scrubFrame) cancelAnimationFrame(TL.scrubFrame);
+      TL.scrubFrame = 0;
+    };
+    for (const surface of [ruler, scroll]) {
+      surface.addEventListener("pointerdown", (e) => startScrub(e, surface));
+      surface.addEventListener("pointermove", moveScrub);
+      surface.addEventListener("pointerup", finishScrub);
+      surface.addEventListener("pointercancel", finishScrub);
+    }
     ruler.addEventListener("dblclick", (e) => {
       const r = ruler.getBoundingClientRect();
       addMarker(Math.max(0, pxToTime(scroll.scrollLeft + (e.clientX - r.left))));
@@ -1577,9 +2537,10 @@
   // ── ruler ───────────────────────────────────────────────────────────
   function sizeRuler() {
     const ruler = tlRuler(); if (!ruler || !TL.rulerCtx) return;
-    const w = ruler.clientWidth || 1, dpr = window.devicePixelRatio || 1;
+    const w = ruler.clientWidth || 1, h = ruler.clientHeight || TL_RULER_H;
+    const dpr = window.devicePixelRatio || 1;
     ruler.width = Math.max(1, Math.floor(w * dpr));
-    ruler.height = Math.floor(TL_RULER_H * dpr);
+    ruler.height = Math.max(1, Math.round(h * dpr));
     TL.rulerCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
   function chooseStep() {
@@ -1596,8 +2557,10 @@
     const ruler = tlRuler(), ctx = TL.rulerCtx, scroll = tlScroll();
     if (!ruler || !ctx || !scroll) return;
     const dpr = window.devicePixelRatio || 1;
-    if (ruler.width !== Math.floor((ruler.clientWidth || 1) * dpr)) sizeRuler();
-    const w = ruler.clientWidth || 1, h = TL_RULER_H, left = scroll.scrollLeft;
+    const clientHeight = ruler.clientHeight || TL_RULER_H;
+    if (ruler.width !== Math.floor((ruler.clientWidth || 1) * dpr)
+        || ruler.height !== Math.round(clientHeight * dpr)) sizeRuler();
+    const w = ruler.clientWidth || 1, h = clientHeight, left = scroll.scrollLeft;
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = "#0c0f13"; ctx.fillRect(0, 0, w, h);
     const step = chooseStep();
@@ -1637,14 +2600,19 @@
     const scroll = tlScroll(); if (!scroll) return;
     if (state.ptDrag) return;   // don't zoom mid-drag: clip DOM can't reflow under the render guard
     if (anchorTime == null) {
-      anchorTime = pxToTime(scroll.scrollLeft + scroll.clientWidth / 2);
-      anchorPx = scroll.clientWidth / 2;
+      const anchor = TL.zoomAnchor;
+      anchorPx = anchor ? anchor.px : scroll.clientWidth / 2;
+      anchorTime = anchor ? anchor.time : pxToTime(scroll.scrollLeft + anchorPx);
     }
     TL.pps = Math.max(TL.minPps, Math.min(TL.maxPps, next));
     const z = document.getElementById("ptl-zoom"); if (z) z.value = String(Math.round(TL.pps));
     renderProjectTimeline(state.projectTimeline);
     scroll.scrollLeft = Math.max(0, timeToX(anchorTime) - anchorPx);
+    TL.zoomAnchor = { time: anchorTime, px: anchorPx };
     drawRuler();
+    if (segmentWorkspaceState().open && !segmentWorkspaceState().applyingView) {
+      broadcastSegmentView({ zoom: TL.pps });
+    }
   }
   function positionPlayhead() {
     const ph = document.getElementById("ptl-playhead");
@@ -1652,10 +2620,40 @@
     const tc = document.getElementById("ptl-tc");
     if (tc) tc.textContent = fmtTC(TL.playhead);
   }
-  function setPlayhead(t) {
-    TL.playhead = Math.max(0, t);
+  function syncTimelinePreviewToPlayhead() {
+    const video = els.deliveryReviewVideo;
+    if (!video || !video.dataset.assetId) return;
+    const duration = Number(video.duration);
+    const target = Number.isFinite(duration) && duration > 0
+      ? Math.min(TL.playhead, duration)
+      : TL.playhead;
+    if (Math.abs((Number(video.currentTime) || 0) - target) < 0.025) return;
+    try { video.currentTime = target; } catch {}
+  }
+  function bindTimelinePreviewSync() {
+    const video = els.deliveryReviewVideo;
+    if (!video || TL.previewSyncBound) return;
+    TL.previewSyncBound = true;
+    video.addEventListener("loadedmetadata", syncTimelinePreviewToPlayhead);
+    const syncPlayheadFromPreview = () => {
+      if (!video.dataset.assetId) return;
+      setPlayhead(video.currentTime, { syncPreview: false });
+    };
+    video.addEventListener("timeupdate", syncPlayheadFromPreview);
+    video.addEventListener("seeked", syncPlayheadFromPreview);
+  }
+  function setPlayhead(t, { syncPreview = true } = {}) {
+    const mediaEnd = Math.max(0, Number(TL.model && TL.model.mediaEnd) || 0);
+    TL.playhead = Math.max(0, Math.min(mediaEnd, Number(t) || 0));
     positionPlayhead();
     drawRuler();
+    if (syncPreview) {
+      syncTimelinePreviewToPlayhead();
+      syncDirectCanvasMedia();
+    }
+    if (segmentWorkspaceState().open && !segmentWorkspaceState().applyingView) {
+      broadcastSegmentView({ playhead: TL.playhead });
+    }
   }
   function markerKey() { return `lumeri:v3:markers:${state.sessionId || "_"}`; }
   function loadMarkers() {
@@ -1663,6 +2661,7 @@
   }
   function saveMarkers() {
     try { window.localStorage.setItem(markerKey(), JSON.stringify(TL.markers)); } catch {}
+    autoSaveSession().catch(() => {});
   }
   function positionMarkers() {
     const layer = document.getElementById("ptl-markers");
@@ -1693,6 +2692,9 @@
     el.dataset.sourceOut = clip.source_out ?? 0;
     el.dataset.mediaKind = kind;
     el.dataset.assetId = clip.asset_id || "";
+    el.tabIndex = 0;
+    el.setAttribute("role", "option");
+    el.setAttribute("aria-label", `${clip.name || "素材"}，开始 ${fmtTC(clip.start)}，时长 ${fmtTC(clip.duration)}`);
     el.style.left = timeToX(clip.start) + "px";
     el.style.width = Math.max(timeToX(clip.duration), 8) + "px";
     const col = isPaint ? TL_CLIP_COLOR.paint : (TL_CLIP_COLOR[kind] || TL_CLIP_COLOR.video);
@@ -1707,7 +2709,7 @@
       : "";
     el.innerHTML =
       `<div class="ptl-clip-media"></div><div class="ptl-clip-grad"></div>` +
-      `<span class="ptl-clip-label">${escapeHTML(label || "clip")}</span>` + transHtml +
+      `<span class="ptl-clip-label" draggable="true" data-context-drag="timeline-clip" title="拖到输入框作为上下文">${escapeHTML(label || "clip")}</span>` + transHtml +
       `<div class="ptl-handle l" data-handle="left"></div><div class="ptl-handle r" data-handle="right"></div>`;
     return el;
   }
@@ -1798,7 +2800,7 @@
     if (!media || media.dataset.sig === "img") return;
     media.dataset.sig = "img";
     media.innerHTML = "";
-    media.style.background = `url("/sessions/${state.sessionId}/assets/${assetId}") left center / auto 100% repeat-x`;
+    media.style.background = `url("${artifactUrl(assetId)}") left center / auto 100% repeat-x`;
   }
 
   function requestFrames(assetId, times) {
@@ -1856,7 +2858,7 @@
         rig.video = video;
         resolve();
       }, { once: true });
-      video.src = `/sessions/${state.sessionId}/assets/${assetId}`;   // set src last, after listeners
+      video.src = artifactUrl(assetId);   // set src last, after listeners
     });
   }
 
@@ -1905,7 +2907,7 @@
     }).catch(() => TL.waveBusy.delete(key));
   }
   async function decodeWave(assetId, inS, outS, samples = 240) {
-    const res = await fetch(`/sessions/${state.sessionId}/assets/${assetId}`);
+    const res = await apiFetch(artifactUrl(assetId));
     if (!res.ok) throw new Error("wave fetch " + res.status);
     const buf = await res.arrayBuffer();
     if (!TL.audioCtx) TL.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -1943,24 +2945,250 @@
     media.innerHTML = ""; media.appendChild(canvas);
   }
 
+  function quantaScopes() {
+    const root = state.projectQuanta?.quanta?.root;
+    const scopes = [];
+    const visit = (node, ancestors = []) => {
+      for (const child of (Array.isArray(node?.children) ? node.children : [])) {
+        if (!child || child.hidden) continue;
+        if (Array.isArray(child.blocks)) scopes.push({ scope: child, ancestors });
+        else visit(child, [...ancestors, child]);
+      }
+    };
+    visit(root);
+    return scopes;
+  }
+
+  function quantaStates() {
+    return quantaScopes().flatMap(({ scope, ancestors }) => (
+      (Array.isArray(scope.children) ? scope.children : [])
+        .filter((quantum) => quantum && !quantum.hidden)
+        .map((quantum) => ({ scope, quantum, ancestors }))
+    ));
+  }
+
+  function quantaHasStates() {
+    return quantaStates().length > 0;
+  }
+
+  function selectedQuantaContext() {
+    const states = quantaStates();
+    let selected = states.find(({ quantum }) => quantum.id === state.selectedQuantaStateId);
+    if (!selected) selected = states[0] || null;
+    if (selected) state.selectedQuantaStateId = selected.quantum.id;
+    return selected;
+  }
+
+  function flattenQuantaBlocks(blocks, output = []) {
+    for (const block of (Array.isArray(blocks) ? blocks : [])) {
+      if (!block || typeof block !== "object") continue;
+      if (Array.isArray(block.children)) flattenQuantaBlocks(block.children, output);
+      else output.push(block);
+    }
+    return output;
+  }
+
+  function quantaBlockHtml(block) {
+    const kind = String(block.kind || "content");
+    const text = String(block.text || block.title || "").trim();
+    const bullets = Array.isArray(block.bullets) ? block.bullets.filter(Boolean) : [];
+    const label = text || (kind === "image" ? "图像素材" : kind === "shape" ? "图形元素" : "内容元素");
+    return `<article class="quanta-canvas-block" data-quanta-block-kind="${escapeHTML(kind)}">
+      <span class="quanta-canvas-kind">${escapeHTML(kind)}</span>
+      <p>${escapeHTML(label)}</p>
+      ${bullets.length ? `<ul>${bullets.map((item) => `<li>${escapeHTML(item)}</li>`).join("")}</ul>` : ""}
+    </article>`;
+  }
+
+  function renderQuantaCanvas() {
+    const stageScroll = document.getElementById("stage-scroll");
+    if (!stageScroll) return;
+    if (els.deliveryReviewMaster) els.deliveryReviewMaster.hidden = true;
+    if (els.timelinePreviewEmpty) els.timelinePreviewEmpty.hidden = true;
+    if (els.assetGrid) els.assetGrid.hidden = true;
+    let canvas = document.getElementById("quanta-canvas");
+    if (!canvas) {
+      canvas = document.createElement("section");
+      canvas.id = "quanta-canvas";
+      canvas.className = "quanta-canvas";
+      canvas.setAttribute("aria-live", "polite");
+      stageScroll.appendChild(canvas);
+    }
+    const selected = selectedQuantaContext();
+    if (!selected) {
+      canvas.innerHTML = "";
+      canvas.hidden = true;
+      return;
+    }
+    const { scope, quantum } = selected;
+    const visible = new Set(Array.isArray(quantum.visible_block_ids) ? quantum.visible_block_ids.map(String) : []);
+    const blocks = flattenQuantaBlocks(scope.blocks).filter((block) => visible.has(String(block.id || "")));
+    const dwell = Number(quantum.dwell_sec || 0);
+    canvas.hidden = false;
+    canvas.innerHTML = `
+      <div class="quanta-canvas-sheet">
+        <div class="quanta-canvas-head">
+          <span>${escapeHTML(scope.layout || "content")}</span>
+          <span>${dwell > 0 ? `${dwell.toFixed(1)} 秒` : "手动停留"} · ${quantum.advance === "auto" ? "自动前进" : "等待交互"}</span>
+        </div>
+        <h2>${escapeHTML(scope.title || "未命名内容")}</h2>
+        <div class="quanta-canvas-content">
+          ${blocks.length ? blocks.map(quantaBlockHtml).join("") : `<p class="quanta-canvas-empty">此状态尚未显示内容</p>`}
+        </div>
+      </div>`;
+  }
+
+  let quantaFetchInFlight = false;
+  async function fetchProjectQuanta(options = {}) {
+    if (!state.sessionId || quantaFetchInFlight) return;
+    quantaFetchInFlight = true;
+    const sessionId = state.sessionId;
+    const activationSeq = runtimeActivationSeq;
+    try {
+      const r = await apiFetch(`/sessions/${sessionId}/quanta`);
+      if (!r.ok) return;
+      const data = await r.json();
+      if (state.sessionId !== sessionId || runtimeActivationSeq !== activationSeq) return;
+      const changed = !state.projectQuanta || state.projectQuanta.patch_seq !== data.patch_seq;
+      state.projectQuanta = data;
+      if (!changed && !options.force) return;
+      render();
+      if (stageTabs.includes("quanta")) refreshPanel("quanta");
+    } catch { /* ignore network errors */ }
+    finally { quantaFetchInFlight = false; }
+  }
+
   async function fetchProjectTimeline(options = {}) {
     if (!state.sessionId) return;
     if (state.ptDrag) return;   // never re-fetch/reconcile mid-drag (would detach the dragged clip)
+    if (TL.timelineFetchInFlight) return;
+    TL.timelineFetchInFlight = true;
+    const sessionId = state.sessionId;
+    const activationSeq = runtimeActivationSeq;
     try {
-      const r = await fetch(`/sessions/${state.sessionId}/timeline`);
+      const r = await apiFetch(`/sessions/${sessionId}/timeline`);
       if (!r.ok) return;
       const data = await r.json();
+      // A timeline request can finish after the creator has already selected
+      // another session. Never paint the old production into the new view.
+      if (state.sessionId !== sessionId || runtimeActivationSeq !== activationSeq) return;
       state.projectTimeline = data;
-      if (!options.force && data.patch_seq === TL._renderedSeq) return;   // unchanged → skip 3s DOM rebuild + media re-hydrate
-      renderProjectTimeline(data);
+      if (options.force || data.patch_seq !== TL._renderedSeq) {
+        renderProjectTimeline(data);
+      }
+      // LumenFrame owns an independent revision journal, so a stable timeline
+      // sequence cannot be used to skip this read.  The shared poll keeps both
+      // editing surfaces fresh without introducing a second scene model.
+      fetchLumenFrameCanvas({ force: options.force });
+      return data;
     } catch { /* ignore network errors */ }
+    finally { TL.timelineFetchInFlight = false; }
+  }
+
+  function requestedLumenFrame() {
+    const fps = Number(state.lumenFrameCanvas?.canvas?.fps || state.projectTimeline?.fps || 30);
+    const requested = Math.max(0, Math.round(Number(TL.playhead || 0) * Math.max(1, fps)));
+    const total = Number(state.lumenFrameCanvas?.canvas?.total_frames || 0);
+    return total > 0 ? Math.min(requested, total - 1) : requested;
+  }
+
+  async function fetchLumenFrameCanvas(options = {}) {
+    if (!state.sessionId || isQuantaSurface) return null;
+    const frame = Number.isFinite(Number(options.frame))
+      ? Math.max(0, Math.round(Number(options.frame)))
+      : requestedLumenFrame();
+    state.lumenFrameRequestedFrame = frame;
+    if (state.lumenFrameFetchInFlight) {
+      if (options.force) {
+        state.lumenFrameForceRefreshPending = true;
+        // A write must not finish against the stale poll already in flight.
+        // Resolve this promise only after the queued authoritative follow-up.
+        return new Promise((resolve) => {
+          (state.lumenFrameForceRefreshWaiters ||= []).push(resolve);
+        });
+      }
+      return null;
+    }
+    // Consume this request's force flag. If another forced reconciliation
+    // arrives while it is in flight, the flag is set again and drained below.
+    state.lumenFrameForceRefreshPending = false;
+    state.lumenFrameFetchInFlight = true;
+    const sessionId = state.sessionId;
+    const activationSeq = runtimeActivationSeq;
+    try {
+      const r = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}/lumenframe/canvas?frame=${frame}`);
+      if (!r.ok) {
+        const failure = await r.json().catch(() => ({}));
+        const detail = String(failure.error || failure.message || "渲染器返回了错误");
+        const errorKey = `${r.status}:${detail}`;
+        if (state.lumenFrameLastFetchError !== errorKey) {
+          state.lumenFrameLastFetchError = errorKey;
+          state.errors.push(`LumenFrame 无法渲染：${detail}`);
+          render();
+        }
+        return null;
+      }
+      const data = await r.json();
+      if (state.sessionId !== sessionId || runtimeActivationSeq !== activationSeq) return null;
+      state.lumenFrameLastFetchError = null;
+      const previous = state.lumenFrameCanvas;
+      const changed = !previous
+        || previous.revision !== data.revision
+        || Number(previous.canvas?.frame) !== Number(data.canvas?.frame);
+      state.lumenFrameCanvas = data;
+      if (state.selectedLumenLayerId && !selectedLumenFrameLayer()) {
+        state.selectedLumenLayerId = null;
+        if (state.canvasEdit?.kind === "lumenframe") state.canvasEdit = null;
+      }
+      if ((data.layers || []).length) {
+        if (els.emptyState) els.emptyState.hidden = true;
+        const railEmpty = document.getElementById("rail-empty");
+        if (railEmpty) railEmpty.hidden = true;
+      }
+      if (changed || options.force) {
+        renderDirectCanvas();
+        refreshPanel("properties");
+        updateEditHint();
+      }
+      return data;
+    } catch {
+      if (state.lumenFrameLastFetchError !== "network") {
+        state.lumenFrameLastFetchError = "network";
+        state.errors.push("LumenFrame 暂时无法读取，画布仍保留上一次成功状态");
+        render();
+      }
+      return null;
+    }
+    finally {
+      state.lumenFrameFetchInFlight = false;
+      const latestRequested = state.lumenFrameRequestedFrame;
+      const forceRefresh = state.lumenFrameForceRefreshPending;
+      const waiters = state.lumenFrameForceRefreshWaiters || [];
+      state.lumenFrameForceRefreshWaiters = [];
+      if (
+        state.sessionId === sessionId
+        && latestRequested != null
+        && (forceRefresh || latestRequested !== frame)
+      ) {
+        const followUp = fetchLumenFrameCanvas({ frame: latestRequested, force: forceRefresh });
+        if (waiters.length) {
+          Promise.resolve(followUp).then(
+            (data) => waiters.forEach((resolve) => resolve(data)),
+            () => waiters.forEach((resolve) => resolve(null)),
+          );
+        }
+      } else if (waiters.length) {
+        waiters.forEach((resolve) => resolve(null));
+      }
+    }
   }
 
   function startTimelinePoll() {
     stopTimelinePoll();
     TL._renderedSeq = null;   // force the first fetch of a (new) session to render authoritative state
-    state.timelinePollTimer = setInterval(fetchProjectTimeline, 3000);
-    fetchProjectTimeline();
+    const fetchSurface = isQuantaSurface ? fetchProjectQuanta : fetchProjectTimeline;
+    state.timelinePollTimer = setInterval(fetchSurface, 5000);
+    fetchSurface();
   }
 
   function stopTimelinePoll() {
@@ -1975,17 +3203,26 @@
     if (!TL.built) { buildTimelineShell(); return; }   // build() calls back into render once
     const model = timelineModel(data);
     TL.model = model;
+    if (model.tracks.some((track) => (track.clips || []).length)) {
+      els.emptyState.hidden = true;
+      const railEmpty = document.getElementById("rail-empty");
+      if (railEmpty) railEmpty.hidden = true;
+    }
     TL._renderedSeq = model.patch_seq;   // poll skips re-render until patch_seq changes
     const content = tlContent(), headers = tlHeaders();
     if (!content || !headers) return;
 
     const contentW = Math.ceil(model.contentDur * TL.pps);
     content.style.width = contentW + "px";
-    content.style.height = (model.tracks.length * TL_TRACK_H) + "px";
+    const trackHeight = timelineTrackHeight();
+    const lanePad = timelineLanePad();
+    content.style.height = (model.tracks.length * trackHeight + lanePad * 2) + "px";
+    headers.style.paddingTop = lanePad + "px";
+    headers.style.paddingBottom = lanePad + "px";
 
     headers.innerHTML = model.tracks.map((t) => {
       const isA = t.kind === "audio";
-      return `<div class="ptl-head ${escapeHTML(t.kind)}" style="height:${TL_TRACK_H}px" title="${escapeHTML(t.name || t.id)}">`
+      return `<div class="ptl-head ${escapeHTML(t.kind)}" style="height:${trackHeight}px" title="${escapeHTML(t.name || t.id)}">`
         + `<span class="ptl-head-kind">${isA ? "♪" : "▦"} ${escapeHTML(t.id)}</span></div>`;
     }).join("");
 
@@ -1995,19 +3232,26 @@
       lane.className = `ptl-lane ${t.kind}`;
       lane.dataset.trackId = t.id;
       lane.dataset.trackKind = t.kind;
-      lane.style.top = (i * TL_TRACK_H) + "px";
-      lane.style.height = TL_TRACK_H + "px";
+      lane.style.top = (lanePad + i * trackHeight) + "px";
+      lane.style.height = trackHeight + "px";
       (t.clips || []).forEach((clip) => lane.appendChild(buildClipEl(clip, t)));
       content.appendChild(lane);
     });
     const ph = document.createElement("div"); ph.className = "ptl-playhead"; ph.id = "ptl-playhead"; content.appendChild(ph);
     const mk = document.createElement("div"); mk.id = "ptl-markers"; content.appendChild(mk);
 
-    positionPlayhead();
+    setPlayhead(TL.playhead);
     positionMarkers();
     sizeRuler();
     drawRuler();
+    if (state.selectedClipId && !selectedClip()) {
+      state.selectedClipId = null;
+      state.canvasEdit = null;
+    }
     updateEditHint();
+    renderTimelineMicroInspector();
+    renderDirectCanvas();
+    refreshPanel("properties");
     requestAnimationFrame(hydrateMedia);
   }
 
@@ -2023,21 +3267,33 @@
   // ProjectStore path as the model's verbs — no parallel edit state.
 
   function editingEnabled() {
-    return !!state.sessionId && !state.turnInProgress;
+    return !!state.sessionId && !state.directEditPending;
   }
 
   async function postTimelineOp(opBody) {
     if (!state.sessionId) return null;
+    if (state.directEditPending) return null;
+    state.directEditPending = true;
+    updateEditHint();
+    const clientOpId = (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function")
+      ? globalThis.crypto.randomUUID()
+      : `edit-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     try {
-      const r = await fetch(`/sessions/${state.sessionId}/timeline/op`, {
+      const r = await apiFetch(`/sessions/${state.sessionId}/timeline/op`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(opBody),
+        body: JSON.stringify({
+          ...opBody,
+          client_op_id: clientOpId,
+          expected_project_revision: state.projectRevision,
+        }),
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
-        // Rejected (E_OVERLAP/E_RANGE/…). Surface the typed code, snap back.
-        state.errors.push(`edit rejected: ${[data.code, data.error].filter(Boolean).join(" ") || r.status}`);
+        const conflict = data.code === "E_REVISION_CONFLICT";
+        state.errors.push(conflict
+          ? "画面刚被更新，已同步最新版本，请再试一次"
+          : "这次微调没有生效，已恢复到最新状态");
         await fetchProjectTimeline();
         render();
         return null;
@@ -2049,23 +3305,82 @@
         for (const w of data.warnings) state.errors.push(String(w));
         render();
       }
+      applyProductionSnapshot(data);
       state.projectTimeline = data;
       renderProjectTimeline(data);     // reconcile from authoritative post-state
       return data;
     } catch (err) {
-      state.errors.push(`edit failed: ${err.message}`);
+      state.errors.push("这次微调没有生效，已恢复到最新状态");
       await fetchProjectTimeline();
       render();
       return null;
+    } finally {
+      state.directEditPending = false;
+      updateEditHint();
+      renderDirectCanvas();
+      refreshPanel("properties");
+    }
+  }
+
+  function makeDirectEditId(prefix = "edit") {
+    return (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function")
+      ? globalThis.crypto.randomUUID()
+      : `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  async function postLumenFrameOp(opBody) {
+    const canvas = state.lumenFrameCanvas;
+    if (!state.sessionId || !canvas?.revision || state.directEditPending) return null;
+    state.directEditPending = true;
+    updateEditHint();
+    try {
+      const r = await apiFetch(`/sessions/${encodeURIComponent(state.sessionId)}/lumenframe/op`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...opBody,
+          frame: Number(canvas.canvas?.frame || 0),
+          base_revision: canvas.revision,
+          client_op_id: makeDirectEditId("lumen-edit"),
+        }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        state.errors.push(data.code === "E_REVISION_CONFLICT"
+          ? "画面刚被更新，已同步最新版本，请再试一次"
+          : "这次图层微调没有生效，已恢复到最新状态");
+        if (state.canvasEdit?.kind === "lumenframe") state.canvasEdit = null;
+        await fetchLumenFrameCanvas({ force: true });
+        render();
+        return null;
+      }
+      await fetchLumenFrameCanvas({ force: true });
+      return data;
+    } catch {
+      state.errors.push("这次图层微调没有生效，已恢复到最新状态");
+      if (state.canvasEdit?.kind === "lumenframe") state.canvasEdit = null;
+      await fetchLumenFrameCanvas({ force: true });
+      render();
+      return null;
+    } finally {
+      state.directEditPending = false;
+      updateEditHint();
+      renderDirectCanvas();
+      refreshPanel("properties");
     }
   }
 
   function selectClip(clipId) {
     state.selectedClipId = clipId;
+    state.selectedLumenLayerId = null;
+    if (state.canvasEdit?.kind === "lumenframe") state.canvasEdit = null;
     document.querySelectorAll("#ptl-content .ptl-clip").forEach((el) => {
       el.classList.toggle("selected", el.dataset.clipId === clipId);
     });
     updateEditHint();
+    renderDirectCanvas();
+    renderTimelineMicroInspector();
+    refreshPanel("properties");
   }
 
   function focusEntity(kind, id) {
@@ -2110,12 +3425,1818 @@
     return null;
   }
 
+  function timelineClipById(clipId) {
+    if (!clipId) return null;
+    for (const track of (state.projectTimeline?.tracks || [])) {
+      const clip = (track.clips || []).find((item) => item.id === clipId);
+      if (clip) return { clip, track };
+    }
+    return null;
+  }
+
+  function composerContextKindLabel(kind) {
+    return ({
+      timeline_clip: "时间轴素材",
+      canvas_layer: "预览图层",
+      outline_scene: "大纲场景",
+      outline_shot: "大纲镜头",
+    })[kind] || "工程内容";
+  }
+
+  function contextFromDragElement(element) {
+    const source = element?.closest?.("[data-context-drag]");
+    if (!source || !state.sessionId) return null;
+    const sourceKind = source.dataset.contextDrag;
+    if (sourceKind === "timeline-clip") {
+      const clipEl = source.closest(".ptl-clip");
+      const found = timelineClipById(clipEl?.dataset.clipId);
+      if (!found) return null;
+      const { clip, track } = found;
+      return {
+        kind: "timeline_clip", id: clip.id, label: String(clip.name || "所选素材"),
+        asset_id: clip.asset_id || "", track_id: clip.track_id || track.id || "",
+        start: Number(clip.start || 0), duration: Number(clip.duration || 0), surface: "timeline",
+      };
+    }
+    if (sourceKind === "preview-selection") {
+      const layer = !state.selectedClipId ? selectedLumenFrameLayer() : null;
+      if (layer) {
+        return {
+          kind: "canvas_layer", id: layer.id, label: String(layer.name || layer.id),
+          layer_type: String(layer.type || ""), frame: Number(state.lumenFrameCanvas?.canvas?.frame || 0),
+          surface: "preview",
+        };
+      }
+      const clip = selectedClip();
+      if (!clip) return null;
+      return {
+        kind: "timeline_clip", id: clip.id, label: String(clip.name || "所选素材"),
+        asset_id: clip.asset_id || "", track_id: clip.track_id || "",
+        start: Number(clip.start || 0), duration: Number(clip.duration || 0), surface: "preview",
+      };
+    }
+    if (sourceKind === "outline-scene") {
+      return {
+        kind: "outline_scene", id: source.dataset.sceneId,
+        label: source.dataset.contextLabel || source.textContent || "大纲场景", surface: "outline",
+      };
+    }
+    if (sourceKind === "outline-shot") {
+      return {
+        kind: "outline_shot", id: source.dataset.shotId,
+        scene_id: source.dataset.sceneId || "",
+        label: source.dataset.contextLabel || "大纲镜头", surface: "outline",
+      };
+    }
+    return null;
+  }
+
+  function addComposerContext(ref) {
+    if (!state.sessionId) return false;
+    const normalized = normalizeComposerContextRefs([ref])[0];
+    if (!normalized) return false;
+    let selected = composerContextSelections.get(state.sessionId);
+    if (!selected) {
+      selected = new Map();
+      composerContextSelections.set(state.sessionId, selected);
+    }
+    const key = composerContextKey(normalized);
+    if (!selected.has(key) && selected.size >= 12) selected.delete(selected.keys().next().value);
+    selected.set(key, normalized);
+    renderComposerContext();
+    syncShell();
+    return true;
+  }
+
+  function removeComposerContext(key) {
+    const selected = state.sessionId && composerContextSelections.get(state.sessionId);
+    if (!selected) return;
+    selected.delete(key);
+    if (!selected.size) composerContextSelections.delete(state.sessionId);
+    renderComposerContext();
+    syncShell();
+  }
+
+  function clearComposerContext() {
+    if (state.sessionId) composerContextSelections.delete(state.sessionId);
+    renderComposerContext();
+    syncShell();
+  }
+
+  function selectedVisualClip() {
+    const clip = selectedClip();
+    return clip && ["video", "image"].includes(String(clip.media_kind || ""))
+      && clip.asset_id ? clip : null;
+  }
+
+  function selectedLumenFrameLayer() {
+    if (state.selectedClipId || !state.selectedLumenLayerId) return null;
+    return (state.lumenFrameCanvas?.layers || []).find(
+      (layer) => String(layer.id) === String(state.selectedLumenLayerId),
+    ) || null;
+  }
+
+  function lumenLayerCanTransform(layer) {
+    return !!layer && Boolean(layer.transform_editable ?? layer.editable);
+  }
+
+  function lumenLayerCanEdit(layer) {
+    return !!layer && Boolean(layer.property_editable ?? !layer.locked);
+  }
+
+  function lumenAppearanceInspectorAvailable(canvas = state.lumenFrameCanvas) {
+    const capabilities = canvas?.capabilities;
+    return Array.isArray(capabilities?.add_layer_types)
+      && Array.isArray(capabilities?.blend_modes)
+      && Array.isArray(capabilities?.effect_types)
+      && Array.isArray(capabilities?.mask_shapes);
+  }
+
+  function selectLumenFrameLayer(layerId) {
+    state.selectedClipId = null;
+    state.selectedLumenLayerId = layerId || null;
+    state.canvasEdit = null;
+    renderProjectTimeline(state.projectTimeline);
+    renderDirectCanvas();
+    renderTimelineMicroInspector();
+    refreshPanel("properties");
+    updateEditHint();
+  }
+
+  // ── Clip focus workspace ──────────────────────────────────────────────
+  // This is a structural view over /segments/{clip_id}; the review master is
+  // never used as a substitute for these objects.
+  function segmentWorkspaceState() { return state.segmentWorkspace; }
+  function segmentEntity(ref) {
+    const doc = segmentWorkspaceState().document || {};
+    for (const key of ["layers", "timeline", "states"]) {
+      const item = (doc[key] || []).find((entry) => String(entry?.id || "") === String(ref || ""));
+      if (item) return { key, item };
+    }
+    return null;
+  }
+  function segmentMediaLabel(kind) {
+    return ({ video: "视频", image: "图片", text: "文字", lottie: "Lottie", audio: "音频" })[String(kind || "video")] || "素材";
+  }
+  function segmentClientOpId(prefix = "segment") {
+    return (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function")
+      ? globalThis.crypto.randomUUID() : `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+  function segmentChannelName() {
+    const s = segmentWorkspaceState();
+    return s.clipId && state.sessionId ? `lumeri:segment:${state.sessionId}:${s.clipId}` : "";
+  }
+  function closeSegmentChannel() {
+    try { segmentWorkspaceState().channel?.close(); } catch {}
+    segmentWorkspaceState().channel = null;
+  }
+  function broadcastSegmentView(view) {
+    const s = segmentWorkspaceState();
+    const message = { kind: "segment_view", source: s.clientInstanceId, view: view || {} };
+    try { s.channel?.postMessage(message); } catch {}
+    if (!state.sessionId || !s.clipId) return;
+    apiFetch(`/sessions/${encodeURIComponent(state.sessionId)}/segments/${encodeURIComponent(s.clipId)}/view`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...message, client_instance_id: s.clientInstanceId }),
+    }).catch(() => {});
+  }
+  function setupSegmentChannel() {
+    const s = segmentWorkspaceState();
+    closeSegmentChannel();
+    if (!globalThis.BroadcastChannel || !segmentChannelName()) return;
+    try {
+      s.channel = new BroadcastChannel(segmentChannelName());
+      s.channel.onmessage = (event) => {
+        const message = event.data || {};
+        if (message.source === s.clientInstanceId || message.kind !== "segment_view") return;
+        const view = message.view || {};
+        if (view.selectedEntityRef != null) {
+          s.selectedEntityRef = String(view.selectedEntityRef || "");
+          renderSegmentWorkspace();
+        }
+        if (Number.isFinite(Number(view.zoom)) && !s.applyingView) {
+          s.applyingView = true;
+          setPps(Number(view.zoom));
+          s.applyingView = false;
+        }
+        if (view.layout && typeof view.layout === "object" && typeof workspaceSizes === "object") {
+          workspaceSizes = { ...workspaceSizes, ...view.layout };
+          applyWorkspaceLayout();
+        }
+        if (Number.isFinite(Number(view.playhead))) {
+          s.applyingView = true;
+          setPlayhead(Number(view.playhead));
+          s.applyingView = false;
+        }
+      };
+    } catch {}
+  }
+  async function fetchSegmentWorkspace(clipId = segmentWorkspaceState().clipId) {
+    if (!state.sessionId || !clipId) return null;
+    const r = await apiFetch(`/sessions/${encodeURIComponent(state.sessionId)}/segments/${encodeURIComponent(clipId)}`);
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || data.message || "片段结构暂不可用");
+    const s = segmentWorkspaceState();
+    s.document = data.segment || null;
+    s.clipId = String(data.clip_id || clipId);
+    s.segmentRef = data.segment_ref || data.segment?.segment_id || null;
+    s.revision = Number(data.segment?.revision || 0);
+    s.projectRevision = Number(data.project_revision || state.projectRevision || 0);
+    s.saved = !data.segment?.handback_required;
+    renderSegmentWorkspace();
+    return data;
+  }
+  function renderSegmentWorkspace() {
+    const s = segmentWorkspaceState();
+    const doc = s.document;
+    if (!doc || !els.segmentWorkspace) return;
+    const clip = [...(state.projectTimeline?.tracks || [])].flatMap((t) => t.clips || []).find((item) => String(item.id) === String(s.clipId));
+    const source = doc.source || {};
+    const kind = source.media_kind || clip?.media_kind || "video";
+    if (els.segmentTitle) els.segmentTitle.textContent = source.name || clip?.name || "所选素材";
+    if (els.segmentCanvasKind) els.segmentCanvasKind.textContent = segmentMediaLabel(kind);
+    if (els.segmentPresence) els.segmentPresence.textContent = doc.handback_required ? "你正在编辑 · 保存后交还" : "可以细化";
+    if (els.segmentAgentNote) els.segmentAgentNote.textContent = doc.handback_required ? "Lumeri 会避开你正在编辑的对象，保存后继续工作。" : "Lumeri 会避开你正在编辑的对象。";
+    if (els.segmentRevisionLabel) els.segmentRevisionLabel.textContent = `第 ${Number(doc.revision || 0)} 版`;
+    if (els.segmentCanvasLabel) els.segmentCanvasLabel.textContent = source.name || segmentMediaLabel(kind);
+    els.segmentCanvasObject?.classList.toggle("is-audio", kind === "audio");
+    const selected = segmentEntity(s.selectedEntityRef);
+    const selectedLayer = selected?.key === "layers" ? selected.item : (doc.layers || [])[0];
+    if (els.segmentCanvasObject && selectedLayer) {
+      const x = Number(selectedLayer.x || 0);
+      const y = Number(selectedLayer.y || 0);
+      const scale = Math.max(0.01, Number(selectedLayer.scale || 1));
+      const rotation = Number(selectedLayer.rotation || 0);
+      els.segmentCanvasObject.style.transform = `translate(${x}px, ${y}px) scale(${scale}) rotate(${rotation}deg)`;
+      els.segmentCanvasObject.style.opacity = selectedLayer.visible === false ? "0.22" : "1";
+      const preview = source.preview_src || (clip?.asset_id ? artifactUrl(clip.asset_id) : "");
+      if (preview && kind !== "audio" && kind !== "text") els.segmentCanvasObject.style.backgroundImage = `linear-gradient(135deg,rgba(10,15,19,.12),rgba(10,15,19,.4)),url("${preview.replace(/"/g, "\\\"")}")`;
+      else els.segmentCanvasObject.style.backgroundImage = "";
+    }
+    if (els.segmentSelectionReadout) els.segmentSelectionReadout.textContent = selected?.item?.name || (selected?.key === "states" ? "状态" : selected?.key === "timeline" ? "素材时间" : "选择一个对象开始");
+    if (els.segmentLayers) {
+      els.segmentLayers.innerHTML = (doc.layers || []).map((layer) => {
+        const ref = String(layer.id || "");
+        const active = ref === String(s.selectedEntityRef || "");
+        const reserved = !!(doc.reservations || {})[ref];
+        return `<button type="button" class="segment-tree-item${active ? " is-selected" : ""}${reserved ? " is-reserved" : ""}" data-segment-entity="${escapeHTML(ref)}"><span>${escapeHTML(layer.name || "图层")}</span><small>${layer.visible === false ? "隐藏" : "可见"}</small></button>`;
+      }).join("") || `<p class="placeholder">单素材图层</p>`;
+    }
+    if (els.segmentStates) {
+      if (els.segmentStateCount) els.segmentStateCount.textContent = String((doc.states || []).length);
+      els.segmentStates.innerHTML = (doc.states || []).map((item, index) => {
+        const ref = String(item.id || "");
+        const active = ref === String(s.selectedStateId || s.selectedEntityRef || "");
+        return `<button type="button" class="segment-tree-item${active ? " is-selected" : ""}" data-segment-state="${escapeHTML(ref)}"><span>${escapeHTML(item.name || `状态 ${index + 1}`)}</span><small>${Number(item.dwell_sec || 0).toFixed(1)} 秒 · ${item.advance === "auto" ? "自动" : "等待"}</small></button>`;
+      }).join("") || `<p class="placeholder">默认状态</p>`;
+    }
+    const selectedEntity = segmentEntity(s.selectedStateId || s.selectedEntityRef);
+    const stateItem = selectedEntity?.key === "states" ? selectedEntity.item : null;
+    const materialItem = selectedEntity?.key === "timeline" ? selectedEntity.item : null;
+    if (els.segmentPropertiesForm && (stateItem || materialItem)) {
+      const dwell = els.segmentPropertiesForm.elements.dwell_sec;
+      const advance = els.segmentPropertiesForm.elements.advance;
+      const materialStart = els.segmentPropertiesForm.elements.material_start;
+      const materialDuration = els.segmentPropertiesForm.elements.material_duration;
+      const visible = els.segmentPropertiesForm.elements.visible;
+      if (dwell && document.activeElement !== dwell) dwell.value = Number(stateItem?.dwell_sec || 0).toFixed(1);
+      if (advance && document.activeElement !== advance) advance.value = stateItem?.advance || "manual";
+      if (materialStart && document.activeElement !== materialStart) materialStart.value = Number(materialItem?.start || 0).toFixed(1);
+      if (materialDuration && document.activeElement !== materialDuration) materialDuration.value = Number(materialItem?.duration || 0.1).toFixed(1);
+      const layer = selected?.key === "layers" ? selected.item : null;
+      if (visible && layer && document.activeElement !== visible) visible.checked = layer.visible !== false;
+      for (const field of ["x", "y", "scale", "rotation"]) {
+        const input = els.segmentPropertiesForm.elements[field];
+        if (input && layer && document.activeElement !== input) input.value = Number(layer[field] || (field === "scale" ? 1 : 0));
+      }
+    }
+    if (els.segmentStateVisibility && els.segmentStateVisibilityList) {
+      const visibleIds = new Set((stateItem?.visible_layer_ids || []).map((id) => String(id)));
+      els.segmentStateVisibility.hidden = !stateItem;
+      els.segmentStateVisibilityList.innerHTML = stateItem
+        ? (doc.layers || []).map((layer) => {
+          const id = String(layer.id || "");
+          return `<label><input type="checkbox" data-state-layer="${escapeHTML(id)}" ${visibleIds.has(id) ? "checked" : ""} /> ${escapeHTML(layer.name || "图层")}</label>`;
+        }).join("")
+        : "";
+    }
+    const material = (doc.timeline || [])[0] || {};
+    if (els.segmentInnerTimeline) {
+      const width = Math.max(14, Math.min(96, Number(material.duration || 1) * 14));
+      const active = String(s.selectedEntityRef || "") === String(material.id || "");
+      els.segmentInnerTimeline.innerHTML = `<button type="button" class="segment-inner-timeline-bar${active ? " is-selected" : ""}" data-segment-material="${escapeHTML(material.id || "")}" style="width:${width}%" title="${Number(material.duration || 0).toFixed(1)} 秒，点击编辑时间">${Number(material.duration || 0).toFixed(1)} 秒</button>`;
+    }
+    if (els.segmentSaveBtn) els.segmentSaveBtn.disabled = !!s.pending;
+  }
+  async function postSegmentEdit(action, payload = {}) {
+    const s = segmentWorkspaceState();
+    if (!state.sessionId || !s.clipId || s.pending) return null;
+    s.pending = true;
+    renderSegmentWorkspace();
+    const entityRef = String(payload.entity_ref || s.selectedEntityRef || "");
+    if (entityRef && action !== "save") s.touched.add(entityRef);
+    const body = {
+      ...payload,
+      action,
+      clip_id: s.clipId,
+      entity_ref: entityRef || undefined,
+      entity_refs: [...s.touched],
+      expected_segment_revision: s.revision,
+      expected_project_revision: state.projectRevision,
+      client_op_id: segmentClientOpId(),
+      actor: "human",
+    };
+    try {
+      const r = await apiFetch(`/sessions/${encodeURIComponent(state.sessionId)}/segments/${encodeURIComponent(s.clipId)}/${action === "save" ? "save" : "op"}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        state.errors.push(data.code === "E_ENTITY_RESERVED" ? "Lumeri 正在使用另一个对象；你的对象没有被覆盖" : data.code === "E_SEGMENT_REVISION_CONFLICT" ? "片段刚被更新，已同步最新版本" : "这次片段修改没有生效");
+        await fetchSegmentWorkspace(s.clipId);
+        render();
+        return null;
+      }
+      s.document = data.segment;
+      s.segmentRef = data.segment_ref || data.segment?.segment_id || s.segmentRef;
+      s.revision = Number(data.segment?.revision || 0);
+      s.projectRevision = Number(data.project_revision || s.projectRevision);
+      state.projectRevision = Math.max(state.projectRevision, s.projectRevision);
+      s.saved = action === "save";
+      renderSegmentWorkspace();
+      return data;
+    } finally {
+      s.pending = false;
+      renderSegmentWorkspace();
+    }
+  }
+  function openSegmentWorkspace(clipId = state.selectedClipId) {
+    const clip = [...(state.projectTimeline?.tracks || [])].flatMap((t) => t.clips || []).find((item) => String(item.id) === String(clipId));
+    if (!clip || !state.sessionId) return;
+    const s = segmentWorkspaceState();
+    s.open = true; s.clipId = String(clip.id); s.segmentRef = clip.segment_ref || null; s.touched = new Set(); s.saved = false;
+    if (els.segmentWorkspace) els.segmentWorkspace.hidden = false;
+    setupSegmentChannel();
+    fetchSegmentWorkspace(s.clipId).catch((error) => { state.errors.push(error.message || "片段结构暂不可用"); render(); });
+    if (!s.popup) document.body.classList.add("segment-focus-open");
+  }
+  function closeSegmentWorkspace() {
+    const s = segmentWorkspaceState();
+    if (s.document?.handback_required && !s.saved) {
+      state.errors.push("请先点击“保存并交还”，再离开片段细化");
+      render();
+      return;
+    }
+    s.open = false;
+    if (els.segmentWorkspace) els.segmentWorkspace.hidden = true;
+    document.body.classList.remove("segment-focus-open");
+    closeSegmentChannel();
+  }
+  function setupSegmentWorkspace() {
+    els.segmentBack?.addEventListener("click", closeSegmentWorkspace);
+    els.segmentWindowBtn?.addEventListener("click", () => {
+      const s = segmentWorkspaceState();
+      if (!state.sessionId || !s.clipId) return;
+      const url = `${location.pathname}?mode=segment-window&session=${encodeURIComponent(state.sessionId)}&clip=${encodeURIComponent(s.clipId)}`;
+      window.open(url, `lumeri-segment-${s.clipId}`, "popup,width=1200,height=820");
+    });
+    els.segmentSaveBtn?.addEventListener("click", async () => {
+      const data = await postSegmentEdit("save");
+      if (data) {
+        const s = segmentWorkspaceState();
+        s.touched = new Set(); s.saved = true;
+        if (s.popup) window.close(); else closeSegmentWorkspace();
+      }
+    });
+    els.segmentLayers?.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-segment-entity]");
+      if (!button) return;
+      segmentWorkspaceState().selectedStateId = null;
+      segmentWorkspaceState().selectedEntityRef = button.dataset.segmentEntity;
+      renderSegmentWorkspace();
+      broadcastSegmentView({ selectedEntityRef: segmentWorkspaceState().selectedEntityRef });
+    });
+    els.segmentStates?.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-segment-state]");
+      if (!button) return;
+      const s = segmentWorkspaceState();
+      s.selectedStateId = button.dataset.segmentState; s.selectedEntityRef = button.dataset.segmentState;
+      renderSegmentWorkspace();
+      broadcastSegmentView({ selectedEntityRef: s.selectedEntityRef });
+    });
+    els.segmentInnerTimeline?.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-segment-material]");
+      if (!button) return;
+      const s = segmentWorkspaceState();
+      s.selectedStateId = null;
+      s.selectedEntityRef = button.dataset.segmentMaterial;
+      renderSegmentWorkspace();
+      broadcastSegmentView({ selectedEntityRef: s.selectedEntityRef });
+    });
+    els.segmentCanvasObject?.addEventListener("click", () => {
+      const s = segmentWorkspaceState();
+      const layer = (s.document?.layers || [])[0];
+      if (!layer) return;
+      s.selectedStateId = null;
+      s.selectedEntityRef = String(layer.id || "");
+      renderSegmentWorkspace();
+      broadcastSegmentView({ selectedEntityRef: s.selectedEntityRef });
+    });
+    let segmentCanvasDrag = null;
+    els.segmentCanvasObject?.addEventListener("pointerdown", (event) => {
+      const s = segmentWorkspaceState();
+      const layer = (s.document?.layers || []).find((item) => String(item.id || "") === String(s.selectedEntityRef || "")) || (s.document?.layers || [])[0];
+      if (!layer || !els.segmentCanvas) return;
+      s.selectedEntityRef = String(layer.id || "");
+      segmentCanvasDrag = { startX: event.clientX, startY: event.clientY, x: Number(layer.x || 0), y: Number(layer.y || 0), layer };
+      els.segmentCanvasObject.setPointerCapture?.(event.pointerId);
+      event.preventDefault();
+    });
+    els.segmentCanvasObject?.addEventListener("pointermove", (event) => {
+      if (!segmentCanvasDrag) return;
+      const drag = segmentCanvasDrag;
+      drag.layer.x = Math.round(drag.x + event.clientX - drag.startX);
+      drag.layer.y = Math.round(drag.y + event.clientY - drag.startY);
+      renderSegmentWorkspace();
+    });
+    els.segmentCanvasObject?.addEventListener("pointerup", () => {
+      if (!segmentCanvasDrag) return;
+      const drag = segmentCanvasDrag;
+      segmentCanvasDrag = null;
+      postSegmentEdit("set_layer", { entity_ref: drag.layer.id, changes: { x: drag.layer.x, y: drag.layer.y } });
+    });
+    els.segmentStateAdd?.addEventListener("click", () => postSegmentEdit("state_add"));
+    els.segmentStateCopy?.addEventListener("click", () => {
+      const s = segmentWorkspaceState();
+      postSegmentEdit("state_copy", { entity_ref: s.selectedStateId || s.selectedEntityRef });
+    });
+    els.segmentStateDelete?.addEventListener("click", () => {
+      const s = segmentWorkspaceState();
+      postSegmentEdit("state_delete", { entity_ref: s.selectedStateId || s.selectedEntityRef });
+    });
+    const moveSelectedState = (delta) => {
+      const s = segmentWorkspaceState();
+      const ref = s.selectedStateId || s.selectedEntityRef;
+      const index = (s.document?.states || []).findIndex((item) => String(item.id || "") === String(ref || ""));
+      if (index < 0) return;
+      postSegmentEdit("state_reorder", { entity_ref: ref, index: Math.max(0, Math.min((s.document.states || []).length - 1, index + delta)) });
+    };
+    els.segmentStateUp?.addEventListener("click", () => moveSelectedState(-1));
+    els.segmentStateDown?.addEventListener("click", () => moveSelectedState(1));
+    els.segmentPropertiesForm?.addEventListener("change", (event) => {
+      const s = segmentWorkspaceState();
+      const selected = segmentEntity(s.selectedStateId || s.selectedEntityRef);
+      if (!selected) return;
+      if (selected.key === "states") {
+        const changes = { dwell_sec: Number(els.segmentPropertiesForm.elements.dwell_sec.value || 0.1), advance: els.segmentPropertiesForm.elements.advance.value };
+        if (event.target.matches("[data-state-layer]")) {
+          changes.visible_layer_ids = [...els.segmentStateVisibilityList.querySelectorAll("[data-state-layer]:checked")].map((input) => input.dataset.stateLayer);
+        }
+        postSegmentEdit("set_state", { entity_ref: selected.item.id, changes });
+      } else if (selected.key === "timeline" && ["material_start", "material_duration"].includes(event.target.name)) {
+        const changes = {
+          start: Number(els.segmentPropertiesForm.elements.material_start.value || 0),
+          duration: Number(els.segmentPropertiesForm.elements.material_duration.value || 0.1),
+        };
+        postSegmentEdit("set_timeline", { entity_ref: selected.item.id, changes });
+      } else if (selected.key === "layers" && event.target.name === "visible") {
+        postSegmentEdit("set_layer", { entity_ref: selected.item.id, changes: { visible: !!event.target.checked } });
+      } else if (selected.key === "layers" && ["x", "y", "scale", "rotation"].includes(event.target.name)) {
+        const changes = {};
+        for (const field of ["x", "y", "scale", "rotation"]) {
+          const input = els.segmentPropertiesForm.elements[field];
+          if (input) changes[field] = Number(input.value || (field === "scale" ? 1 : 0));
+        }
+        postSegmentEdit("set_layer", { entity_ref: selected.item.id, changes });
+      }
+    });
+    document.addEventListener("keydown", (event) => {
+      if (!segmentWorkspaceState().open || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "s") return;
+      event.preventDefault();
+      els.segmentSaveBtn?.click();
+    });
+    if (isSegmentWindow) {
+      // attachSession() resolves the same durable runner; no new session is
+      // created for this window.
+      window.setTimeout(() => { if (state.sessionId) openSegmentWorkspace(segmentWindowClipId); }, 0);
+    }
+  }
+
+  function parseTimeValue(value, fps) {
+    const raw = String(value || "").trim();
+    if (!raw.includes(":")) return Number(raw);
+    const parts = raw.split(":").map(Number);
+    if (parts.some((part) => !Number.isFinite(part))) return NaN;
+    while (parts.length < 4) parts.unshift(0);
+    const [hours, minutes, seconds, frames] = parts.slice(-4);
+    return hours * 3600 + minutes * 60 + seconds + frames / Math.max(1, fps);
+  }
+
+  function directCanvasDimensions() {
+    if (!state.selectedClipId && (state.lumenFrameCanvas?.layers || []).length) {
+      return {
+        width: Number(state.lumenFrameCanvas.canvas?.width || 1920),
+        height: Number(state.lumenFrameCanvas.canvas?.height || 1080),
+      };
+    }
+    return {
+      width: Number(state.projectTimeline?.width || TL.model?.width || 1920),
+      height: Number(state.projectTimeline?.height || TL.model?.height || 1080),
+    };
+  }
+
+  function ensureCanvasEdit(clip) {
+    if (!clip) { state.canvasEdit = null; return null; }
+    if (!state.canvasEdit || state.canvasEdit.clipId !== clip.id) {
+      state.canvasEdit = {
+        clipId: clip.id,
+        assetId: clip.asset_id,
+        naturalWidth: 0,
+        naturalHeight: 0,
+        localEffects: null,
+        drag: null,
+      };
+    }
+    return state.canvasEdit;
+  }
+
+  function ensureLumenFrameEdit(layer) {
+    if (!layer) {
+      if (state.canvasEdit?.kind === "lumenframe") state.canvasEdit = null;
+      return null;
+    }
+    const canvas = state.lumenFrameCanvas;
+    if (
+      state.canvasEdit?.kind !== "lumenframe"
+      || state.canvasEdit.layerId !== layer.id
+      || state.canvasEdit.revision !== canvas?.revision
+      || state.canvasEdit.frame !== Number(canvas?.canvas?.frame || 0)
+    ) {
+      state.canvasEdit = {
+        kind: "lumenframe",
+        layerId: layer.id,
+        revision: canvas?.revision,
+        frame: Number(canvas?.canvas?.frame || 0),
+        localTransform: null,
+        drag: null,
+      };
+    }
+    return state.canvasEdit;
+  }
+
+  function lumenFrameGeometry(layer = selectedLumenFrameLayer()) {
+    if (!layer) return null;
+    const edit = ensureLumenFrameEdit(layer);
+    const canvas = directCanvasDimensions();
+    const stored = layer.transform && typeof layer.transform === "object" ? layer.transform : {};
+    const transform = { ...stored, ...(edit.localTransform || {}) };
+    const initialScale = Math.max(0.01, Number(stored.scale || 1));
+    const scale = Math.max(0.01, Number(transform.scale || 1));
+    const ratio = scale / initialScale;
+    const bounds = layer.bounds || {};
+    // The canonical compositor reports the rendered layer bounds after the
+    // stored transform has been applied.  Use that actual selected-object
+    // centre as the gesture origin; transform.x/y are deltas, not an absolute
+    // centre measured from the full canvas midpoint.
+    const initialCenterX = Number(bounds.x || 0) + Number(bounds.width || 1) / 2;
+    const initialCenterY = Number(bounds.y || 0) + Number(bounds.height || 1) / 2;
+    const centerX = initialCenterX + Number(transform.x || 0) - Number(stored.x || 0);
+    const centerY = initialCenterY + Number(transform.y || 0) - Number(stored.y || 0);
+    const width = Math.max(1, Number(bounds.width || 1) * ratio);
+    const height = Math.max(1, Number(bounds.height || 1) * ratio);
+    const x = Number(bounds.x || 0) + (centerX - initialCenterX) - (width - Number(bounds.width || 1)) / 2;
+    const y = Number(bounds.y || 0) + (centerY - initialCenterY) - (height - Number(bounds.height || 1)) / 2;
+    const rotationSign = Number(state.lumenFrameCanvas?.rotation_css_sign || -1) || -1;
+    return {
+      ...canvas,
+      x, y, width, height, centerX, centerY, scale,
+      rotation: Number(transform.rotation || 0) * rotationSign,
+      backendRotation: Number(transform.rotation || 0),
+      rotationSign,
+      stored,
+      transform,
+      initialCenterX,
+      initialCenterY,
+      initialScale,
+    };
+  }
+
+  function canvasGeometry(clip = selectedVisualClip()) {
+    if (!clip) return null;
+    const edit = ensureCanvasEdit(clip);
+    const canvas = directCanvasDimensions();
+    const naturalWidth = edit.naturalWidth || canvas.width;
+    const naturalHeight = edit.naturalHeight || canvas.height;
+    const fit = Math.min(canvas.width / naturalWidth, canvas.height / naturalHeight);
+    const baseWidth = naturalWidth * fit;
+    const baseHeight = naturalHeight * fit;
+    const stored = clip.effects && typeof clip.effects === "object" ? clip.effects : {};
+    const effects = { ...stored, ...(edit.localEffects || {}) };
+    const scale = Math.max(0.01, Number(effects.scale ?? 1) || 1);
+    const width = baseWidth * scale;
+    const height = baseHeight * scale;
+    const x = effects.x == null ? (canvas.width - width) / 2 : Number(effects.x) || 0;
+    const y = effects.y == null ? (canvas.height - height) / 2 : Number(effects.y) || 0;
+    return {
+      ...canvas, baseWidth, baseHeight, width, height, x, y, scale,
+      centerX: x + width / 2,
+      centerY: y + height / 2,
+      rotation: Number(effects.rotation || 0),
+      effects,
+    };
+  }
+
+  function setInspectorValues(container, values) {
+    if (!container) return;
+    container.querySelectorAll("[data-edit-field]").forEach((input) => {
+      if (document.activeElement === input) return;
+      const field = input.dataset.editField;
+      if (Object.hasOwn(values, field)) input.value = values[field];
+      input.disabled = state.directEditPending;
+    });
+  }
+
+  function layoutDirectCanvas() {
+    if (!state.selectedClipId && (state.lumenFrameCanvas?.layers || []).length) {
+      layoutLumenFrameCanvas();
+      return;
+    }
+    const clip = selectedVisualClip();
+    const geometry = canvasGeometry(clip);
+    if (!geometry || !els.directCanvasShell || els.directCanvasShell.hidden) return;
+    const shellRect = els.directCanvasShell.getBoundingClientRect();
+    if (!shellRect.width || !shellRect.height) return;
+    const dims = directCanvasDimensions();
+    // The editing surface always represents the full Project canvas, not the
+    // selected object's bounds, so resizing never changes persisted geometry.
+    const canvasK = Math.min(shellRect.width / dims.width, shellRect.height / dims.height);
+    els.directCanvasSpace.style.width = `${dims.width * canvasK}px`;
+    els.directCanvasSpace.style.height = `${dims.height * canvasK}px`;
+    els.directCanvasSpace.dataset.canvasScale = String(canvasK);
+    const media = clip.media_kind === "image" ? els.directCanvasImage : els.directCanvasVideo;
+    for (const element of [media, els.directSelectionBox]) {
+      element.style.left = `${geometry.x * canvasK}px`;
+      element.style.top = `${geometry.y * canvasK}px`;
+      element.style.width = `${geometry.width * canvasK}px`;
+      element.style.height = `${geometry.height * canvasK}px`;
+      element.style.transformOrigin = "50% 50%";
+      element.style.transform = `rotate(${geometry.rotation}deg)`;
+    }
+    const inspector = els.canvasMicroInspector;
+    if (inspector) {
+      const preferredTop = (geometry.y + geometry.height) * canvasK + 14;
+      const aboveTop = geometry.y * canvasK - 48;
+      inspector.style.left = `${Math.max(6, Math.min(geometry.x * canvasK, dims.width * canvasK - 290))}px`;
+      inspector.style.top = `${preferredTop + 42 < dims.height * canvasK ? preferredTop : Math.max(6, aboveTop)}px`;
+      setInspectorValues(inspector, {
+        x: geometry.centerX.toFixed(1), y: geometry.centerY.toFixed(1),
+        scale: (geometry.scale * 100).toFixed(1), rotation: geometry.rotation.toFixed(1),
+      });
+    }
+  }
+
+  function lumenFrameImageUrl(mode = "composite", layerId = null) {
+    const canvas = state.lumenFrameCanvas;
+    if (!state.sessionId || !canvas?.revision) return "";
+    const params = new URLSearchParams({
+      frame: String(Number(canvas.canvas?.frame || 0)),
+      revision: String(canvas.revision),
+      mode,
+    });
+    if (layerId) params.set("layer_id", String(layerId));
+    return `/sessions/${encodeURIComponent(state.sessionId)}/lumenframe/frame.png?${params}`;
+  }
+
+  function lumenFrameBackgroundImage() {
+    if (!els.directCanvasSpace) return null;
+    let image = document.getElementById("direct-canvas-background");
+    if (!image) {
+      image = document.createElement("img");
+      image.id = "direct-canvas-background";
+      image.className = "direct-canvas-media";
+      image.alt = "";
+      image.hidden = true;
+      els.directCanvasSpace.insertBefore(image, els.directCanvasVideo || els.directCanvasSpace.firstChild);
+    }
+    return image;
+  }
+
+  function layoutLumenFrameCanvas() {
+    if (!els.directCanvasShell || els.directCanvasShell.hidden || !els.directCanvasImage || !els.directCanvasLayerPreview) return;
+    const dims = directCanvasDimensions();
+    const shellRect = els.directCanvasShell.getBoundingClientRect();
+    if (!shellRect.width || !shellRect.height) return;
+    const canvasK = Math.min(shellRect.width / dims.width, shellRect.height / dims.height);
+    els.directCanvasSpace.style.width = `${dims.width * canvasK}px`;
+    els.directCanvasSpace.style.height = `${dims.height * canvasK}px`;
+    els.directCanvasSpace.dataset.canvasScale = String(canvasK);
+    const background = lumenFrameBackgroundImage();
+    for (const image of [background, els.directCanvasImage, els.directCanvasLayerPreview]) {
+      if (!image) continue;
+      image.style.left = "0px";
+      image.style.top = "0px";
+      image.style.width = `${dims.width * canvasK}px`;
+      image.style.height = `${dims.height * canvasK}px`;
+      image.style.transformOrigin = "50% 50%";
+      image.style.transform = "none";
+    }
+
+    const layer = selectedLumenFrameLayer();
+    const geometry = lumenFrameGeometry(layer);
+    if (!layer || !geometry || !lumenLayerCanTransform(layer)) {
+      els.directSelectionBox.hidden = true;
+      els.canvasMicroInspector.hidden = true;
+      return;
+    }
+    const edit = ensureLumenFrameEdit(layer);
+    const local = edit.localTransform;
+    if (local && !layer.clip_to_below) {
+      const dx = Number(local.x || 0) - Number(geometry.stored.x || 0);
+      const dy = Number(local.y || 0) - Number(geometry.stored.y || 0);
+      const scaleRatio = geometry.scale / geometry.initialScale;
+      const deltaRotation = (
+        Number(local.rotation ?? geometry.stored.rotation ?? 0)
+        - Number(geometry.stored.rotation || 0)
+      ) * geometry.rotationSign;
+      els.directCanvasLayerPreview.style.transformOrigin = `${geometry.initialCenterX * canvasK}px ${geometry.initialCenterY * canvasK}px`;
+      els.directCanvasLayerPreview.style.transform = `translate(${dx * canvasK}px, ${dy * canvasK}px) rotate(${deltaRotation}deg) scale(${scaleRatio})`;
+    }
+    const selectionRotation = local
+      ? (Number(local.rotation ?? geometry.stored.rotation ?? 0) - Number(geometry.stored.rotation || 0)) * geometry.rotationSign
+      : 0;
+    els.directSelectionBox.style.left = `${geometry.x * canvasK}px`;
+    els.directSelectionBox.style.top = `${geometry.y * canvasK}px`;
+    els.directSelectionBox.style.width = `${geometry.width * canvasK}px`;
+    els.directSelectionBox.style.height = `${geometry.height * canvasK}px`;
+    els.directSelectionBox.style.transform = selectionRotation ? `rotate(${selectionRotation}deg)` : "none";
+    const inspector = els.canvasMicroInspector;
+    if (inspector) {
+      const preferredTop = (geometry.y + geometry.height) * canvasK + 14;
+      const aboveTop = geometry.y * canvasK - 48;
+      inspector.style.left = `${Math.max(6, Math.min(geometry.x * canvasK, dims.width * canvasK - 290))}px`;
+      inspector.style.top = `${preferredTop + 42 < dims.height * canvasK ? preferredTop : Math.max(6, aboveTop)}px`;
+      setInspectorValues(inspector, {
+        x: geometry.centerX.toFixed(1), y: geometry.centerY.toFixed(1),
+        scale: (geometry.scale * 100).toFixed(1), rotation: geometry.rotation.toFixed(1),
+      });
+      inspector.querySelectorAll("[data-edit-field]").forEach((input) => {
+        input.disabled = state.directEditPending || !lumenLayerCanTransform(layer);
+      });
+    }
+  }
+
+  function syncDirectCanvasMedia() {
+    if (!state.selectedClipId && (state.lumenFrameCanvas?.layers || []).length) {
+      const frame = requestedLumenFrame();
+      if (frame !== Number(state.lumenFrameCanvas?.canvas?.frame)) {
+        fetchLumenFrameCanvas({ frame });
+      }
+      return;
+    }
+    const clip = selectedVisualClip();
+    const video = els.directCanvasVideo;
+    if (!clip || clip.media_kind !== "video" || !video || video.hidden) return;
+    const sourceTime = Number(clip.source_in || 0) + Math.max(0, TL.playhead - Number(clip.start || 0));
+    const target = Math.min(Number(clip.source_out || sourceTime), sourceTime);
+    if (Math.abs((Number(video.currentTime) || 0) - target) < 0.025) return;
+    try { video.currentTime = target; } catch {}
+  }
+
+  function hideDirectCanvas() {
+    if (els.directCanvasShell) els.directCanvasShell.hidden = true;
+    if (els.directSelectionBox) els.directSelectionBox.hidden = true;
+    if (els.canvasMicroInspector) els.canvasMicroInspector.hidden = true;
+    const background = document.getElementById("direct-canvas-background");
+    if (background) background.hidden = true;
+    if (els.directCanvasLayerPreview) els.directCanvasLayerPreview.hidden = true;
+  }
+
+  function renderLumenFrameCanvas() {
+    const canvas = state.lumenFrameCanvas;
+    if (!canvas || !(canvas.layers || []).length || state.selectedClipId) return false;
+    const layer = selectedLumenFrameLayer();
+    const background = lumenFrameBackgroundImage();
+    els.directCanvasVideo.hidden = true;
+    delete els.directCanvasVideo.dataset.assetId;
+    els.directCanvasImage.hidden = false;
+    delete els.directCanvasImage.dataset.assetId;
+    delete els.directCanvasLayerPreview.dataset.assetId;
+    if (layer) {
+      const edit = lumenLayerCanTransform(layer) ? ensureLumenFrameEdit(layer) : null;
+      // A clipped layer depends on its immediate sibling's canvas alpha, so an
+      // isolated PNG would be empty. Keep the canonical composite visible and
+      // move only the selection outline until that transform is committed.
+      const localTransformPreview = Boolean(edit?.drag || edit?.localTransform) && !layer.clip_to_below;
+      const compositeUrl = lumenFrameImageUrl();
+      if (els.directCanvasImage.dataset.lumenUrl !== compositeUrl) {
+        els.directCanvasImage.dataset.lumenUrl = compositeUrl;
+        els.directCanvasImage.src = compositeUrl;
+      }
+      if (localTransformPreview) {
+        // Keep the canonical composite in its own bitmap. Switching one image
+        // from composite→only is asynchronous and briefly transformed the old
+        // full frame, which looked like the wrong layer was moving.
+        const onlyUrl = lumenFrameImageUrl("only", layer.id);
+        const excludeUrl = lumenFrameImageUrl("exclude", layer.id);
+        if (els.directCanvasLayerPreview.dataset.lumenUrl !== onlyUrl) {
+          els.directCanvasLayerPreview.dataset.lumenUrl = onlyUrl;
+          els.directCanvasLayerPreview.src = onlyUrl;
+        }
+        if (background && background.dataset.lumenUrl !== excludeUrl) {
+          background.dataset.lumenUrl = excludeUrl;
+          background.src = excludeUrl;
+        }
+        if (background) background.hidden = false;
+        els.directCanvasImage.hidden = true;
+        els.directCanvasLayerPreview.hidden = false;
+      } else {
+        // Blend modes and adjustment layers cannot be reconstructed truthfully
+        // by stacking two ordinary DOM images. Use the canonical compositor.
+        if (background) background.hidden = true;
+        els.directCanvasImage.hidden = false;
+        els.directCanvasLayerPreview.hidden = true;
+        // Preload both gesture bitmaps while the canonical composite is shown.
+        // The first drag therefore starts with the actual selected layer.
+        if (!layer.clip_to_below) {
+          const onlyUrl = lumenFrameImageUrl("only", layer.id);
+          const excludeUrl = lumenFrameImageUrl("exclude", layer.id);
+          if (els.directCanvasLayerPreview.dataset.lumenUrl !== onlyUrl) {
+            els.directCanvasLayerPreview.dataset.lumenUrl = onlyUrl;
+            els.directCanvasLayerPreview.src = onlyUrl;
+          }
+          if (background && background.dataset.lumenUrl !== excludeUrl) {
+            background.dataset.lumenUrl = excludeUrl;
+            background.src = excludeUrl;
+          }
+        }
+      }
+      const transformEditable = lumenLayerCanTransform(layer);
+      els.directSelectionBox.hidden = !transformEditable;
+      els.canvasMicroInspector.hidden = !transformEditable;
+      els.directSelectionName.textContent = `${String(layer.name || layer.id)}${lumenLayerCanEdit(layer) ? "" : " · 只读"}`;
+    } else {
+      const compositeUrl = lumenFrameImageUrl();
+      if (els.directCanvasImage.dataset.lumenUrl !== compositeUrl) {
+        els.directCanvasImage.dataset.lumenUrl = compositeUrl;
+        els.directCanvasImage.src = compositeUrl;
+      }
+      if (background) background.hidden = true;
+      els.directCanvasImage.hidden = false;
+      els.directCanvasLayerPreview.hidden = true;
+      els.directSelectionBox.hidden = true;
+      els.canvasMicroInspector.hidden = true;
+    }
+    els.directCanvasShell.hidden = false;
+    if (els.deliveryReviewMaster) els.deliveryReviewMaster.hidden = true;
+    if (els.timelinePreviewEmpty) els.timelinePreviewEmpty.hidden = true;
+    requestAnimationFrame(layoutLumenFrameCanvas);
+    return true;
+  }
+
+  function renderDirectCanvas() {
+    if (isQuantaSurface || !els.directCanvasShell) return false;
+    if (renderLumenFrameCanvas()) return true;
+    const clip = selectedVisualClip();
+    if (!clip) { hideDirectCanvas(); return false; }
+    const edit = ensureCanvasEdit(clip);
+    const background = document.getElementById("direct-canvas-background");
+    if (background) background.hidden = true;
+    if (els.directCanvasLayerPreview) els.directCanvasLayerPreview.hidden = true;
+    delete els.directCanvasImage.dataset.lumenUrl;
+    const url = artifactUrl(clip.asset_id);
+    const isImage = clip.media_kind === "image";
+    const media = isImage ? els.directCanvasImage : els.directCanvasVideo;
+    const other = isImage ? els.directCanvasVideo : els.directCanvasImage;
+    other.hidden = true;
+    if (media.dataset.assetId !== clip.asset_id) {
+      media.dataset.assetId = clip.asset_id;
+      media.src = url;
+      if (!isImage) media.load();
+    }
+    media.hidden = false;
+    els.directCanvasShell.hidden = false;
+    els.directSelectionBox.hidden = false;
+    els.canvasMicroInspector.hidden = false;
+    els.directSelectionName.textContent = String(clip.name || "所选素材");
+    if (els.deliveryReviewMaster) els.deliveryReviewMaster.hidden = true;
+    if (els.timelinePreviewEmpty) els.timelinePreviewEmpty.hidden = true;
+    requestAnimationFrame(layoutDirectCanvas);
+    syncDirectCanvasMedia();
+    return true;
+  }
+
+  function renderTimelineMicroInspector() {
+    const form = document.getElementById("timeline-micro-inspector");
+    if (!form) return;
+    const clip = selectedClip();
+    if (!clip) { form.hidden = true; form.innerHTML = ""; return; }
+    const fps = Number(state.projectTimeline?.fps || 30);
+    form.hidden = false;
+    form.innerHTML = `
+      <label>开始 <input data-edit-field="start" value="${fmtTC(clip.start)}" aria-label="开始时间" /></label>
+      <label>时长 <input data-edit-field="duration" value="${fmtTC(clip.duration)}" aria-label="时长" /></label>
+      <label>入点 <input data-edit-field="source_in" value="${fmtTC(clip.source_in)}" aria-label="素材入点" /></label>
+      <label>出点 <input data-edit-field="source_out" value="${fmtTC(clip.source_out)}" aria-label="素材出点" /></label>
+      <button type="button" class="micro-expand" data-open-properties>属性</button>`;
+    form.querySelectorAll("input").forEach((input) => {
+      input.dataset.fps = String(fps);
+      input.disabled = state.directEditPending;
+    });
+  }
+
+  const LUMEN_BLEND_LABELS = {
+    normal: "正常", multiply: "正片叠底", screen: "滤色", overlay: "叠加",
+    add: "相加", linear_dodge: "线性减淡", lighten: "变亮", darken: "变暗",
+    difference: "差值", exclusion: "排除", subtract: "减去",
+    hard_light: "强光", soft_light: "柔光", color_dodge: "颜色减淡",
+    color_burn: "颜色加深",
+  };
+
+  function lumenLayerTypeLabel(type) {
+    return ({
+      adjustment: "调整", composition: "合成", gradient: "渐变", html: "HTML",
+      image: "图像", shape: "形状", solid: "纯色", text: "文字", video: "视频",
+    })[String(type || "")] || String(type || "图层");
+  }
+
+  function lumenCompositionDuration() {
+    const canvas = state.lumenFrameCanvas?.canvas || {};
+    const fps = Math.max(1, Number(canvas.fps || 30));
+    return Math.max(1 / fps, Number(canvas.total_frames || 1) / fps);
+  }
+
+  function lumenGradientData(layer) {
+    const source = layer?.gradient && typeof layer.gradient === "object"
+      ? layer.gradient
+      : (layer?.props && typeof layer.props === "object" ? layer.props : {});
+    const stops = Array.isArray(source.stops) && source.stops.length >= 2
+      ? source.stops
+      : [[0, "#151b22"], [1, "#5ad9ff"]];
+    return {
+      mode: source.mode === "radial" ? "radial" : "linear",
+      stops,
+      angle: Number(source.angle || 0),
+      center: Array.isArray(source.center) ? source.center.slice(0, 2) : [0.5, 0.5],
+      radius: Number(source.radius ?? 0.5),
+    };
+  }
+
+  function lumenColorParts(raw) {
+    let value = String(raw || "#000000").trim();
+    if (/^#[0-9a-f]{3}$/i.test(value)) {
+      value = `#${value.slice(1).split("").map((part) => part + part).join("")}`;
+    }
+    const match = value.match(/^#([0-9a-f]{6})([0-9a-f]{2})?$/i);
+    if (!match) return { color: "#000000", alpha: 100 };
+    return {
+      color: `#${match[1]}`,
+      alpha: match[2] ? Math.round(parseInt(match[2], 16) / 255 * 100) : 100,
+    };
+  }
+
+  function lumenLayerToolbarHtml(canvas, selectedId) {
+    const layers = [...(canvas.layers || [])]
+      .sort((a, b) => Number(b.z || 0) - Number(a.z || 0));
+    const disabled = state.directEditPending ? " disabled" : "";
+    const chips = layers.length ? layers.map((layer) => {
+      const selected = String(layer.id) === String(selectedId || "");
+      const readOnly = !lumenLayerCanEdit(layer);
+      return `<button type="button" class="lumen-layer-chip${selected ? " is-selected" : ""}"
+        data-lumen-layer-id="${escapeHTML(layer.id)}" aria-pressed="${selected}"${readOnly ? ' title="只读图层"' : ""}>
+        <span>${escapeHTML(layer.name || layer.id)}</span><span>${escapeHTML(lumenLayerTypeLabel(layer.type))}${readOnly ? " · 只读" : ""}</span>
+      </button>`;
+    }).join("") : `<p class="lumen-empty-hint">还没有可见图层，先添加一个图层。</p>`;
+    return `<div class="lumen-layer-toolbar">
+      <div class="lumen-prop-head"><span>图层</span><span>${layers.length}</span></div>
+      <div class="lumen-add-row" aria-label="添加 LumenFrame 图层">
+        <button type="button" class="lumen-add-button" data-lumen-add="gradient"${disabled}>渐变</button>
+        <button type="button" class="lumen-add-button" data-lumen-add="shape-rect"${disabled}>矩形</button>
+        <button type="button" class="lumen-add-button" data-lumen-add="shape-ellipse"${disabled}>圆形</button>
+        <button type="button" class="lumen-add-button" data-lumen-add="adjustment"${disabled}>调整层</button>
+      </div>
+      <div class="lumen-layer-list">${chips}</div>
+    </div>`;
+  }
+
+  function lumenEffectsHtml(layer, disabled) {
+    const effects = Array.isArray(layer.effects) ? layer.effects : [];
+    const rows = effects.length ? effects.map((effect, index) => {
+      const enabled = effect.enabled !== false;
+      const effectId = escapeHTML(effect.id || "");
+      const isBlur = String(effect.type) === "gaussian_blur";
+      const label = isBlur ? "高斯模糊" : String(effect.type || "效果");
+      const radius = Math.max(0, Number(effect.params?.radius || 0));
+      return `<div class="lumen-effect-row${enabled ? "" : " is-disabled"}" data-lumen-effect-id="${effectId}">
+        <div class="lumen-effect-main">
+          <input type="checkbox" data-lumen-control="effect-enabled" data-effect-id="${effectId}"
+            aria-label="启用 ${escapeHTML(label)}"${enabled ? " checked" : ""}${disabled} />
+          <span>${escapeHTML(label)}</span>
+          <span class="lumen-effect-actions">
+            <button type="button" data-lumen-action="effect-up" data-effect-id="${effectId}" data-effect-index="${index}" aria-label="效果上移"${index === 0 ? " disabled" : disabled}>↑</button>
+            <button type="button" data-lumen-action="effect-down" data-effect-id="${effectId}" data-effect-index="${index}" aria-label="效果下移"${index === effects.length - 1 ? " disabled" : disabled}>↓</button>
+            <button type="button" data-lumen-action="effect-remove" data-effect-id="${effectId}" aria-label="移除效果"${disabled}>×</button>
+          </span>
+        </div>
+        ${isBlur ? `<label class="lumen-control-row"><span class="lumen-control-label">半径</span>
+          <span class="lumen-control-value"><input type="number" min="0" max="200" step="0.5"
+            value="${radius.toFixed(1)}" data-lumen-control="effect-radius" data-effect-id="${effectId}"${disabled} /><span>px</span></span>
+        </label>` : ""}
+      </div>`;
+    }).join("") : `<p class="lumen-empty-hint">效果会按这里的顺序依次叠加。</p>`;
+    return `<section class="lumen-prop-section">
+      <div class="lumen-prop-head"><span>效果</span>
+        <span class="lumen-inline-actions"><button type="button" data-lumen-action="effect-add-blur"${disabled}>+ 高斯模糊</button></span>
+      </div>
+      <div class="lumen-effect-list">${rows}</div>
+    </section>`;
+  }
+
+  function lumenGradientHtml(layer, disabled) {
+    if (String(layer.type) !== "gradient") return "";
+    const gradient = lumenGradientData(layer);
+    const stops = gradient.stops.map((stop, index) => {
+      const parts = lumenColorParts(stop?.[1]);
+      const position = Math.max(0, Math.min(100, Number(stop?.[0] || 0) * 100));
+      return `<div class="lumen-gradient-stop" data-gradient-index="${index}">
+        <input type="color" value="${parts.color}" data-lumen-control="gradient-stop-color" aria-label="色标 ${index + 1} 颜色"${disabled} />
+        <input type="range" min="0" max="100" step="0.1" value="${position.toFixed(1)}" data-lumen-control="gradient-stop-position" aria-label="色标 ${index + 1} 位置"${disabled} />
+        <input type="number" min="0" max="100" step="0.1" value="${position.toFixed(1)}" data-lumen-control="gradient-stop-position-number" aria-label="色标 ${index + 1} 位置百分比"${disabled} />
+        <input type="number" min="0" max="100" step="1" value="${parts.alpha}" data-lumen-control="gradient-stop-alpha" aria-label="色标 ${index + 1} 透明度百分比"${disabled} />
+        <button type="button" data-lumen-action="gradient-stop-remove" data-gradient-index="${index}" aria-label="移除色标"${gradient.stops.length <= 2 ? " disabled" : disabled}>×</button>
+      </div>`;
+    }).join("");
+    const direction = gradient.mode === "linear"
+      ? `<label class="lumen-control-row"><span class="lumen-control-label">角度</span><span class="lumen-control-value">
+          <input type="number" step="1" value="${gradient.angle.toFixed(1)}" data-lumen-control="gradient-angle"${disabled} /><span>°</span></span></label>`
+      : `<div class="lumen-control-grid">
+          <label class="lumen-control-row"><span class="lumen-control-label">中心 X</span><span class="lumen-control-value"><input type="number" min="0" max="100" step="1" value="${(Number(gradient.center[0]) * 100).toFixed(1)}" data-lumen-control="gradient-center-x"${disabled} /><span>%</span></span></label>
+          <label class="lumen-control-row"><span class="lumen-control-label">中心 Y</span><span class="lumen-control-value"><input type="number" min="0" max="100" step="1" value="${(Number(gradient.center[1]) * 100).toFixed(1)}" data-lumen-control="gradient-center-y"${disabled} /><span>%</span></span></label>
+          <label class="lumen-control-row"><span class="lumen-control-label">半径</span><span class="lumen-control-value"><input type="number" min="1" max="100" step="1" value="${(gradient.radius * 100).toFixed(1)}" data-lumen-control="gradient-radius"${disabled} /><span>%</span></span></label>
+        </div>`;
+    return `<section class="lumen-prop-section">
+      <div class="lumen-prop-head"><span>渐变</span><span class="lumen-inline-actions"><button type="button" data-lumen-action="gradient-stop-add"${disabled}>+ 色标</button></span></div>
+      <label class="lumen-control-row"><span class="lumen-control-label">类型</span><span class="lumen-control-value"><select data-lumen-control="gradient-mode"${disabled}>
+        <option value="linear"${gradient.mode === "linear" ? " selected" : ""}>线性</option>
+        <option value="radial"${gradient.mode === "radial" ? " selected" : ""}>径向</option>
+      </select></span></label>
+      ${direction}
+      <div class="lumen-gradient-stops">${stops}</div>
+    </section>`;
+  }
+
+  function lumenMaskHtml(layer, disabled) {
+    const mask = layer.mask && typeof layer.mask === "object" ? layer.mask : null;
+    const shape = mask?.shape && typeof mask.shape === "object" ? mask.shape : {};
+    const rawType = String(shape.type || "rectangle");
+    const supportedShape = mask?.kind === "shape" && ["rectangle", "rect", "ellipse", "circle"].includes(rawType);
+    const kind = !mask ? "none" : supportedShape
+      ? (["ellipse", "circle"].includes(rawType) ? "ellipse" : "rectangle")
+      : "advanced";
+    const x0 = Number(shape.x0 ?? shape.rect?.[0] ?? 0.1);
+    const y0 = Number(shape.y0 ?? shape.rect?.[1] ?? 0.1);
+    const x1 = Number(shape.x1 ?? shape.rect?.[2] ?? 0.9);
+    const y1 = Number(shape.y1 ?? shape.rect?.[3] ?? 0.9);
+    const inset = Math.max(0, Math.min(45, ((x0 + y0 + (1 - x1) + (1 - y1)) / 4) * 100));
+    const feather = Math.max(0, Math.min(25, Number(mask?.feather || 0) * 100));
+    const shapeDisabled = kind === "none" || kind === "advanced" ? " disabled" : disabled;
+    return `<section class="lumen-prop-section">
+      <div class="lumen-prop-head"><span>蒙版</span></div>
+      <div class="lumen-mask-controls">
+        <label class="lumen-control-row"><span class="lumen-control-label">形状</span><span class="lumen-control-value"><select data-lumen-control="mask-kind"${disabled}>
+          <option value="none"${kind === "none" ? " selected" : ""}>无</option>
+          <option value="rectangle"${kind === "rectangle" ? " selected" : ""}>矩形</option>
+          <option value="ellipse"${kind === "ellipse" ? " selected" : ""}>椭圆</option>
+          ${kind === "advanced" ? `<option value="advanced" selected>高级蒙版（只读）</option>` : ""}
+        </select></span></label>
+        <label class="lumen-control-row"><span class="lumen-control-label">边距</span><span class="lumen-control-value"><input type="range" min="0" max="45" step="0.5" value="${inset.toFixed(1)}" data-lumen-control="mask-inset"${shapeDisabled} /><span data-lumen-range-value>${inset.toFixed(1)}%</span></span></label>
+        <label class="lumen-control-row"><span class="lumen-control-label">羽化</span><span class="lumen-control-value"><input type="range" min="0" max="25" step="0.5" value="${feather.toFixed(1)}" data-lumen-control="mask-feather"${shapeDisabled} /><span data-lumen-range-value>${feather.toFixed(1)}%</span></span></label>
+        <label class="lumen-control-row"><span class="lumen-control-label">反相</span><span class="lumen-control-value"><input type="checkbox" data-lumen-control="mask-invert"${mask?.invert ? " checked" : ""}${shapeDisabled} /></span></label>
+      </div>
+    </section>`;
+  }
+
+  function lumenLayerInspectorHtml(layer) {
+    const transformEditable = lumenLayerCanTransform(layer);
+    const propertyEditable = lumenLayerCanEdit(layer);
+    const disabled = state.directEditPending || !propertyEditable ? " disabled" : "";
+    const geometry = lumenFrameGeometry(layer);
+    const opacity = Math.max(0, Math.min(100, Number(layer.opacity ?? 1) * 100));
+    const currentBlend = String(layer.blend_mode || "normal");
+    const configuredModes = state.lumenFrameCanvas?.capabilities?.blend_modes;
+    const blendModes = Array.isArray(configuredModes) && configuredModes.length
+      ? [...configuredModes] : Object.keys(LUMEN_BLEND_LABELS);
+    if (!blendModes.includes(currentBlend)) blendModes.push(currentBlend);
+    const blendOptions = blendModes.map((mode) => `<option value="${escapeHTML(mode)}"${mode === currentBlend ? " selected" : ""}>${escapeHTML(LUMEN_BLEND_LABELS[mode] || mode)}</option>`).join("");
+    const spatial = transformEditable && geometry ? `<section class="lumen-prop-section">
+      <div class="lumen-prop-head"><span>空间</span></div>
+      <div class="lumen-control-grid">
+        <label class="lumen-control-row"><span class="lumen-control-label">X</span><span class="lumen-control-value"><input data-edit-field="x" value="${geometry.centerX.toFixed(1)}" /></span></label>
+        <label class="lumen-control-row"><span class="lumen-control-label">Y</span><span class="lumen-control-value"><input data-edit-field="y" value="${geometry.centerY.toFixed(1)}" /></span></label>
+        <label class="lumen-control-row"><span class="lumen-control-label">缩放</span><span class="lumen-control-value"><input data-edit-field="scale" value="${(geometry.scale * 100).toFixed(1)}" /><span>%</span></span></label>
+        <label class="lumen-control-row"><span class="lumen-control-label">旋转</span><span class="lumen-control-value"><input data-edit-field="rotation" value="${geometry.rotation.toFixed(1)}" /><span>°</span></span></label>
+      </div>
+    </section>` : "";
+    const adjustmentTime = String(layer.type) === "adjustment" ? `<section class="lumen-prop-section">
+      <div class="lumen-prop-head"><span>作用区间</span></div>
+      <div class="lumen-control-grid">
+        <label class="lumen-control-row"><span class="lumen-control-label">开始</span><span class="lumen-control-value"><input type="number" min="0" step="0.01" value="${Number(layer.time?.start || 0).toFixed(3)}" data-lumen-control="time-start"${disabled} /><span>s</span></span></label>
+        <label class="lumen-control-row"><span class="lumen-control-label">时长</span><span class="lumen-control-value"><input type="number" min="0.001" step="0.01" value="${Number(layer.time?.duration || lumenCompositionDuration()).toFixed(3)}" data-lumen-control="time-duration"${disabled} /><span>s</span></span></label>
+      </div>
+    </section>` : "";
+    return `<div class="properties-object-name">${escapeHTML(layer.name || layer.id)} · ${escapeHTML(lumenLayerTypeLabel(layer.type))}</div>
+      ${state.directEditPending ? `<span class="properties-pending">正在安全应用图层修改…</span>` : ""}
+      ${!propertyEditable ? `<span class="properties-pending">此图层已锁定，属性只读</span>` : ""}
+      <section class="lumen-prop-section">
+        <div class="lumen-prop-head"><span>外观</span></div>
+        <label class="lumen-control-row"><span class="lumen-control-label">不透明度</span><span class="lumen-control-value"><input type="range" min="0" max="100" step="1" value="${opacity.toFixed(0)}" data-lumen-control="opacity"${disabled} /><span data-lumen-range-value>${opacity.toFixed(0)}%</span></span></label>
+        <label class="lumen-control-row"><span class="lumen-control-label">混合模式</span><span class="lumen-control-value"><select data-lumen-control="blend-mode"${disabled}>${blendOptions}</select></span></label>
+        <label class="lumen-control-row"><span class="lumen-control-label">剪贴到下一层</span><span class="lumen-control-value"><input type="checkbox" data-lumen-control="clip-to-below"${layer.clip_to_below ? " checked" : ""}${disabled} /></span></label>
+      </section>
+      ${spatial}
+      ${lumenEffectsHtml(layer, disabled)}
+      ${lumenGradientHtml(layer, disabled)}
+      ${lumenMaskHtml(layer, disabled)}
+      ${adjustmentTime}
+      <section class="lumen-prop-section"><div class="lumen-prop-head"><span>当前时间</span><span>帧 ${Number(state.lumenFrameCanvas?.canvas?.frame || 0)} · ${Number(state.lumenFrameCanvas?.canvas?.time || 0).toFixed(3)}s</span></div></section>`;
+  }
+
+  function lumenLegacyTransformInspectorHtml(layer) {
+    const geometry = lumenFrameGeometry(layer);
+    return `<div class="properties-object-name">${escapeHTML(layer.name || layer.id)}</div>
+      ${state.directEditPending ? `<span class="properties-pending">正在安全应用微调…</span>` : ""}
+      ${geometry ? `<div class="properties-group">
+        <span class="properties-group-title">空间</span>
+        <label class="properties-field">X <input data-edit-field="x" value="${geometry.centerX.toFixed(1)}" /></label>
+        <label class="properties-field">Y <input data-edit-field="y" value="${geometry.centerY.toFixed(1)}" /></label>
+        <label class="properties-field">缩放 <input data-edit-field="scale" value="${(geometry.scale * 100).toFixed(1)}" /></label>
+        <label class="properties-field">旋转 <input data-edit-field="rotation" value="${geometry.rotation.toFixed(1)}" /></label>
+      </div>` : ""}
+      <div class="properties-group">
+        <span class="properties-group-title">时间</span>
+        <span class="properties-pending">帧 ${Number(state.lumenFrameCanvas?.canvas?.frame || 0)} · ${Number(state.lumenFrameCanvas?.canvas?.time || 0).toFixed(3)}s</span>
+      </div>`;
+  }
+
+  function renderPropertiesPanel(body) {
+    if (!body) return;
+    const clip = selectedClip();
+    const lumenLayer = selectedLumenFrameLayer();
+    if (!clip && state.lumenFrameCanvas) {
+      // Static assets can update before a long-running Python process is
+      // restarted. Keep the old transform-only surface until the backend
+      // advertises the complete appearance mutation contract.
+      if (!lumenAppearanceInspectorAvailable(state.lumenFrameCanvas)) {
+        body.innerHTML = `<div class="properties-panel">
+          ${lumenLayer ? lumenLegacyTransformInspectorHtml(lumenLayer) : `<p class="properties-empty">在画布上选择一个图层</p>`}
+        </div>`;
+        body.querySelectorAll("[data-edit-field]").forEach((input) => {
+          input.disabled = state.directEditPending || !lumenLayerCanTransform(lumenLayer);
+        });
+        return;
+      }
+      body.innerHTML = `<div class="properties-panel lumen-inspector" data-lumen-inspector>
+        ${lumenLayerToolbarHtml(state.lumenFrameCanvas, lumenLayer?.id)}
+        ${lumenLayer ? lumenLayerInspectorHtml(lumenLayer) : `<p class="lumen-empty-hint">从画布或上方图层列表选择一个图层来编辑外观。</p>`}
+      </div>`;
+      body.querySelectorAll("[data-edit-field]").forEach((input) => {
+        input.disabled = state.directEditPending || !lumenLayerCanTransform(lumenLayer);
+      });
+      return;
+    }
+    if (!clip) {
+      body.innerHTML = `<div class="properties-panel"><p class="properties-empty">在画布或时间线上选择一个素材</p></div>`;
+      return;
+    }
+    const geometry = selectedVisualClip() ? canvasGeometry(clip) : null;
+    body.innerHTML = `<div class="properties-panel">
+      <div class="properties-object-name">${escapeHTML(clip.name || "所选素材")}</div>
+      ${state.directEditPending ? `<span class="properties-pending">正在安全应用微调…</span>` : ""}
+      ${geometry ? `<div class="properties-group">
+        <span class="properties-group-title">空间</span>
+        <label class="properties-field">X <input data-edit-field="x" value="${geometry.centerX.toFixed(1)}" /></label>
+        <label class="properties-field">Y <input data-edit-field="y" value="${geometry.centerY.toFixed(1)}" /></label>
+        <label class="properties-field">缩放 <input data-edit-field="scale" value="${(geometry.scale * 100).toFixed(1)}" /></label>
+        <label class="properties-field">旋转 <input data-edit-field="rotation" value="${geometry.rotation.toFixed(1)}" /></label>
+      </div>` : ""}
+      <div class="properties-group">
+        <span class="properties-group-title">时间</span>
+        <label class="properties-field">开始 <input data-edit-field="start" value="${fmtTC(clip.start)}" /></label>
+        <label class="properties-field">时长 <input data-edit-field="duration" value="${fmtTC(clip.duration)}" /></label>
+        <label class="properties-field">入点 <input data-edit-field="source_in" value="${fmtTC(clip.source_in)}" /></label>
+        <label class="properties-field">出点 <input data-edit-field="source_out" value="${fmtTC(clip.source_out)}" /></label>
+      </div>
+    </div>`;
+    body.querySelectorAll("input").forEach((input) => {
+      input.dataset.fps = String(Number(state.projectTimeline?.fps || 30));
+      input.disabled = state.directEditPending;
+    });
+  }
+
+  async function commitEditInput(input) {
+    const clip = selectedClip();
+    const lumenLayer = selectedLumenFrameLayer();
+    if (!clip && lumenLayer) {
+      await commitLumenFrameInput(input, lumenLayer);
+      return;
+    }
+    if (!clip || !editingEnabled()) return;
+    const field = input.dataset.editField;
+    const fps = Number(input.dataset.fps || state.projectTimeline?.fps || 30);
+    const value = ["start", "duration", "source_in", "source_out"].includes(field)
+      ? parseTimeValue(input.value, fps)
+      : Number(input.value);
+    if (!Number.isFinite(value)) { renderTimelineMicroInspector(); refreshPanel("properties"); renderDirectCanvas(); return; }
+    let operation = null;
+    if (["x", "y", "scale", "rotation"].includes(field)) {
+      const geometry = canvasGeometry(clip);
+      if (!geometry) return;
+      const scale = field === "scale" ? Math.max(0.01, value / 100) : geometry.scale;
+      const centerX = field === "x" ? value : geometry.centerX;
+      const centerY = field === "y" ? value : geometry.centerY;
+      operation = { op: "set_effects", clip_id: clip.id, effects: {
+        x: centerX - geometry.baseWidth * scale / 2,
+        y: centerY - geometry.baseHeight * scale / 2,
+        scale,
+        rotation: field === "rotation" ? value : geometry.rotation,
+      } };
+    } else if (field === "start") {
+      operation = { op: "move", clip_id: clip.id, start: Math.max(0, value) };
+    } else if (field === "duration") {
+      operation = ["video", "audio"].includes(clip.media_kind)
+        ? { op: "trim", clip_id: clip.id, source_out: Number(clip.source_in || 0) + Math.max(1 / fps, value) }
+        : { op: "set_time", clip_id: clip.id, duration: Math.max(1 / fps, value) };
+    } else if (field === "source_in") {
+      operation = { op: "trim", clip_id: clip.id, source_in: Math.max(0, value) };
+    } else if (field === "source_out") {
+      operation = { op: "trim", clip_id: clip.id, source_out: Math.max(Number(clip.source_in || 0) + 1 / fps, value) };
+    }
+    if (!operation) return;
+    const result = await postTimelineOp(operation);
+    if (result) {
+      state.canvasEdit = null;
+      renderDirectCanvas();
+      renderTimelineMicroInspector();
+    }
+  }
+
+  async function commitLumenFrameInput(input, layer = selectedLumenFrameLayer()) {
+    if (!lumenLayerCanTransform(layer) || !editingEnabled()) return;
+    const field = input.dataset.editField;
+    if (!["x", "y", "scale", "rotation"].includes(field)) return;
+    const value = Number(input.value);
+    if (!Number.isFinite(value)) {
+      renderDirectCanvas();
+      refreshPanel("properties");
+      return;
+    }
+    const geometry = lumenFrameGeometry(layer);
+    if (!geometry) return;
+    const transform = {
+      x: field === "x"
+        ? Number(geometry.transform.x || 0) + value - geometry.centerX
+        : Number(geometry.transform.x || 0),
+      y: field === "y"
+        ? Number(geometry.transform.y || 0) + value - geometry.centerY
+        : Number(geometry.transform.y || 0),
+      scale: field === "scale" ? Math.max(0.01, value / 100) : geometry.scale,
+      rotation: field === "rotation" ? value / geometry.rotationSign : geometry.backendRotation,
+    };
+    // Creator-facing X/Y remain absolute canvas coordinates while the backend
+    // receives the delta from this layer's current rendered centre.
+    await postLumenFrameOp({ op: "set_transform", layer_id: layer.id, transform });
+    if (state.canvasEdit?.kind === "lumenframe") state.canvasEdit = null;
+    renderDirectCanvas();
+  }
+
+  function collectLumenGradientStops(inspector) {
+    return [...(inspector?.querySelectorAll(".lumen-gradient-stop") || [])].map((row) => {
+      const color = String(row.querySelector('[data-lumen-control="gradient-stop-color"]')?.value || "#000000");
+      const position = Math.max(0, Math.min(1, Number(row.querySelector('[data-lumen-control="gradient-stop-position"]')?.value || 0) / 100));
+      const alpha = Math.max(0, Math.min(100, Number(row.querySelector('[data-lumen-control="gradient-stop-alpha"]')?.value ?? 100)));
+      const alphaHex = Math.round(alpha / 100 * 255).toString(16).padStart(2, "0");
+      return [Number(position.toFixed(6)), alpha < 99.999 ? `${color}${alphaHex}` : color];
+    });
+  }
+
+  function syncLumenGradientPosition(control) {
+    const row = control.closest?.(".lumen-gradient-stop");
+    if (!row) return;
+    const range = row.querySelector('[data-lumen-control="gradient-stop-position"]');
+    const number = row.querySelector('[data-lumen-control="gradient-stop-position-number"]');
+    if (control === range && number) number.value = range.value;
+    if (control === number && range) range.value = number.value;
+  }
+
+  function lumenMaskSpecFromInspector(inspector, layer, changedField) {
+    const kind = inspector.querySelector('[data-lumen-control="mask-kind"]')?.value || "none";
+    if (kind === "none" || kind === "advanced") return null;
+    const inset = Math.max(0, Math.min(0.45, Number(inspector.querySelector('[data-lumen-control="mask-inset"]')?.value || 0) / 100));
+    const feather = Math.max(0, Math.min(0.25, Number(inspector.querySelector('[data-lumen-control="mask-feather"]')?.value || 0) / 100));
+    const invert = Boolean(inspector.querySelector('[data-lumen-control="mask-invert"]')?.checked);
+    const existingMask = layer.mask && typeof layer.mask === "object" ? layer.mask : null;
+    const existingShape = existingMask?.shape && typeof existingMask.shape === "object"
+      ? existingMask.shape : null;
+    const existingType = String(existingShape?.type || "");
+    const sameKind = kind === "ellipse"
+      ? ["ellipse", "circle"].includes(existingType)
+      : ["rectangle", "rect", ""].includes(existingType);
+    let shape = sameKind && existingMask?.kind === "shape"
+      ? { ...existingShape }
+      : { type: kind, x0: inset, y0: inset, x1: 1 - inset, y1: 1 - inset };
+    if (changedField === "mask-inset" || changedField === "mask-kind") {
+      shape = { type: kind, x0: inset, y0: inset, x1: 1 - inset, y1: 1 - inset };
+    }
+    return { kind: "shape", shape, feather: Number(feather.toFixed(6)), invert };
+  }
+
+  async function addLumenInspectorLayer(kind) {
+    if (!editingEnabled() || !state.lumenFrameCanvas) return;
+    const duration = Number(lumenCompositionDuration().toFixed(6));
+    let operation = null;
+    if (kind === "gradient") {
+      operation = {
+        op: "add_gradient", name: "渐变", mode: "linear", angle: 90,
+        stops: [[0, "#151b22"], [1, "#5ad9ff"]], start: 0, duration,
+      };
+    } else if (kind === "shape-rect") {
+      operation = {
+        op: "add_shape", name: "矩形", kind: "rect", fill: "#5ad9ff",
+        rect: [0.2, 0.2, 0.8, 0.8], start: 0, duration,
+      };
+    } else if (kind === "shape-ellipse") {
+      operation = {
+        op: "add_shape", name: "圆形", kind: "ellipse", fill: "#5ad9ff",
+        rect: [0.2, 0.2, 0.8, 0.8], start: 0, duration,
+      };
+    } else if (kind === "adjustment") {
+      operation = { op: "add_adjustment_layer", name: "调整层", start: 0, duration };
+    }
+    if (!operation) return;
+    const result = await postLumenFrameOp(operation);
+    const layerId = result?.layer_id || state.lumenFrameCanvas?.selection_ids?.[0];
+    if (layerId) selectLumenFrameLayer(layerId);
+  }
+
+  async function commitLumenInspectorControl(control) {
+    const layer = selectedLumenFrameLayer();
+    const inspector = control.closest?.("[data-lumen-inspector]");
+    if (!layer || !inspector || !lumenLayerCanEdit(layer) || !editingEnabled()) return;
+    const field = control.dataset.lumenControl;
+    if (["gradient-stop-position", "gradient-stop-position-number"].includes(field)) {
+      syncLumenGradientPosition(control);
+    }
+    let operation = null;
+    if (field === "opacity") {
+      operation = { op: "set_opacity", layer_id: layer.id, opacity: Math.max(0, Math.min(1, Number(control.value) / 100)) };
+    } else if (field === "blend-mode") {
+      operation = { op: "set_blend_mode", layer_id: layer.id, blend_mode: control.value };
+    } else if (field === "clip-to-below") {
+      operation = { op: "clip_to_below", layer_id: layer.id, enabled: control.checked };
+    } else if (field === "effect-enabled") {
+      operation = { op: "set_effect_enabled", layer_id: layer.id, effect_id: control.dataset.effectId, enabled: control.checked };
+    } else if (field === "effect-radius") {
+      const radius = Math.max(0, Math.min(200, Number(control.value)));
+      if (Number.isFinite(radius)) operation = { op: "set_effect_params", layer_id: layer.id, effect_id: control.dataset.effectId, params: { radius } };
+    } else if (field === "gradient-mode") {
+      const gradient = lumenGradientData(layer);
+      operation = { op: "set_gradient", layer_id: layer.id, mode: control.value, stops: collectLumenGradientStops(inspector) };
+      if (control.value === "linear") operation.angle = gradient.angle;
+      else { operation.center = gradient.center; operation.radius = gradient.radius; }
+    } else if (["gradient-stop-color", "gradient-stop-position", "gradient-stop-position-number", "gradient-stop-alpha"].includes(field)) {
+      operation = { op: "set_gradient", layer_id: layer.id, stops: collectLumenGradientStops(inspector) };
+    } else if (field === "gradient-angle") {
+      const angle = Number(control.value);
+      if (Number.isFinite(angle)) operation = { op: "set_gradient", layer_id: layer.id, angle };
+    } else if (["gradient-center-x", "gradient-center-y", "gradient-radius"].includes(field)) {
+      const x = Math.max(0, Math.min(1, Number(inspector.querySelector('[data-lumen-control="gradient-center-x"]')?.value || 50) / 100));
+      const y = Math.max(0, Math.min(1, Number(inspector.querySelector('[data-lumen-control="gradient-center-y"]')?.value || 50) / 100));
+      const radius = Math.max(0.01, Math.min(1, Number(inspector.querySelector('[data-lumen-control="gradient-radius"]')?.value || 50) / 100));
+      operation = { op: "set_gradient", layer_id: layer.id, center: [x, y], radius };
+    } else if (field === "mask-kind") {
+      operation = control.value === "none"
+        ? { op: "clear_mask", layer_id: layer.id }
+        : control.value === "advanced" ? null
+          : { op: "set_mask", layer_id: layer.id, mask: lumenMaskSpecFromInspector(inspector, layer, field) };
+    } else if (["mask-inset", "mask-feather", "mask-invert"].includes(field)) {
+      operation = { op: "set_mask", layer_id: layer.id, mask: lumenMaskSpecFromInspector(inspector, layer, field) };
+    } else if (["time-start", "time-duration"].includes(field)) {
+      const fps = Math.max(1, Number(state.lumenFrameCanvas?.canvas?.fps || 30));
+      const start = Math.max(0, Number(inspector.querySelector('[data-lumen-control="time-start"]')?.value || 0));
+      const duration = Math.max(1 / fps, Number(inspector.querySelector('[data-lumen-control="time-duration"]')?.value || 0));
+      operation = { op: "set_time", layer_id: layer.id, start, duration };
+    }
+    if (operation) await postLumenFrameOp(operation);
+  }
+
+  async function handleLumenInspectorAction(button) {
+    const inspector = button.closest?.("[data-lumen-inspector]");
+    if (!inspector) return;
+    if (button.dataset.lumenLayerId) {
+      selectLumenFrameLayer(button.dataset.lumenLayerId);
+      return;
+    }
+    if (button.dataset.lumenAdd) {
+      await addLumenInspectorLayer(button.dataset.lumenAdd);
+      return;
+    }
+    const layer = selectedLumenFrameLayer();
+    if (!layer || !lumenLayerCanEdit(layer) || !editingEnabled()) return;
+    const action = button.dataset.lumenAction;
+    let operation = null;
+    if (action === "effect-add-blur") {
+      operation = { op: "add_effect", layer_id: layer.id, effect_type: "gaussian_blur", params: { radius: 8 } };
+    } else if (action === "effect-up" || action === "effect-down") {
+      const current = Number(button.dataset.effectIndex || 0);
+      operation = {
+        op: "reorder_effect", layer_id: layer.id, effect_id: button.dataset.effectId,
+        index: action === "effect-up" ? current - 1 : current + 1,
+      };
+    } else if (action === "effect-remove") {
+      operation = { op: "remove_effect", layer_id: layer.id, effect_id: button.dataset.effectId };
+    } else if (action === "gradient-stop-add") {
+      const stops = collectLumenGradientStops(inspector).sort((a, b) => a[0] - b[0]);
+      let widest = { index: 0, gap: -1 };
+      for (let index = 0; index < stops.length - 1; index += 1) {
+        const gap = stops[index + 1][0] - stops[index][0];
+        if (gap > widest.gap) widest = { index, gap };
+      }
+      const left = stops[widest.index] || [0, "#000000"];
+      const right = stops[widest.index + 1] || [1, "#ffffff"];
+      stops.push([Number(((left[0] + right[0]) / 2).toFixed(6)), left[1]]);
+      operation = { op: "set_gradient", layer_id: layer.id, stops };
+    } else if (action === "gradient-stop-remove") {
+      const stops = collectLumenGradientStops(inspector);
+      const index = Number(button.dataset.gradientIndex);
+      if (stops.length > 2 && Number.isInteger(index)) stops.splice(index, 1);
+      operation = { op: "set_gradient", layer_id: layer.id, stops };
+    }
+    if (operation) await postLumenFrameOp(operation);
+  }
+
+  function snappedCanvasCenter(center, size, extent, tolerance) {
+    const choices = [
+      { value: size / 2, guide: 0 },
+      { value: extent / 2, guide: extent / 2 },
+      { value: extent - size / 2, guide: extent },
+    ];
+    let best = { value: center, guide: null, distance: tolerance };
+    for (const choice of choices) {
+      const distance = Math.abs(choice.value - center);
+      if (distance < best.distance) best = { ...choice, distance };
+    }
+    return best;
+  }
+
+  function showCanvasGuides(x, y) {
+    const k = Number(els.directCanvasSpace?.dataset.canvasScale || 1);
+    if (els.directGuideX) {
+      els.directGuideX.hidden = x == null;
+      if (x != null) els.directGuideX.style.left = `${x * k}px`;
+    }
+    if (els.directGuideY) {
+      els.directGuideY.hidden = y == null;
+      if (y != null) els.directGuideY.style.top = `${y * k}px`;
+    }
+  }
+
+  function beginCanvasGesture(ev) {
+    if (!state.selectedClipId && selectedLumenFrameLayer()) {
+      beginLumenFrameGesture(ev);
+      return;
+    }
+    if (ev.target.closest?.("[data-context-drag]")) return;
+    const clip = selectedVisualClip();
+    if (!clip || !editingEnabled() || !els.directSelectionBox?.contains(ev.target)) return;
+    const geometry = canvasGeometry(clip);
+    if (!geometry) return;
+    const handle = ev.target.closest("[data-canvas-handle]");
+    const mode = handle?.dataset.canvasHandle || "move";
+    const k = Number(els.directCanvasSpace.dataset.canvasScale || 1);
+    const canvasRect = els.directCanvasSpace.getBoundingClientRect();
+    const centerClientX = canvasRect.left + geometry.centerX * k;
+    const centerClientY = canvasRect.top + geometry.centerY * k;
+    const edit = ensureCanvasEdit(clip);
+    edit.drag = {
+      mode, pointerId: ev.pointerId, startX: ev.clientX, startY: ev.clientY,
+      geometry,
+      startDistance: Math.max(1, Math.hypot(ev.clientX - centerClientX, ev.clientY - centerClientY)),
+      startAngle: Math.atan2(ev.clientY - centerClientY, ev.clientX - centerClientX) * 180 / Math.PI,
+    };
+    try { els.directSelectionBox.setPointerCapture(ev.pointerId); } catch {}
+    ev.preventDefault();
+  }
+
+  function moveCanvasGesture(ev) {
+    if (!state.selectedClipId && selectedLumenFrameLayer()) {
+      moveLumenFrameGesture(ev);
+      return;
+    }
+    const clip = selectedVisualClip();
+    const edit = clip && ensureCanvasEdit(clip);
+    const drag = edit?.drag;
+    if (!drag || drag.pointerId !== ev.pointerId) return;
+    const k = Number(els.directCanvasSpace.dataset.canvasScale || 1);
+    const geometry = drag.geometry;
+    let centerX = geometry.centerX;
+    let centerY = geometry.centerY;
+    let scale = geometry.scale;
+    let rotation = geometry.rotation;
+    if (drag.mode === "move") {
+      let dx = (ev.clientX - drag.startX) / k;
+      let dy = (ev.clientY - drag.startY) / k;
+      if (ev.shiftKey) {
+        if (Math.abs(dx) >= Math.abs(dy)) dy = 0; else dx = 0;
+      }
+      centerX += dx;
+      centerY += dy;
+      if (!ev.altKey) {
+        const tolerance = 6 / k;
+        const canvas = directCanvasDimensions();
+        const snapX = snappedCanvasCenter(centerX, geometry.width, canvas.width, tolerance);
+        const snapY = snappedCanvasCenter(centerY, geometry.height, canvas.height, tolerance);
+        centerX = snapX.value; centerY = snapY.value;
+        showCanvasGuides(snapX.guide, snapY.guide);
+      } else showCanvasGuides(null, null);
+    } else if (drag.mode === "scale") {
+      const canvasRect = els.directCanvasSpace.getBoundingClientRect();
+      const cx = canvasRect.left + geometry.centerX * k;
+      const cy = canvasRect.top + geometry.centerY * k;
+      scale = Math.max(0.01, geometry.scale * Math.hypot(ev.clientX - cx, ev.clientY - cy) / drag.startDistance);
+    } else if (drag.mode === "rotate") {
+      const canvasRect = els.directCanvasSpace.getBoundingClientRect();
+      const cx = canvasRect.left + geometry.centerX * k;
+      const cy = canvasRect.top + geometry.centerY * k;
+      const angle = Math.atan2(ev.clientY - cy, ev.clientX - cx) * 180 / Math.PI;
+      rotation = geometry.rotation + angle - drag.startAngle;
+      if (ev.shiftKey) rotation = Math.round(rotation / 15) * 15;
+    }
+    const width = geometry.baseWidth * scale;
+    const height = geometry.baseHeight * scale;
+    edit.localEffects = {
+      x: centerX - width / 2,
+      y: centerY - height / 2,
+      scale,
+      rotation,
+    };
+    layoutDirectCanvas();
+    ev.preventDefault();
+  }
+
+  function finishCanvasGesture(ev) {
+    if (!state.selectedClipId && selectedLumenFrameLayer()) {
+      finishLumenFrameGesture(ev);
+      return;
+    }
+    const clip = selectedVisualClip();
+    const edit = clip && ensureCanvasEdit(clip);
+    if (!edit?.drag || (ev && edit.drag.pointerId !== ev.pointerId)) return;
+    edit.drag = null;
+    showCanvasGuides(null, null);
+    const effects = edit.localEffects && { ...edit.localEffects };
+    if (!effects) return;
+    postTimelineOp({ op: "set_effects", clip_id: clip.id, effects }).then(() => {
+      if (state.canvasEdit?.clipId === clip.id) state.canvasEdit.localEffects = null;
+      renderDirectCanvas();
+      renderTimelineMicroInspector();
+    });
+  }
+
+  function nudgeCanvas(dx, dy) {
+    const lumenLayer = selectedLumenFrameLayer();
+    if (!state.selectedClipId && lumenLayer) {
+      nudgeLumenFrame(dx, dy);
+      return;
+    }
+    const clip = selectedVisualClip();
+    const geometry = canvasGeometry(clip);
+    if (!clip || !geometry || !editingEnabled()) return;
+    postTimelineOp({
+      op: "set_effects", clip_id: clip.id,
+      effects: {
+        x: geometry.x + dx, y: geometry.y + dy,
+        scale: geometry.scale, rotation: geometry.rotation,
+      },
+    }).then(() => { state.canvasEdit = null; renderDirectCanvas(); });
+  }
+
+  function beginLumenFrameGesture(ev) {
+    if (ev.target.closest?.("[data-context-drag]")) return;
+    const layer = selectedLumenFrameLayer();
+    if (!lumenLayerCanTransform(layer) || !editingEnabled() || !els.directSelectionBox?.contains(ev.target)) return;
+    const geometry = lumenFrameGeometry(layer);
+    if (!geometry) return;
+    const handle = ev.target.closest("[data-canvas-handle]");
+    const mode = handle?.dataset.canvasHandle || "move";
+    const k = Number(els.directCanvasSpace.dataset.canvasScale || 1);
+    const canvasRect = els.directCanvasSpace.getBoundingClientRect();
+    const centerClientX = canvasRect.left + geometry.centerX * k;
+    const centerClientY = canvasRect.top + geometry.centerY * k;
+    const edit = ensureLumenFrameEdit(layer);
+    edit.drag = {
+      mode, pointerId: ev.pointerId, startX: ev.clientX, startY: ev.clientY,
+      geometry,
+      startDistance: Math.max(1, Math.hypot(ev.clientX - centerClientX, ev.clientY - centerClientY)),
+      startAngle: Math.atan2(ev.clientY - centerClientY, ev.clientX - centerClientX) * 180 / Math.PI,
+    };
+    renderLumenFrameCanvas();
+    try { els.directSelectionBox.setPointerCapture(ev.pointerId); } catch {}
+    ev.preventDefault();
+  }
+
+  function moveLumenFrameGesture(ev) {
+    const layer = selectedLumenFrameLayer();
+    const edit = layer && ensureLumenFrameEdit(layer);
+    const drag = edit?.drag;
+    if (!drag || drag.pointerId !== ev.pointerId) return;
+    const k = Number(els.directCanvasSpace.dataset.canvasScale || 1);
+    const geometry = drag.geometry;
+    let centerX = geometry.centerX;
+    let centerY = geometry.centerY;
+    let scale = geometry.scale;
+    let backendRotation = geometry.backendRotation;
+    if (drag.mode === "move") {
+      let dx = (ev.clientX - drag.startX) / k;
+      let dy = (ev.clientY - drag.startY) / k;
+      if (ev.shiftKey) {
+        if (Math.abs(dx) >= Math.abs(dy)) dy = 0; else dx = 0;
+      }
+      centerX += dx;
+      centerY += dy;
+      if (!ev.altKey) {
+        const tolerance = 6 / k;
+        const dims = directCanvasDimensions();
+        const snapX = snappedCanvasCenter(centerX, geometry.width, dims.width, tolerance);
+        const snapY = snappedCanvasCenter(centerY, geometry.height, dims.height, tolerance);
+        centerX = snapX.value;
+        centerY = snapY.value;
+        showCanvasGuides(snapX.guide, snapY.guide);
+      } else showCanvasGuides(null, null);
+    } else if (drag.mode === "scale") {
+      const canvasRect = els.directCanvasSpace.getBoundingClientRect();
+      const cx = canvasRect.left + geometry.centerX * k;
+      const cy = canvasRect.top + geometry.centerY * k;
+      scale = Math.max(0.01, geometry.scale * Math.hypot(ev.clientX - cx, ev.clientY - cy) / drag.startDistance);
+    } else if (drag.mode === "rotate") {
+      const canvasRect = els.directCanvasSpace.getBoundingClientRect();
+      const cx = canvasRect.left + geometry.centerX * k;
+      const cy = canvasRect.top + geometry.centerY * k;
+      const angle = Math.atan2(ev.clientY - cy, ev.clientX - cx) * 180 / Math.PI;
+      let uiRotation = geometry.rotation + angle - drag.startAngle;
+      if (ev.shiftKey) uiRotation = Math.round(uiRotation / 15) * 15;
+      backendRotation = uiRotation / geometry.rotationSign;
+    }
+    edit.localTransform = {
+      x: Number(geometry.stored.x || 0) + centerX - geometry.initialCenterX,
+      y: Number(geometry.stored.y || 0) + centerY - geometry.initialCenterY,
+      scale,
+      rotation: backendRotation,
+    };
+    layoutLumenFrameCanvas();
+    ev.preventDefault();
+  }
+
+  function finishLumenFrameGesture(ev) {
+    const layer = selectedLumenFrameLayer();
+    const edit = layer && ensureLumenFrameEdit(layer);
+    if (!edit?.drag || (ev && edit.drag.pointerId !== ev.pointerId)) return;
+    edit.drag = null;
+    showCanvasGuides(null, null);
+    const transform = edit.localTransform && { ...edit.localTransform };
+    if (!transform) return;
+    postLumenFrameOp({ op: "set_transform", layer_id: layer.id, transform }).then(() => {
+      if (state.canvasEdit?.kind === "lumenframe" && state.canvasEdit.layerId === layer.id) {
+        state.canvasEdit.localTransform = null;
+      }
+      renderDirectCanvas();
+    });
+  }
+
+  function nudgeLumenFrame(dx, dy) {
+    const layer = selectedLumenFrameLayer();
+    const geometry = lumenFrameGeometry(layer);
+    if (!lumenLayerCanTransform(layer) || !geometry || !editingEnabled()) return;
+    postLumenFrameOp({
+      op: "set_transform",
+      layer_id: layer.id,
+      transform: {
+        x: Number(geometry.transform.x || 0) + dx,
+        y: Number(geometry.transform.y || 0) + dy,
+        scale: geometry.scale,
+        rotation: geometry.backendRotation,
+      },
+    }).then(() => {
+      if (state.canvasEdit?.kind === "lumenframe") state.canvasEdit = null;
+      renderDirectCanvas();
+    });
+  }
+
+  function selectLumenFrameAtPoint(ev) {
+    if (state.selectedClipId || !(state.lumenFrameCanvas?.layers || []).length) return;
+    if (ev.target.closest?.(".direct-selection-box, .canvas-micro-inspector")) return;
+    const rect = els.directCanvasSpace.getBoundingClientRect();
+    const k = Number(els.directCanvasSpace.dataset.canvasScale || 1);
+    const x = (ev.clientX - rect.left) / k;
+    const y = (ev.clientY - rect.top) / k;
+    const hit = [...state.lumenFrameCanvas.layers]
+      .sort((a, b) => Number(b.z || 0) - Number(a.z || 0))
+      .find((layer) => {
+        const bounds = layer.bounds || {};
+        return x >= Number(bounds.x || 0)
+          && x <= Number(bounds.x || 0) + Number(bounds.width || 0)
+          && y >= Number(bounds.y || 0)
+          && y <= Number(bounds.y || 0) + Number(bounds.height || 0);
+      });
+    selectLumenFrameLayer(hit?.id || null);
+  }
+
+  function setupDirectManipulation() {
+    if (!els.directCanvasSpace || els.directCanvasSpace.dataset.bound === "1") return;
+    els.directCanvasSpace.dataset.bound = "1";
+    const updateNaturalSize = (media) => {
+      const edit = state.canvasEdit;
+      if (!edit || media.dataset.assetId !== edit.assetId) return;
+      edit.naturalWidth = Number(media.videoWidth || media.naturalWidth || 0);
+      edit.naturalHeight = Number(media.videoHeight || media.naturalHeight || 0);
+      layoutDirectCanvas();
+      syncDirectCanvasMedia();
+    };
+    els.directCanvasVideo?.addEventListener("loadedmetadata", () => updateNaturalSize(els.directCanvasVideo));
+    els.directCanvasImage?.addEventListener("load", () => updateNaturalSize(els.directCanvasImage));
+    els.directSelectionBox?.addEventListener("pointerdown", beginCanvasGesture);
+    els.directSelectionBox?.addEventListener("pointermove", moveCanvasGesture);
+    els.directSelectionBox?.addEventListener("pointerup", finishCanvasGesture);
+    els.directSelectionBox?.addEventListener("pointercancel", finishCanvasGesture);
+    els.directCanvasSpace.addEventListener("click", selectLumenFrameAtPoint);
+    els.directCanvasSpace.addEventListener("keydown", (ev) => {
+      if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(ev.key)) return;
+      const amount = ev.shiftKey ? 10 : 1;
+      const dx = ev.key === "ArrowLeft" ? -amount : ev.key === "ArrowRight" ? amount : 0;
+      const dy = ev.key === "ArrowUp" ? -amount : ev.key === "ArrowDown" ? amount : 0;
+      ev.preventDefault();
+      nudgeCanvas(dx, dy);
+    });
+    document.addEventListener("focusin", (ev) => {
+      const input = ev.target.closest?.("[data-edit-field]");
+      if (input) input.dataset.originalValue = input.value;
+    });
+    document.addEventListener("keydown", (ev) => {
+      const input = ev.target.closest?.("[data-edit-field]");
+      if (!input) return;
+      if (ev.key === "Enter") { ev.preventDefault(); input.blur(); }
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        input.dataset.cancelEdit = "1";
+        input.value = input.dataset.originalValue || input.value;
+        input.blur();
+      }
+    });
+    document.addEventListener("focusout", (ev) => {
+      const input = ev.target.closest?.("[data-edit-field]");
+      if (!input) return;
+      if (input.dataset.cancelEdit === "1") { delete input.dataset.cancelEdit; return; }
+      if (input.value !== input.dataset.originalValue) commitEditInput(input);
+    });
+    document.addEventListener("input", (ev) => {
+      const control = ev.target.closest?.("[data-lumen-control]");
+      if (!control) return;
+      if (["gradient-stop-position", "gradient-stop-position-number"].includes(control.dataset.lumenControl)) {
+        syncLumenGradientPosition(control);
+      }
+      const value = control.closest?.(".lumen-control-value")?.querySelector("[data-lumen-range-value]");
+      if (value && control.type === "range") value.textContent = `${Number(control.value).toFixed(1).replace(/\.0$/, "")}%`;
+    });
+    document.addEventListener("change", (ev) => {
+      const control = ev.target.closest?.("[data-lumen-control]");
+      if (control) commitLumenInspectorControl(control);
+    });
+    document.addEventListener("submit", (ev) => {
+      if (ev.target.matches?.(".micro-inspector")) ev.preventDefault();
+    });
+    document.addEventListener("click", (ev) => {
+      const lumenAction = ev.target.closest?.("[data-lumen-layer-id], [data-lumen-add], [data-lumen-action]");
+      if (lumenAction) {
+        ev.preventDefault();
+        handleLumenInspectorAction(lumenAction);
+        return;
+      }
+      if (!ev.target.closest?.("[data-open-properties]")) return;
+      if (!stageTabs.includes("properties")) { stageTabs.push("properties"); saveStageTabs(); }
+      setActiveTab("properties");
+    });
+    if (globalThis.ResizeObserver) new ResizeObserver(layoutDirectCanvas).observe(els.directCanvasShell);
+  }
+
   function updateEditHint() {
     const has = !!selectedClip() && editingEnabled();
+    const lumenLayer = selectedLumenFrameLayer();
     const split = document.getElementById("ptl-split");
     const del = document.getElementById("ptl-delete");
     if (split) split.disabled = !has;
     if (del) del.disabled = !has;
+    const undo = document.getElementById("ptl-undo");
+    const redo = document.getElementById("ptl-redo");
+    const canUndo = lumenLayer ? state.lumenFrameCanvas?.can_undo : state.projectTimeline?.can_undo;
+    const canRedo = lumenLayer ? state.lumenFrameCanvas?.can_redo : state.projectTimeline?.can_redo;
+    if (undo) undo.disabled = !editingEnabled() || !canUndo;
+    if (redo) redo.disabled = !editingEnabled() || !canRedo;
   }
 
   function splitSelected() {
@@ -2147,10 +5268,22 @@
     const content = tlContent();
     if (!content) return;
 
+    content.addEventListener("dblclick", (ev) => {
+      const clipEl = ev.target.closest(".ptl-clip");
+      if (!clipEl) return;
+      ev.preventDefault();
+      selectClip(clipEl.dataset.clipId);
+      openSegmentWorkspace(clipEl.dataset.clipId);
+    });
+
     content.addEventListener("pointerdown", (ev) => {
       const clipEl = ev.target.closest(".ptl-clip");
       if (!clipEl) return;
       selectClip(clipEl.dataset.clipId);
+      clipEl.focus({ preventScroll: true });
+      // The clip body still moves/trims on the timeline. Its visible name is
+      // the explicit handoff surface for dragging this clip into the prompt.
+      if (ev.target.closest("[data-context-drag]")) return;
       if (!editingEnabled()) return;
       const handle = ev.target.closest(".ptl-handle");
       const d = {
@@ -2177,20 +5310,20 @@
       if (!d) return;
       const dt = pxToTime(ev.clientX - d.startX);
       if (d.mode === "move") {
-        d.pendStart = Math.max(0, snapSeconds(d.origStart + dt, d));
+        d.pendStart = Math.max(0, snapSeconds(d.origStart + dt, d, ev.altKey));
         d.el.style.left = timeToX(d.pendStart) + "px";
         const lane = laneUnder(ev.clientY);
         const tid = lane && lane.dataset.trackId;
-        if (lane && tid && !tid.endsWith("*") && trackCompatible(d.mediaKind, lane.dataset.trackKind) && tid !== d.origTrack) {
+        if (lane && tid && !tid.endsWith("*") && trackCompatible(d.mediaKind, lane.dataset.trackKind)) {
           d.pendTrack = tid;                            // only real (persisted) lanes are drop targets
           if (d.el.parentNode !== lane) lane.appendChild(d.el);
         }
       } else if (d.mode === "right") {
-        const end = snapSeconds(d.origStart + d.origDur + dt, d);
+        const end = snapSeconds(d.origStart + d.origDur + dt, d, ev.altKey);
         d.pendDur = Math.max(0.1, end - d.origStart);
         d.el.style.width = Math.max(timeToX(d.pendDur), 8) + "px";
       } else { // left-trim head
-        const ns = snapSeconds(d.origStart + dt, d);
+        const ns = snapSeconds(d.origStart + dt, d, ev.altKey);
         const lo = Math.max(0, d.origStart - d.sourceIn);   // can't pull the head before the source start
         d.pendStart = Math.max(lo, Math.min(ns, d.origStart + d.origDur - 0.1));
         d.pendDur = d.origDur - (d.pendStart - d.origStart);
@@ -2206,7 +5339,7 @@
       d.el.classList.remove("dragging");
       if (d.mode === "move" && d.pendStart != null) {
         const op = { op: "move", clip_id: d.clipId, start: +d.pendStart.toFixed(6) };
-        if (d.pendTrack && d.pendTrack !== d.origTrack) op.track_id = d.pendTrack;
+        if (d.pendTrack) op.track_id = d.pendTrack;
         postTimelineOp(op);
       } else if (d.mode === "right" && d.pendDur != null) {
         if (d.mediaKind === "video" || d.mediaKind === "audio")
@@ -2216,15 +5349,10 @@
       } else if (d.mode === "left" && d.pendStart != null) {
         if (d.mediaKind === "video" || d.mediaKind === "audio") {
           const newIn = Math.max(0, d.sourceIn + (d.pendStart - d.origStart));
-          if (d.pendStart < d.origStart) {
-            // expanding head leftward: move first (frees the right side), then extend the in-point
-            postTimelineOp({ op: "move", clip_id: d.clipId, start: +d.pendStart.toFixed(6) })
-              .then((r) => { if (r) postTimelineOp({ op: "trim", clip_id: d.clipId, source_in: +newIn.toFixed(6) }); });
-          } else {
-            // shrinking head rightward: trim in place first, then slide into the freed space
-            postTimelineOp({ op: "trim", clip_id: d.clipId, source_in: +newIn.toFixed(6) })
-              .then((r) => { if (r) postTimelineOp({ op: "move", clip_id: d.clipId, start: +d.pendStart.toFixed(6) }); });
-          }
+          postTimelineOp({
+            op: "trim_head", clip_id: d.clipId,
+            start: +d.pendStart.toFixed(6), source_in: +newIn.toFixed(6),
+          });
         } else {
           postTimelineOp({ op: "set_time", clip_id: d.clipId, start: +d.pendStart.toFixed(6), duration: +d.pendDur.toFixed(6) });
         }
@@ -2240,10 +5368,35 @@
     document.addEventListener("keydown", (ev) => {
       const t = ev.target;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      if (t?.closest?.(".ptl-clip") && (ev.key === "ArrowLeft" || ev.key === "ArrowRight")) {
+        const clip = selectedClip();
+        if (!clip || !editingEnabled()) return;
+        const frames = ev.shiftKey ? 10 : 1;
+        const delta = frames / Number(state.projectTimeline?.fps || 30);
+        ev.preventDefault();
+        postTimelineOp({
+          op: "move", clip_id: clip.id,
+          start: Math.max(0, Number(clip.start || 0) + (ev.key === "ArrowLeft" ? -delta : delta)),
+        });
+        return;
+      }
       if (ev.key === "Delete" || ev.key === "Backspace") { ev.preventDefault(); deleteSelected(); return; }
       if (ev.key === "s" || ev.key === "S") { splitSelected(); return; }
       if (ev.key === "m" || ev.key === "M") { addMarker(TL.playhead); return; }
-      if ((ev.metaKey || ev.ctrlKey) && (ev.key === "z" || ev.key === "Z")) { ev.preventDefault(); if (editingEnabled()) postTimelineOp({ op: "undo", steps: 1 }); return; }
+      if ((ev.metaKey || ev.ctrlKey) && (ev.key === "z" || ev.key === "Z")) {
+        ev.preventDefault();
+        if (editingEnabled()) {
+          const op = ev.shiftKey ? "redo" : "undo";
+          if (selectedLumenFrameLayer()) postLumenFrameOp({ op, steps: 1 });
+          else postTimelineOp({ op, steps: 1 });
+        }
+        return;
+      }
+      if (ev.key === "Escape" && (state.selectedClipId || state.selectedLumenLayerId)) {
+        state.selectedClipId = null; state.selectedLumenLayerId = null; state.canvasEdit = null;
+        renderProjectTimeline(state.projectTimeline); renderDirectCanvas(); refreshPanel("properties");
+        return;
+      }
       if (ev.key === "+" || ev.key === "=") { setPps(TL.pps * 1.25); return; }
       if (ev.key === "-" || ev.key === "_") { setPps(TL.pps / 1.25); return; }
     });
@@ -2251,13 +5404,15 @@
 
   function setupTimelineDirectEdit() {
     buildTimelineShell();   // builds the panel DOM + wires every interaction
+    setupDirectManipulation();
+    setupSegmentWorkspace();
   }
 
   // Snap a timeline-second to nearby clip edges / playhead / markers (≈8px),
   // else to a 0.5s grid; clamp >= 0.
-  function snapSeconds(sec, d) {
+  function snapSeconds(sec, d, bypass = false) {
     sec = Math.max(0, sec);
-    if (!TL.snap) return sec;
+    if (!TL.snap || bypass) return sec;
     const tol = pxToTime(8);
     let best = sec, bestDist = tol;
     const cand = [TL.playhead, ...TL.markers.map((m) => m.time)];
@@ -2273,42 +5428,837 @@
 
   // ── API calls ───────────────────────────────────────────────────────
 
-  async function createSession() {
-    clearReconnectTimer();
-    stopTimelinePoll();
-    if (state.eventSource) {
-      try { await fetch(`/sessions/${state.sessionId}/close`, { method: "POST" }); } catch {}
-      state.eventSource.close();
+  function isUserFacingProject(project) {
+    const id = String(project?.project_id || "").trim();
+    const name = String(project?.name || "").trim();
+    const sessions = Array.isArray(project?.sessions) ? project.sessions : [];
+    // Sessions created before the Project feature received an automatic
+    // project-* / v3-* production container. They remain recoverable as Chats,
+    // but they are not user-created Projects and must not inflate this list.
+    if (!id || !name || name === id) return false;
+    // Packaging acceptance created two empty local sentinels. Keep their data
+    // recoverable on disk, but do not present test residue as user work.
+    if (name === "DMG Project QA" && !project.source_root && !sessions.length) return false;
+    return true;
+  }
+
+  async function fetchProjects() {
+    const response = await apiFetch("/projects");
+    if (!response.ok) throw new Error(`GET /projects failed: ${response.status}`);
+    const payload = await response.json();
+    return Array.isArray(payload.projects) ? payload.projects.filter(isUserFacingProject) : [];
+  }
+
+  const projectSidebarState = {
+    collapsed: new Set(),
+    expandedSessions: new Set(),
+    refreshToken: 0,
+    liveSessions: new Map(),
+    projectNames: new Map(),
+    knownActivity: new Set(),
+  };
+
+  function toggleProjectGroup(button) {
+    const projectId = button?.dataset.projectToggle;
+    if (!projectId) return;
+    if (projectSidebarState.collapsed.has(projectId)) projectSidebarState.collapsed.delete(projectId);
+    else projectSidebarState.collapsed.add(projectId);
+    const collapsed = projectSidebarState.collapsed.has(projectId);
+    button.closest(".project-tree-group")?.classList.toggle("is-collapsed", collapsed);
+    button.setAttribute("aria-expanded", String(!collapsed));
+  }
+
+  // The sidebar body persists while its rows are re-rendered. Delegate this
+  // action once so a touch cannot land on a row whose short-lived listener was
+  // replaced by an asynchronous sidebar refresh.
+  function bindProjectSidebarInteractions() {
+    const body = els.projectSidebarBody;
+    if (!body || body.dataset.projectInteractionsBound === "true") return;
+    body.dataset.projectInteractionsBound = "true";
+    body.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-project-toggle]");
+      if (button && body.contains(button)) toggleProjectGroup(button);
+    });
+  }
+
+  function projectNamesFrom(projects) {
+    const names = new Map();
+    for (const project of projects || []) {
+      const name = String(project.name || "").trim();
+      if (!name) continue;
+      const ids = [project.project_id, ...(project.sessions || []).map((session) => session.project_id)];
+      ids.map((id) => String(id || "")).filter(Boolean).forEach((id) => names.set(id, name));
     }
-    setConnPill("opening…", "");
-    const r = await fetch("/sessions", { method: "POST" });
-    if (!r.ok) throw new Error(`POST /sessions failed: ${r.status}`);
-    const data = await r.json();
-    state.sessionId = data.session_id;
-    // reset per-session timeline view state so nothing leaks across sessions
-    loadMarkers();              // markers are per-session (localStorage); reload under the real key
-    TL.extraTracks = [];        // client-added display lanes
+    return names;
+  }
+
+  function projectSessionTitle(session, snapshot) {
+    if (snapshot?.title && snapshot.title !== "Gemia Session") return snapshot.title;
+    const id = String(session?.session_id || "");
+    return id ? `会话 ${id.slice(-6)}` : "未命名会话";
+  }
+
+  function projectSessionRowHtml({
+    sessionId = "",
+    snapshotId = "",
+    title,
+    projectId = "",
+    runId = "",
+    active = false,
+    pinned = false,
+    hasHistory = false,
+    canReceiveHandoff = false,
+  }) {
+    const runtimeAttrs = sessionId
+      ? ` data-runtime-session-id="${escapeHTML(sessionId)}"`
+      : "";
+    const navigationAttrs = projectId
+      ? ` data-project-session-id="${escapeHTML(sessionId)}" data-project-id="${escapeHTML(projectId)}" data-run-id="${escapeHTML(runId)}"${snapshotId ? ` data-snapshot-id="${escapeHTML(snapshotId)}"` : ""}`
+      : ` data-chat-snapshot-id="${escapeHTML(snapshotId)}"`;
+    const menu = sessionId ? `
+      <button type="button" class="project-tree-session-more" data-session-menu-toggle="${escapeHTML(sessionId)}" aria-label="${escapeHTML(title)}的更多操作" aria-haspopup="menu" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-more"/></svg>
+      </button>
+      <div class="project-tree-session-menu" role="menu" hidden>
+        <button type="button" role="menuitem" data-session-action="pin" data-session-id="${escapeHTML(sessionId)}" data-session-pinned="${pinned ? "1" : "0"}">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-pin"/></svg><span>${pinned ? "取消固定" : "固定会话"}</span>
+        </button>
+        ${canReceiveHandoff ? `<button type="button" role="menuitem" data-session-action="handoff" data-session-id="${escapeHTML(sessionId)}">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-send"/></svg><span>交接当前成果到此会话</span>
+        </button>` : ""}
+        <button type="button" role="menuitem" class="is-danger" data-session-action="delete" data-session-id="${escapeHTML(sessionId)}">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-trash"/></svg><span>删除会话</span>
+        </button>
+      </div>` : "";
+    return `<div class="project-tree-session-row${pinned ? " is-pinned" : ""}">
+      <button type="button" class="project-tree-session${active ? " is-active" : ""}"${navigationAttrs}${runtimeAttrs} data-session-has-history="${hasHistory ? "1" : "0"}" data-session-title="${escapeHTML(title)}"${active ? ' aria-current="true"' : ""} title="${escapeHTML(title)}">
+        <span class="project-tree-session-title">${escapeHTML(title)}</span>
+        <span class="project-tree-session-dot" aria-hidden="true"></span>
+        <svg class="project-tree-session-pin" viewBox="0 0 24 24" aria-label="已固定"><use href="#i-pin"/></svg>
+      </button>
+      ${menu}
+    </div>`;
+  }
+
+  function syncProjectSidebarSelection() {
+    if (!els.projectSidebarBody) return;
+    els.projectSidebarBody.querySelectorAll("[data-project-session-id], [data-chat-snapshot-id]").forEach((row) => {
+      const selected = row.dataset.projectSessionId
+        ? !!state.sessionId && row.dataset.projectSessionId === state.sessionId
+        : !!state.activeHistoryId && row.dataset.chatSnapshotId === state.activeHistoryId;
+      row.classList.toggle("is-active", selected);
+      if (selected) row.setAttribute("aria-current", "true");
+      else row.removeAttribute("aria-current");
+    });
+  }
+
+  function sessionHasRunningWork(session) {
+    return !!(
+      session?.turn_in_progress
+      || (Array.isArray(session?.pending_jobs) && session.pending_jobs.length)
+    );
+  }
+
+  function applyProjectSessionIndicators() {
+    const body = els.projectSidebarBody;
+    if (!body) return;
+    body.querySelectorAll("[data-runtime-session-id]").forEach((row) => {
+      const sessionId = row.dataset.runtimeSessionId;
+      if (!sessionId) return;
+      const live = projectSidebarState.liveSessions.get(sessionId);
+      const running = sessionHasRunningWork(live);
+      if (running || row.dataset.sessionHasHistory === "1") {
+        projectSidebarState.knownActivity.add(sessionId);
+      }
+      const complete = !running && projectSidebarState.knownActivity.has(sessionId);
+      row.classList.toggle("is-running", running);
+      row.classList.toggle("is-complete", complete);
+      const status = running ? "执行中" : complete ? "已完成" : "";
+      const title = row.dataset.sessionTitle || row.title || "会话";
+      row.title = status ? `${title} · ${status}` : title;
+      row.setAttribute("aria-label", status ? `${title}，${status}` : title);
+    });
+  }
+
+  async function refreshProjectSessionIndicators() {
+    if (!els.projectSidebarBody || document.visibilityState === "hidden") return;
+    if (projectSidebarState.indicatorRefreshInFlight) return;
+    projectSidebarState.indicatorRefreshInFlight = true;
+    try {
+      const response = await apiFetch("/sessions?compact=1");
+      if (!response.ok) return;
+      const payload = await response.json();
+      const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+      projectSidebarState.liveSessions = new Map(
+        sessions.map((session) => [String(session.session_id || ""), session]),
+      );
+      applyProjectSessionIndicators();
+    } catch {}
+    finally { projectSidebarState.indicatorRefreshInFlight = false; }
+  }
+
+  async function renderProjectSidebar() {
+    const body = els.projectSidebarBody;
+    if (!body || isCliPreview) return;
+    const refreshToken = ++projectSidebarState.refreshToken;
+    let projects = [];
+    let snapshots = [];
+    try {
+      const [projectResult, historyResult, runtimeResult] = await Promise.allSettled([
+        fetchProjects(),
+        apiFetch("/session-history/list?limit=100").then(async (response) => {
+          if (!response.ok) throw new Error(`history failed: ${response.status}`);
+          const payload = await response.json();
+          return Array.isArray(payload.sessions) ? payload.sessions : [];
+        }),
+        apiFetch("/sessions?compact=1").then(async (response) => {
+          if (!response.ok) throw new Error(`sessions failed: ${response.status}`);
+          const payload = await response.json();
+          return Array.isArray(payload.sessions) ? payload.sessions : [];
+        }),
+      ]);
+      if (refreshToken !== projectSidebarState.refreshToken) return;
+      if (projectResult.status === "fulfilled") projects = projectResult.value;
+      if (historyResult.status === "fulfilled") snapshots = historyResult.value;
+      if (runtimeResult.status === "fulfilled") {
+        projectSidebarState.liveSessions = new Map(
+          runtimeResult.value.map((session) => [String(session.session_id || ""), session]),
+        );
+      }
+      if (projectResult.status === "rejected" && historyResult.status === "rejected") {
+        throw projectResult.reason;
+      }
+    } catch {
+      body.innerHTML = `<p class="project-sidebar-placeholder">Projects 暂时无法载入</p>`;
+      return;
+    }
+    projectSidebarState.projectNames = projectNamesFrom(projects);
+
+    const snapshotsBySession = new Map();
+    snapshots.forEach((snapshot) => {
+      const sessionId = String(snapshot.v3_session_id || "");
+      if (sessionId && !snapshotsBySession.has(sessionId)) snapshotsBySession.set(sessionId, snapshot);
+    });
+
+    const projectHtml = projects.map((project) => {
+      const projectId = String(project.project_id || "");
+      const collapsed = projectSidebarState.collapsed.has(projectId);
+      const sessions = Array.isArray(project.sessions) ? project.sessions : [];
+      const showAll = projectSidebarState.expandedSessions.has(projectId);
+      const visibleSessions = showAll ? sessions : sessions.slice(0, 5);
+      const sessionRows = visibleSessions.map((session) => {
+        const sessionId = String(session.session_id || "");
+        const snapshot = snapshotsBySession.get(sessionId);
+        const active = sessionId === state.sessionId;
+        const title = projectSessionTitle(session, snapshot);
+        return projectSessionRowHtml({
+          sessionId,
+          snapshotId: snapshot?.id || "",
+          title,
+          projectId: session.project_id || projectId,
+          runId: session.run_id || "",
+          active,
+          pinned: !!session.pinned,
+          hasHistory: !!snapshot?.message_count,
+          canReceiveHandoff: !!state.sessionId && !!state.projectId && sessionId !== state.sessionId,
+        });
+      }).join("");
+      const more = sessions.length > 5 && !showAll
+        ? `<button type="button" class="project-tree-show-more" data-project-show-more="${escapeHTML(projectId)}">显示更多</button>`
+        : "";
+      return `<section class="project-tree-group${collapsed ? " is-collapsed" : ""}" data-project-group="${escapeHTML(projectId)}">
+        <button type="button" class="project-tree-head" data-project-toggle="${escapeHTML(projectId)}" aria-expanded="${String(!collapsed)}" title="${escapeHTML(project.source_root || project.name || projectId)}">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-folder"/></svg>
+          <span class="project-tree-name">${escapeHTML(project.name || projectId)}</span>
+          <svg class="project-tree-chevron" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-d"/></svg>
+        </button>
+        <div class="project-tree-children">
+          ${sessionRows || `<p class="project-tree-empty">还没有会话</p>`}
+          ${more}
+        </div>
+      </section>`;
+    }).join("");
+
+    const visibleProjectIds = new Set(projects.map((project) => String(project.project_id || "")));
+    // A forked production is rendered under its source Project, while its
+    // durable snapshot keeps the fork's own project_id. Membership therefore
+    // has to follow the session id actually rendered above; filtering only by
+    // the source project id duplicates the same conversation under Chats.
+    const projectSessionIds = new Set(
+      projects.flatMap((project) => (
+        Array.isArray(project.sessions) ? project.sessions : []
+      )).map((session) => String(session.session_id || "")).filter(Boolean),
+    );
+    const unassigned = snapshots.filter((snapshot) => {
+      const sessionId = String(snapshot.v3_session_id || "");
+      return !visibleProjectIds.has(String(snapshot.project_id || ""))
+        && !projectSessionIds.has(sessionId);
+    });
+    const unassignedRows = unassigned.slice(0, 8).map((snapshot) => {
+      const active = snapshot.v3_session_id && snapshot.v3_session_id === state.sessionId;
+      const title = snapshot.title && snapshot.title !== "Gemia Session" ? snapshot.title : "未命名会话";
+      return projectSessionRowHtml({
+        sessionId: snapshot.v3_session_id || "",
+        snapshotId: snapshot.id,
+        title,
+        active,
+        pinned: !!snapshot.pinned,
+        hasHistory: !!snapshot.message_count,
+      });
+    }).join("");
+
+    body.innerHTML = `${projectHtml || `<p class="project-tree-empty">还没有 Project</p>`}
+      <section class="project-tree-chats">
+        <span class="project-tree-section-title">Chats</span>
+        ${unassignedRows || `<p class="project-tree-empty">还没有独立会话</p>`}
+      </section>`;
+    applyProjectSessionIndicators();
+
+    body.querySelectorAll("[data-project-show-more]").forEach((button) => {
+      button.addEventListener("click", () => {
+        projectSidebarState.expandedSessions.add(button.dataset.projectShowMore);
+        renderProjectSidebar();
+      });
+    });
+    body.querySelectorAll("[data-session-menu-toggle]").forEach((button) => {
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const row = button.closest(".project-tree-session-row");
+        const menu = row?.querySelector(".project-tree-session-menu");
+        if (!menu) return;
+        body.querySelectorAll(".project-tree-session-row.is-menu-open").forEach((openRow) => {
+          if (openRow === row) return;
+          openRow.classList.remove("is-menu-open");
+          openRow.querySelector(".project-tree-session-menu")?.setAttribute("hidden", "");
+          openRow.querySelector("[data-session-menu-toggle]")?.setAttribute("aria-expanded", "false");
+        });
+        const opening = menu.hidden;
+        menu.hidden = !opening;
+        row.classList.toggle("is-menu-open", opening);
+        button.setAttribute("aria-expanded", String(opening));
+        if (opening) {
+          setTimeout(() => document.addEventListener("click", () => {
+            menu.hidden = true;
+            row.classList.remove("is-menu-open");
+            button.setAttribute("aria-expanded", "false");
+          }, { once: true }), 0);
+        }
+      });
+      button.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") return;
+        const row = button.closest(".project-tree-session-row");
+        const menu = row?.querySelector(".project-tree-session-menu");
+        if (menu) menu.hidden = true;
+        row?.classList.remove("is-menu-open");
+        button.setAttribute("aria-expanded", "false");
+        button.focus();
+      });
+    });
+    body.querySelectorAll("[data-session-action]").forEach((button) => {
+      button.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        const sessionId = button.dataset.sessionId;
+        if (!sessionId) return;
+        const row = button.closest(".project-tree-session-row");
+        const sessionButton = row?.querySelector(".project-tree-session");
+        const title = sessionButton?.dataset.sessionTitle || "此会话";
+        try {
+          if (button.dataset.sessionAction === "pin") {
+            const pinned = button.dataset.sessionPinned !== "1";
+            const response = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}/pin`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ pinned }),
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(payload.error || `固定会话失败 (${response.status})`);
+            await renderProjectSidebar();
+            return;
+          }
+          if (button.dataset.sessionAction === "handoff") {
+            const sourceSessionId = state.sessionId;
+            if (!sourceSessionId || sourceSessionId === sessionId) return;
+            if (!window.confirm(`将当前会话已完成的素材和成片交接给“${title}”？\n\n时间轴、聊天和运行上下文不会共享。`)) return;
+            const response = await apiFetch(`/sessions/${encodeURIComponent(sourceSessionId)}/handoff`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ target_session_id: sessionId }),
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(payload.error || `交接失败 (${response.status})`);
+            const sent = Array.isArray(payload.transferred) ? payload.transferred.length : 0;
+            const already = Array.isArray(payload.already_available) ? payload.already_available.length : 0;
+            state.errors.push(`已交接 ${sent} 个成果到“${title}”${already ? `；${already} 个已有` : ""}。`);
+            render();
+            return;
+          }
+          if (button.dataset.sessionAction === "delete") {
+            if (!window.confirm(`删除“${title}”？`)) return;
+            const wasCurrent = sessionId === state.sessionId;
+            const projectId = sessionButton?.dataset.projectId || "";
+            const response = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}`, {
+              method: "DELETE",
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(payload.error || `删除会话失败 (${response.status})`);
+            if (wasCurrent) {
+              await createSession(projectId ? { fork_from_project_id: projectId } : {});
+            }
+            await renderProjectSidebar();
+          }
+        } catch (error) {
+          state.errors.push(error.message);
+          render();
+        }
+      });
+    });
+    body.querySelectorAll("[data-project-session-id]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        if (button.dataset.projectSessionId === state.sessionId) return;
+        try {
+          if (button.dataset.snapshotId) await loadHistorySession(button.dataset.snapshotId);
+          else await resumeSession(button.dataset.projectSessionId, {
+            project_id: button.dataset.projectId,
+            run_id: button.dataset.runId,
+          });
+          await renderProjectSidebar();
+        } catch (error) {
+          state.errors.push(`session restore failed: ${error.message}`);
+          render();
+        }
+      });
+    });
+    body.querySelectorAll("[data-chat-snapshot-id]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        if (await loadHistorySession(button.dataset.chatSnapshotId)) await renderProjectSidebar();
+      });
+    });
+  }
+
+  async function syncCurrentProject() {
+    if (!state.projectId) return;
+    try {
+      const projects = await fetchProjects();
+      const project = projects.find((item) => (
+        item.project_id === state.projectId
+        || (item.sessions || []).some((session) => session.project_id === state.projectId)
+      ));
+      state.projectName = project?.name || state.projectId;
+      state.projectSourceRoot = project?.source_root || null;
+    } catch {
+      state.projectName = state.projectId;
+      state.projectSourceRoot = null;
+    }
+  }
+
+  function ensureProjectModal() {
+    let modal = document.getElementById("project-modal");
+    if (modal) return modal;
+    modal = document.createElement("div");
+    modal.id = "project-modal";
+    modal.className = "project-modal";
+    modal.hidden = true;
+    modal.innerHTML = `
+      <section class="project-dialog" role="dialog" aria-modal="true" aria-labelledby="project-dialog-title">
+        <div class="project-dialog-head">
+          <h2 id="project-dialog-title">Projects</h2>
+          <button type="button" class="icon-btn" data-project-close aria-label="关闭"><svg viewBox="0 0 24 24"><use href="#i-close"/></svg></button>
+        </div>
+        <div class="project-list" data-project-list><p class="project-empty">加载中…</p></div>
+        <div class="project-dialog-actions">
+          <button type="button" data-project-undo>撤销文件操作</button>
+          <button type="button" data-project-redo>重做</button>
+          <span style="flex:1"></span>
+          <button type="button" data-project-open>新建 Project</button>
+        </div>
+      </section>`;
+    document.body.appendChild(modal);
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal || event.target.closest("[data-project-close]")) modal.hidden = true;
+    });
+    return modal;
+  }
+
+  async function projectHistoryAction(action) {
+    if (!state.projectId) return;
+    const response = await apiFetch(`/projects/${encodeURIComponent(state.projectId)}/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || `${action} failed: ${response.status}`);
+    }
+    filesState = null;
+    refreshPanel("files");
+    await openProjectModal();
+  }
+
+  async function chooseProjectFolder() {
+    if (typeof window.lumeriDesktop?.pickProjectFolder === "function") {
+      const picked = await window.lumeriDesktop.pickProjectFolder();
+      return typeof picked === "string" ? picked : (picked?.path || "");
+    }
+    try {
+      const response = await apiFetch("/projects/pick-folder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      if (response.ok) return (await response.json()).path || "";
+    } catch {}
+    return window.prompt("输入要作为 Lumeri Project 打开的本机文件夹绝对路径：", "") || "";
+  }
+
+  async function createProject({ name, sourceRoot = "" }) {
+    const response = await apiFetch("/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: String(name || "").trim() || "未命名 Project",
+        ...(String(sourceRoot || "").trim() ? { source_root: String(sourceRoot).trim() } : {}),
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `create project failed: ${response.status}`);
+    ensureProjectModal().hidden = true;
+    const createModal = document.getElementById("project-create-modal");
+    if (createModal) createModal.hidden = true;
+    await createSession({ project_id: payload.project_id });
+  }
+
+  function ensureCreateProjectModal() {
+    let modal = document.getElementById("project-create-modal");
+    if (modal) return modal;
+    modal = document.createElement("div");
+    modal.id = "project-create-modal";
+    modal.className = "project-modal";
+    modal.hidden = true;
+    modal.innerHTML = `
+      <section class="project-dialog project-create-dialog" role="dialog" aria-modal="true" aria-labelledby="project-create-title">
+        <div class="project-dialog-head">
+          <h2 id="project-create-title">新建 Project</h2>
+          <button type="button" class="icon-btn" data-project-create-close aria-label="关闭"><svg viewBox="0 0 24 24"><use href="#i-close"/></svg></button>
+        </div>
+        <div class="project-create-body">
+          <label class="project-create-field">
+            <span>Project 名称</span>
+            <input type="text" data-project-create-name maxlength="80" placeholder="未命名 Project" autocomplete="off">
+          </label>
+          <div class="project-folder-choice">
+            <div>
+              <strong>本机目录</strong>
+              <p data-project-create-path>未选择。产物将保存在 Lumeri 的 Project 目录中。</p>
+            </div>
+            <button type="button" data-project-create-pick>选择目录…</button>
+          </div>
+          <button type="button" class="project-folder-clear" data-project-create-clear hidden>不使用本机目录</button>
+          <p class="project-create-note">目录是可选的。无论是否绑定目录，Project 内的会话都会共享剪辑产物、记忆和日志。</p>
+        </div>
+        <div class="project-dialog-actions">
+          <button type="button" data-project-create-cancel>取消</button>
+          <button type="button" class="project-create-submit" data-project-create-submit>创建 Project</button>
+        </div>
+      </section>`;
+    document.body.appendChild(modal);
+    const close = () => { modal.hidden = true; };
+    modal.addEventListener("click", (event) => { if (event.target === modal) close(); });
+    modal.querySelector("[data-project-create-close]").onclick = close;
+    modal.querySelector("[data-project-create-cancel]").onclick = close;
+    modal.querySelector("[data-project-create-pick]").onclick = async () => {
+      const picked = (await chooseProjectFolder()).trim();
+      if (!picked) return;
+      modal.dataset.sourceRoot = picked;
+      modal.querySelector("[data-project-create-path]").textContent = picked;
+      modal.querySelector("[data-project-create-clear]").hidden = false;
+    };
+    modal.querySelector("[data-project-create-clear]").onclick = () => {
+      modal.dataset.sourceRoot = "";
+      modal.querySelector("[data-project-create-path]").textContent = "未选择。产物将保存在 Lumeri 的 Project 目录中。";
+      modal.querySelector("[data-project-create-clear]").hidden = true;
+    };
+    modal.querySelector("[data-project-create-submit]").onclick = async () => {
+      const submit = modal.querySelector("[data-project-create-submit]");
+      if (submit.disabled) return;
+      submit.disabled = true;
+      try {
+        await createProject({
+          name: modal.querySelector("[data-project-create-name]").value,
+          sourceRoot: modal.dataset.sourceRoot || "",
+        });
+      } catch (error) {
+        state.errors.push(error.message);
+        render();
+      } finally {
+        submit.disabled = false;
+      }
+    };
+    return modal;
+  }
+
+  function openCreateProjectDialog() {
+    const modal = ensureCreateProjectModal();
+    modal.dataset.sourceRoot = "";
+    modal.querySelector("[data-project-create-name]").value = "";
+    modal.querySelector("[data-project-create-path]").textContent = "未选择。产物将保存在 Lumeri 的 Project 目录中。";
+    modal.querySelector("[data-project-create-clear]").hidden = true;
+    modal.hidden = false;
+    modal.querySelector("[data-project-create-name]").focus();
+  }
+
+  async function openProjectModal() {
+    const modal = ensureProjectModal();
+    const list = modal.querySelector("[data-project-list]");
+    modal.hidden = false;
+    list.innerHTML = `<p class="project-empty">加载中…</p>`;
+    const projects = await fetchProjects();
+    list.innerHTML = projects.length ? projects.map((project) => {
+      const sessions = Array.isArray(project.sessions) ? project.sessions.length : (project.session_ids || []).length;
+      const active = project.project_id === state.projectId;
+      return `<button type="button" class="project-row${active ? " is-active" : ""}" data-project-id="${escapeHTML(project.project_id)}">
+        <span class="project-row-name">${escapeHTML(project.name || project.project_id)}</span>
+        <span class="project-row-path">${escapeHTML(project.source_root || "仅使用 Lumeri Project 目录")}</span>
+        <span class="project-row-count">${sessions} 个会话</span>
+        <span class="project-row-context">记忆 ${Number(project.context?.memory_entries || 0)} · 日志 ${Number(project.context?.log_entries || 0)}</span>
+      </button>`;
+    }).join("") : `<p class="project-empty">还没有 Project。打开一个本机文件夹开始。</p>`;
+    list.querySelectorAll("[data-project-id]").forEach((row) => {
+      row.addEventListener("click", async () => {
+        modal.hidden = true;
+        await createSession({ project_id: row.dataset.projectId });
+      });
+    });
+    modal.querySelector("[data-project-open]").onclick = () => {
+      modal.hidden = true;
+      openCreateProjectDialog();
+    };
+    const currentProject = projects.find((project) => project.project_id === state.projectId);
+    modal.querySelector("[data-project-undo]").disabled = !currentProject?.file_history?.can_undo;
+    modal.querySelector("[data-project-redo]").disabled = !currentProject?.file_history?.can_redo;
+    modal.querySelector("[data-project-undo]").onclick = () => {
+      projectHistoryAction("undo").catch((error) => { state.errors.push(error.message); render(); });
+    };
+    modal.querySelector("[data-project-redo]").onclick = () => {
+      projectHistoryAction("redo").catch((error) => { state.errors.push(error.message); render(); });
+    };
+  }
+
+  function resetRuntimeView() {
+    // Reset per-session timeline state so no project pixels or media handles
+    // leak across a real history switch.
+    unloadDeliveryReviewMaster();
+    if (state.roughcutPollTimer) {
+      clearTimeout(state.roughcutPollTimer);
+      state.roughcutPollTimer = null;
+    }
+    TL.extraTracks = [];
     TL.playhead = 0;
-    TL.frames.clear(); TL.frameFail.clear();   // asset ids can repeat across sessions
-    TL.frameRigs.forEach((r) => { try { if (r.video) { r.video.removeAttribute("src"); r.video.load(); } } catch {} });
+    TL.model = null;
+    TL.markers = [];
+    TL.frames.clear();
+    TL.frameFail.clear();
+    TL.frameRigs.forEach((rig) => {
+      try {
+        if (rig.video) { rig.video.removeAttribute("src"); rig.video.load(); }
+      } catch {}
+    });
     TL.frameRigs.clear();
+    TL.wave.clear();
+    TL.waveBusy.clear();
+    TL._renderedSeq = null;
+    // Clear rendered timeline pixels immediately. The next session's
+    // authoritative timeline arrives asynchronously.
+    if (tlHeaders()) tlHeaders().innerHTML = "";
+    if (tlContent()) tlContent().innerHTML = "";
     state.selectedClipId = null;
+    state.selectedLumenLayerId = null;
+    state.lumenFrameCanvas = null;
+    state.lumenFrameRequestedFrame = null;
+    state.lumenFrameFetchInFlight = false;
+    state.canvasEdit = null;
     state.turns = [];
     state.currentTurn = null;
     state.assets = [];
     state.errors = [];
     state.turnInProgress = false;
+    state._followChatBottom = true;
     state.stopPending = false;
     state.lastEventId = null;
     state.projectTimeline = null;
+    state.projectQuanta = null;
+    state.selectedQuantaStateId = null;
+    state.mediaLibrary = [];
+    state.sessionNonMediaAssets = [];
+    state.mediaLibraryStatus = "idle";
     state.mediaAnnotations = new Map();
-    state.planMode = false;     // fresh sessions start with plan mode off
+    state.roughcutManifests = new Map();
+    state.roughcutJob = null;
+    state.libraryFocusName = "";
+    state.planMode = false;
     state.planReady = false;
     state.sessionTitle = null;
+    state.activeHistoryId = null;
     state.userMessageCount = 0;
+    state.projectId = null;
+    state.projectName = null;
+    state.projectSourceRoot = null;
+    state.runId = null;
+    state.projectRevision = 0;
+    state.productionRevision = 0;
+    state.productionState = null;
+    state.productionOutcome = null;
+    state.productionBudget = null;
+    state.productionBlockers = [];
+    state.productionDelivery = null;
+    state.productionAcceptance = null;
+    state.productionAssetMix = null;
+    state.chatOnly = false;
+    state.backgroundTasks = new Map();
+    // The Library is also rendered outside the main chat render path. Blank
+    // both copies at the session boundary so the old session cannot remain
+    // visible while the new session snapshot/library request is in flight.
+    renderMediaLibrary();
+    const libraryPanelBody = panelBodyFor("library");
+    if (libraryPanelBody) {
+      libraryPanelBody.innerHTML = `${librarySectionsHtml()}<p class="placeholder">加载中…</p>`;
+    }
+  }
+
+  let runtimeActivationSeq = 0;
+  const sessionViewCache = new Map();
+
+  function cacheCurrentSessionView() {
+    if (!state.sessionId) return;
+    sessionViewCache.set(state.sessionId, {
+      turns: state.turns,
+      currentTurn: state.currentTurn,
+      sessionTitle: state.sessionTitle,
+      userMessageCount: state.userMessageCount,
+      lastEventId: state.lastEventId,
+      pendingAsk: state.pendingAsk,
+      backgroundTasks: state.backgroundTasks,
+    });
+  }
+
+  function restoreCachedSessionView(sessionId) {
+    const cached = sessionViewCache.get(sessionId);
+    if (!cached) return false;
+    state.turns = cached.turns;
+    state.currentTurn = cached.currentTurn;
+    state.sessionTitle = cached.sessionTitle;
+    state.userMessageCount = cached.userMessageCount;
+    state.lastEventId = cached.lastEventId;
+    state.pendingAsk = cached.pendingAsk;
+    state.backgroundTasks = cached.backgroundTasks;
+    return true;
+  }
+
+  async function detachRuntime() {
+    cacheCurrentSessionView();
+    clearReconnectTimer();
+    stopTimelinePoll();
+    if (state.eventSource) {
+      state.eventSource.close();
+      state.eventSource = null;
+    }
+  }
+
+  async function activateSessionPayload(data, activationSeq, hydrateHistory = null) {
+    if (!data?.session_id) throw new Error("session response did not include session_id");
+    if (activationSeq !== runtimeActivationSeq) return null;
+    resetRuntimeView();
+    state.sessionId = data.session_id;
+    // Restore the saved chat before reconnecting SSE. Otherwise replayed
+    // background events can arrive first and then be erased by a stale
+    // history snapshot, making a still-running session look reset.
+    if (hydrateHistory) hydrateHistory();
+    applyProductionSnapshot(data);
+    await syncCurrentProject();
+    if (activationSeq !== runtimeActivationSeq || state.sessionId !== data.session_id) return null;
+    loadMarkers();
+    // POST /resume and POST /sessions already return the authoritative full
+    // session snapshot.  Reuse it instead of immediately issuing a duplicate
+    // GET /sessions/{id}, which repeated all backend snapshot work.
+    await refreshSessionState(data);
+    if (activationSeq !== runtimeActivationSeq || state.sessionId !== data.session_id) return null;
     connectSse(state.sessionId);
     startTimelinePoll();
     fetchMediaLibrary().catch(() => {});
+    render();
+    renderProjectSidebar();
+    return data;
+  }
+
+  async function createSession(options = {}) {
+    const activationSeq = ++runtimeActivationSeq;
+    if (state.sessionId) await autoSaveSession();
+    // Switching the visible chat only detaches this UI. The old SessionRunner
+    // must keep working independently in the server.
+    await detachRuntime();
+    setConnPill("opening…", "");
+    const request = { method: "POST" };
+    if (options.project_id || options.run_id || options.fork_from_project_id) {
+      request.headers = { "Content-Type": "application/json" };
+      request.body = JSON.stringify({
+        ...(options.project_id ? { project_id: options.project_id } : {}),
+        ...(options.run_id ? { run_id: options.run_id } : {}),
+        ...(options.fork_from_project_id ? { fork_from_project_id: options.fork_from_project_id } : {}),
+      });
+    }
+    const r = await apiFetch("/sessions", request);
+    if (!r.ok) throw new Error(`POST /sessions failed: ${r.status}`);
+    const data = await r.json();
+    const activated = await activateSessionPayload(data, activationSeq);
+    if (!activated) return null;
+    // Persist the durable project/run reference even before the first chat
+    // message or upload. A browser restart must not orphan a real empty
+    // project merely because the creator had not typed yet.
+    await autoSaveSession();
+    return activated;
+  }
+
+  async function resumeSession(sessionId, expected = {}) {
+    const activationSeq = ++runtimeActivationSeq;
+    const expectedProjectId = expected.project_id || null;
+    const expectedRunId = expected.run_id || null;
+    if (!!expectedProjectId !== !!expectedRunId) {
+      throw new Error("incomplete durable production reference");
+    }
+    if (!sessionId) throw new Error("no durable session reference");
+    if (state.sessionId) await autoSaveSession();
+    await detachRuntime();
+    setConnPill("opening…", "");
+    const r = await apiFetch(`/sessions/${encodeURIComponent(sessionId)}/resume`, { method: "POST" });
+    if (!r.ok) throw new Error(`resume session failed: ${r.status}`);
+    const data = await r.json();
+    if (expectedProjectId && (
+      data.project_id !== expectedProjectId || data.run_id !== expectedRunId
+    )) {
+      throw new Error("resumed production identity did not match history");
+    }
+    return activateSessionPayload(data, activationSeq, expected.hydrateHistory || null);
+  }
+
+  // CLI preview is the canonical Video workspace attached to the session the
+  // terminal already owns. It must never create, replace, or close that
+  // session; only the chat surfaces are removed by the .cli-preview CSS mode.
+  async function attachSession(sessionId) {
+    const activationSeq = ++runtimeActivationSeq;
+    await detachRuntime();
+    setConnPill("opening…", "");
+    resetRuntimeView();
+    state.sessionId = sessionId;
+    state.lastEventId = null;
+    loadMarkers();
+    TL._renderedSeq = null;
+    await refreshSessionState();
+    if (activationSeq !== runtimeActivationSeq || state.sessionId !== sessionId) return null;
+    connectSse(sessionId);
+    startTimelinePoll();
+    fetchMediaLibrary().catch(() => {});
+    const emptyHint = document.querySelector("#empty-state .empty-sub");
+    if (emptyHint) emptyHint.textContent = "在终端描述你想要的视频";
     render();
   }
 
@@ -2317,33 +6267,90 @@
   function _collectSessionMessages() {
     const msgs = [];
     for (const turn of state.turns) {
-      if (turn.userMessage) msgs.push({ role: "user", content: turn.userMessage, timestamp: Date.now() });
+      if (turn.userMessage) msgs.push({
+        role: "user",
+        content: turn.userMessage,
+        skillSpace: normalizeSkillSpaceRefs(turn.skillSpace),
+        workspaceContext: normalizeComposerContextRefs(turn.workspaceContext),
+        timestamp: turn.startedAt || Date.now(),
+      });
       for (const guidance of (turn.guidance || [])) {
         msgs.push({ role: "status", content: guidance, statusType: "guidance", timestamp: Date.now() });
       }
-      if (turn.assistantText) msgs.push({ role: "status", content: turn.assistantText, statusType: "succeeded", timestamp: Date.now() });
+      if (turn.assistantText) msgs.push({ role: "status", content: turn.assistantText, statusType: "succeeded", timestamp: turn.completedAt || Date.now() });
     }
     return msgs;
   }
 
-  async function autoSaveSession() {
-    if (!state.sessionId) return;
+  async function autoSaveSession({ requireAcknowledgement = false } = {}) {
+    if (!state.sessionId) return true;
     const messages = _collectSessionMessages();
-    if (!messages.length) return;
+    if (!messages.length && !state.projectId) return true;
     const payload = {
       session_id: state.sessionId,
+      v3_session_id: state.sessionId,
+      project_id: state.projectId,
+      run_id: state.runId,
+      project_revision: state.projectRevision,
+      production_state: state.productionState,
+      chat_only: !state.projectId,
       title: state.sessionTitle || undefined,
       messages,
+      timeline_markers: TL.markers,
       project_state: null,
       project: null,
     };
     try {
-      await fetch("/session-history", {
+      const response = await apiFetch("/session-history", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+      if (!response.ok) {
+        throw new Error(`POST /session-history failed: ${response.status}`);
+      }
+      return true;
+    } catch (error) {
+      if (requireAcknowledgement) throw error;
+      return false;
+    }
+  }
+
+  window.__lumeriTesterPrepareLogout = async () => {
+    return autoSaveSession({ requireAcknowledgement: true });
+  };
+
+  async function retractTurn(turnIdx) {
+    // Only the newest settled turn is retractable; expected_message lets the
+    // backend refuse if its history and this UI have drifted apart.
+    if (turnIdx !== state.turns.length - 1 || state.turnInProgress) return;
+    const turn = state.turns[turnIdx];
+    if (!turn || !state.sessionId) return;
+    let failText = "撤回失败，请稍后重试。";
+    try {
+      const r = await apiFetch(`/sessions/${encodeURIComponent(state.sessionId)}/retract`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_message: composerAgentMessage(turn.userMessage, turn.skillSpace, turn.workspaceContext),
+        }),
+      });
+      if (r.ok) {
+        state.turns.pop();
+        state.currentTurn = state.turns[state.turns.length - 1] || null;
+        state.userMessageCount = Math.max(0, state.userMessageCount - 1);
+        // Hand the text back for re-editing, but never clobber a draft.
+        if (!els.promptInput.value.trim()) els.promptInput.value = turn.userMessage;
+        render();
+        autoSaveSession();
+        els.promptInput.focus();
+        return;
+      }
+      const err = await r.json().catch(() => null);
+      if (err?.error) failText = err.error;
     } catch {}
+    turn.banners.push({ kind: "turn_error", text: failText });
+    render();
   }
 
   async function autoGenerateTitle() {
@@ -2351,7 +6358,7 @@
     const messages = _collectSessionMessages();
     if (!messages.length) return;
     try {
-      const r = await fetch(`/sessions/${state.sessionId}/auto_title`, {
+      const r = await apiFetch(`/sessions/${state.sessionId}/auto_title`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages }),
@@ -2362,21 +6369,32 @@
         state.sessionTitle = data.title;
         els.sessionLabel.textContent = data.title;
         autoSaveSession();
+        renderProjectSidebar();
       }
     } catch {}
   }
 
-  async function refreshSessionState() {
+  async function refreshSessionState(snapshot = null) {
     if (!state.sessionId) return;
-    const r = await fetch(`/sessions/${state.sessionId}`);
-    if (!r.ok) throw new Error(`GET /sessions/${state.sessionId} failed: ${r.status}`);
-    const data = await r.json();
+    const sessionId = state.sessionId;
+    const activationSeq = runtimeActivationSeq;
+    let data = snapshot;
+    if (!data) {
+      const r = await apiFetch(`/sessions/${sessionId}`);
+      if (!r.ok) throw new Error(`GET /sessions/${sessionId} failed: ${r.status}`);
+      data = await r.json();
+    }
+    if (state.sessionId !== sessionId || runtimeActivationSeq !== activationSeq) return;
+    applyProductionSnapshot(data);
     const finalIds = new Set(state.assets.filter((a) => a.final).map((a) => a.asset_id));
     state.assets = (data.assets || []).map((a) => ({
       asset_id: a.asset_id,
       kind: a.kind || inferKindFromAssetId(a.asset_id),
       summary: a.summary || "",
-      source: "tool",
+      source: a.source || "tool",
+      source_class: a.source_class || a.origin || null,
+      origin: a.origin || null,
+      provenance: a.provenance || null,
       final: finalIds.has(a.asset_id),
     }));
     if (data.latest_event_id !== null && data.latest_event_id !== undefined) {
@@ -2411,22 +6429,81 @@
     }
   }
 
+  async function fetchSessionNonMediaAssets(
+    sessionId = state.sessionId,
+    activationSeq = runtimeActivationSeq,
+  ) {
+    if (!sessionId) {
+      if (runtimeActivationSeq !== activationSeq) return;
+      state.sessionNonMediaAssets = [];
+      return;
+    }
+    const qs = `root=session&path=&session=${encodeURIComponent(sessionId)}`;
+    const response = await apiFetch(`/files/list?${qs}`);
+    if (state.sessionId !== sessionId || runtimeActivationSeq !== activationSeq) return;
+    if (!response.ok) {
+      state.sessionNonMediaAssets = [];
+      return;
+    }
+    const data = await response.json();
+    if (state.sessionId !== sessionId || runtimeActivationSeq !== activationSeq) return;
+    state.sessionNonMediaAssets = (Array.isArray(data.entries) ? data.entries : [])
+      .filter((entry) => !entry.is_dir && NON_MEDIA_ASSET_EXTENSIONS.has(fileExtension(entry.name)))
+      .map((entry) => {
+        const name = String(entry.name || "");
+        const fileQs = `root=session&path=${encodeURIComponent(name)}&session=${encodeURIComponent(state.sessionId)}`;
+        return {
+          asset_id: `workspace:${name}`,
+          name,
+          media_kind: "file",
+          library_category: "non-media",
+          file_size_bytes: Number(entry.size || 0),
+          preview_src: `/files/get?${fileQs}`,
+          workspace_path: name,
+        };
+      });
+  }
+
   async function fetchMediaLibrary() {
+    if (isTesterManagedWorkspace()) {
+      state.mediaLibrary = [];
+      state.sessionNonMediaAssets = [];
+      state.mediaLibraryStatus = "ready";
+      render();
+      return;
+    }
+    return fetchLegacyMediaLibrary();
+  }
+
+  async function fetchLegacyMediaLibrary() {
+    const sessionId = state.sessionId;
+    const activationSeq = runtimeActivationSeq;
     state.mediaLibraryStatus = "loading";
     render();
+    await fetchSessionNonMediaAssets(sessionId, activationSeq).catch(() => {
+      if (state.sessionId === sessionId && runtimeActivationSeq === activationSeq) {
+        state.sessionNonMediaAssets = [];
+      }
+    });
+    if (state.sessionId !== sessionId || runtimeActivationSeq !== activationSeq) return;
     try {
-      const r = await fetch("/media-library/list?limit=100");
+      const r = await apiFetch("/media-library/list?limit=100");
+      if (state.sessionId !== sessionId || runtimeActivationSeq !== activationSeq) return;
       if (r.status === 401) {
         state.mediaLibrary = [];
         state.mediaLibraryStatus = "signed-out";
         render();
+        if (stageTabs.includes("library")) refreshPanel("library");
         return;
       }
       if (!r.ok) throw new Error(`GET /media-library/list failed: ${r.status}`);
       const data = await r.json();
+      if (state.sessionId !== sessionId || runtimeActivationSeq !== activationSeq) return;
       state.mediaLibrary = Array.isArray(data.assets) ? data.assets : [];
       state.mediaLibraryStatus = "ready";
+      if (stageTabs.includes("library")) refreshPanel("library");
     } catch (err) {
+      if (state.sessionId !== sessionId || runtimeActivationSeq !== activationSeq) return;
       state.mediaLibrary = [];
       state.mediaLibraryStatus = "error";
       state.errors.push(`media library failed: ${err.message}`);
@@ -2438,7 +6515,7 @@
     const body = assetId
       ? { asset_ids: [assetId], mode: "quick", language: promptLanguage() }
       : { all: true, kind: "video", mode: "quick", max_assets: 20, language: promptLanguage() };
-    const r = await fetch("/media-library/annotate", {
+    const r = await apiFetch("/media-library/annotate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -2449,8 +6526,86 @@
     if (assetId) await loadMediaAnnotations(assetId);
   }
 
+  async function startRoughcutPreparation(assetId = "") {
+    const assetIds = assetId
+      ? [assetId]
+      : state.mediaLibrary.filter((asset) => ["video", "audio"].includes(asset.media_kind)).map((asset) => asset.asset_id);
+    if (!assetIds.length) throw new Error("没有可准备的视频或音频素材");
+    const r = await apiFetch("/media-library/prepare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ asset_ids: assetIds, language: promptLanguage(), create_proxies: true, resume: true, background: true }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `prepare failed: ${r.status}`);
+    state.roughcutJob = data;
+    renderRoughcutJobStatus();
+    pollRoughcutJob(data.job_id);
+  }
+
+  async function pollRoughcutJob(jobId) {
+    if (state.roughcutPollTimer) clearTimeout(state.roughcutPollTimer);
+    try {
+      const r = await apiFetch(`/media-library/prepare/${encodeURIComponent(jobId)}`);
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || `job failed: ${r.status}`);
+      state.roughcutJob = data;
+      renderRoughcutJobStatus();
+      if (["ready", "partial"].includes(data.status)) {
+        const ids = (data.result?.results || []).filter((item) => item.status === "ready").map((item) => item.asset_id);
+        await Promise.all(ids.map((id) => loadRoughcutManifest(id)));
+        await fetchMediaLibrary();
+        await refreshPanel("library");
+        return;
+      }
+      if (["error", "interrupted"].includes(data.status)) return;
+      state.roughcutPollTimer = setTimeout(() => pollRoughcutJob(jobId), 900);
+    } catch (err) {
+      state.errors.push(`粗剪准备失败: ${err.message}`);
+      render();
+    }
+  }
+
+  function renderRoughcutJobStatus() {
+    if (!els.roughcutJobStatus) return;
+    const job = state.roughcutJob;
+    els.roughcutJobStatus.hidden = !job;
+    if (!job) return;
+    const progress = Math.max(0, Math.min(Number(job.progress || 0), 100));
+    const terminal = ["ready", "partial", "error", "interrupted"].includes(job.status);
+    els.roughcutJobStatus.innerHTML = `<div><span>${escapeHTML(terminal ? (job.message || job.status) : "正在准备素材")}</span><strong>${Math.round(progress)}%</strong></div><i style="width:${progress}%"></i>`;
+  }
+
+  async function loadRoughcutManifest(assetId) {
+    const r = await apiFetch(`/media-library/${encodeURIComponent(assetId)}/roughcut`);
+    if (r.status === 404) return null;
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `roughcut failed: ${r.status}`);
+    state.roughcutManifests.set(assetId, data.manifest);
+    render();
+    return data.manifest;
+  }
+
+  async function reviewRoughcut(button) {
+    const assetId = button.dataset.roughcutAsset;
+    const targetType = button.dataset.roughcutType;
+    const targetId = button.dataset.roughcutId;
+    const action = button.dataset.roughcutReview;
+    const card = button.closest(".library-card");
+    const input = targetType === "transcript" ? card?.querySelector(`[data-roughcut-transcript-input="${CSS.escape(targetId)}"]`) : null;
+    const r = await apiFetch(`/media-library/${encodeURIComponent(assetId)}/roughcut/review`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target_type: targetType, target_id: targetId, action, text: input?.value || "" }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `review failed: ${r.status}`);
+    state.roughcutManifests.set(assetId, data.manifest);
+    render();
+  }
+
   async function loadMediaAnnotations(assetId) {
-    const r = await fetch(`/media-library/${encodeURIComponent(assetId)}/annotations`);
+    const r = await apiFetch(`/media-library/${encodeURIComponent(assetId)}/annotations`);
     if (!r.ok) throw new Error(`annotations failed: ${r.status}`);
     const data = await r.json();
     state.mediaAnnotations.set(assetId, Array.isArray(data.annotations) ? data.annotations : []);
@@ -2464,7 +6619,7 @@
   async function uploadFile(file, retryExpiredSession = true) {
     if (!state.sessionId) throw new Error("no session");
     setUploadStatus(`uploading ${file.name}…`);
-    const r = await fetch(`/sessions/${state.sessionId}/assets`, {
+    const r = await apiFetch(`/sessions/${state.sessionId}/assets`, {
       method: "POST",
       headers: {
         "X-Filename": encodeURIComponent(file.name),
@@ -2472,14 +6627,14 @@
       },
       body: file,
     });
-    // The local runtime keeps active sessions in memory.  A safe auto-sync
-    // restart can therefore leave an already-open browser tab holding a stale
-    // session id.  Preserve its transcript, open a fresh runtime session and
-    // retry the user's upload once instead of surfacing an unexplained 404.
+    // A restart can leave an already-open tab holding a stale runtime session
+    // id. Resume the same durable project/run before retrying; never replace
+    // real work with a fresh empty project just to make the upload succeed.
     if (r.status === 404 && retryExpiredSession) {
       setUploadStatus("会话已更新，正在恢复后重新上传…");
-      await autoSaveSession();
-      await createSession();
+      const staleSessionId = state.sessionId;
+      const expected = { project_id: state.projectId, run_id: state.runId };
+      await resumeSession(staleSessionId, expected);
       return uploadFile(file, false);
     }
     if (!r.ok) {
@@ -2496,6 +6651,7 @@
           : "video",
       summary: `uploaded ${data.filename} (${(data.size_bytes / 1024).toFixed(1)} KB)`,
       source: "user",
+      source_class: "external",
       final: false,
     });
     setUploadStatus(`uploaded as ${data.asset_id}`);
@@ -2519,54 +6675,251 @@
 
   async function submitTurn(message) {
     if (!state.sessionId) throw new Error("no session");
+    if (state.recoveringSession) throw new Error("session is recovering");
+    const sessionId = state.sessionId;
+    const activationSeq = runtimeActivationSeq;
     state.userMessageCount++;
-    const turn = newTurn(message);
+    const selectedGuides = selectedSkillSpaceArtifacts();
+    const selectedContext = selectedComposerContextRefs();
+    const agentMessage = composerAgentMessage(message, selectedGuides, selectedContext);
+    const turn = newTurn(message, Date.now(), selectedGuides, selectedContext);
     state.turns.push(turn);
     state.currentTurn = turn;
     state.turnInProgress = true;
     state.planReady = false;   // a new turn supersedes any pending approval offer
     render();
-    const r = await fetch(`/sessions/${state.sessionId}/turn`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message }),
-    });
-    if (!r.ok && r.status !== 202) {
-      turn.banners.push({ kind: "turn_error", text: "任务未能开始，请稍后重试" });
+    // Persist the user-visible checkpoint before the network request. If the
+    // daemon restarts mid-turn, history and Agent runtime recover the same
+    // newest user message instead of disagreeing about what can be retracted.
+    await autoSaveSession();
+    if (isLocalWorkspace) {
+      try {
+        const history = _collectSessionMessages().filter((item) => item.role === "user" || item.statusType === "succeeded");
+        const messages = history.map((item) => ({
+          role: item.role === "user" ? "user" : "assistant",
+          content: item.role === "user"
+            ? composerAgentMessage(item.content, item.skillSpace, item.workspaceContext)
+            : item.content,
+        }));
+        const response = await apiFetch("/local-chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || `模型请求失败 (${response.status})`);
+        turn.assistantText = String(payload.text || "");
+        turn.completedAt = Date.now();
+        turn.complete = true;
+        state.turnInProgress = false;
+        await autoSaveSession();
+        render();
+        return true;
+      } catch (error) {
+        turn.banners.push({ kind: "turn_error", text: error.message || "模型请求未完成" });
+        turn.completedAt = Date.now();
+        turn.complete = true;
+        state.turnInProgress = false;
+        render();
+        return false;
+      }
+    }
+    let r;
+    let data = {};
+    // A project revision conflict means this session's visible snapshot was
+    // overtaken before the turn started. No work was claimed server-side, so
+    // it is safe to sync once and retry the SAME durable user turn/id instead
+    // of completing it as an error and making the creator send it again.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      r = await apiFetch(`/sessions/${sessionId}/turn`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: agentMessage,
+          client_turn_id: turn.clientTurnId,
+          expected_project_revision: state.projectRevision,
+        }),
+      });
+      data = await r.json().catch(() => ({}));
+      if (r.ok || data.code !== "E_REVISION_CONFLICT" || attempt > 0) break;
+      if (state.sessionId !== sessionId || runtimeActivationSeq !== activationSeq) return false;
+      try {
+        if (data.project_revision !== undefined) {
+          applyProductionSnapshot(data);
+        } else {
+          // Rolling-upgrade fallback for an older daemon that does not yet
+          // return the authoritative admission revision in its 409 response.
+          await refreshSessionState();
+        }
+        if (state.sessionId !== sessionId || runtimeActivationSeq !== activationSeq) return false;
+        state.turnInProgress = true;
+        await autoSaveSession();
+      } catch {
+        break;
+      }
+    }
+    // A turn acknowledgement can race a chat switch. It belongs to the
+    // session that submitted it and must never restore working state, project
+    // revision, or stop controls onto whichever chat is visible now.
+    if (state.sessionId !== sessionId || runtimeActivationSeq !== activationSeq) return r.ok;
+    if (!r.ok) {
+      const revisionConflict = data.code === "E_REVISION_CONFLICT";
+      turn.banners.push({
+        kind: revisionConflict ? "info" : "turn_error",
+        text: revisionConflict
+          ? "工程在自动接续期间再次发生变化，这次请求尚未开始。"
+          : (data.error || "任务未能开始，请稍后重试"),
+      });
       state.turnInProgress = false;
+      turn.completedAt = Date.now();
+      turn.complete = true;
+      if (revisionConflict) await refreshSessionState().catch(() => {});
+      render();
+      return false;
+    }
+    applyProductionSnapshot(data);
+    if (data.duplicate && !data.scheduled) {
+      state.turnInProgress = false;
+      turn.completedAt = Date.now();
+      turn.complete = true;
+      turn.banners.push({ kind: "info", text: "这条请求已经处理过，没有重复执行或重复计费。" });
+      await refreshSessionState().catch(() => {});
       render();
     }
+    return true;
   }
 
-  async function steerTurn(message) {
+  async function steerTurn(
+    message,
+    skillSpace = selectedSkillSpaceArtifacts(),
+    workspaceContext = selectedComposerContextRefs(),
+  ) {
     if (!state.sessionId || !state.turnInProgress) throw new Error("no active turn");
-    const r = await fetch(`/sessions/${state.sessionId}/steer`, {
+    const sessionId = state.sessionId;
+    const activationSeq = runtimeActivationSeq;
+    const turn = state.currentTurn;
+    const r = await apiFetch(`/sessions/${sessionId}/steer`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message: composerAgentMessage(message, skillSpace, workspaceContext) }),
     });
     if (!r.ok) {
       const data = await r.json().catch(() => ({}));
       throw new Error(data.error || `引导未送达 (${r.status})`);
     }
-    if (state.currentTurn) state.currentTurn.guidance.push(message);
+    if (
+      state.sessionId !== sessionId
+      || runtimeActivationSeq !== activationSeq
+      || state.currentTurn !== turn
+    ) return;
+    if (turn) turn.guidance.push(message);
     render();
   }
 
   async function stopCurrentTurn() {
     if (!state.sessionId || !state.turnInProgress || state.stopPending) return;
+    const sessionId = state.sessionId;
+    const activationSeq = runtimeActivationSeq;
+    const turn = state.currentTurn;
     state.stopPending = true;
     render();
     try {
-      const r = await fetch(`/sessions/${state.sessionId}/stop`, { method: "POST" });
+      const r = await apiFetch(`/sessions/${sessionId}/stop`, { method: "POST" });
       if (!r.ok) {
         const data = await r.json().catch(() => ({}));
         throw new Error(data.error || `停止未生效 (${r.status})`);
       }
     } catch (err) {
+      if (
+        state.sessionId !== sessionId
+        || runtimeActivationSeq !== activationSeq
+        || state.currentTurn !== turn
+      ) return;
       state.stopPending = false;
-      state.currentTurn?.banners.push({ kind: "info", text: "停止请求未成功，请再试一次" });
+      turn?.banners.push({ kind: "info", text: "停止请求未成功，请再试一次" });
       state.errors.push(`stop turn failed: ${err.message}`);
+      render();
+    }
+  }
+
+  async function submitProductionReview(action) {
+    if (!state.projectId || !state.runId || !els.productionReview) return;
+    const note = els.reviewNote.value.trim();
+    const startRaw = els.reviewStartSec.value.trim();
+    const endRaw = els.reviewEndSec.value.trim();
+    if (action === "request_changes" && !note) {
+      els.productionReviewStatus.textContent = "请写下要修改的内容。";
+      els.reviewNote.focus();
+      return;
+    }
+    if (!!startRaw !== !!endRaw) {
+      els.productionReviewStatus.textContent = "时间范围需要同时填写开始和结束。";
+      return;
+    }
+    const creativeChecks = Object.fromEntries(
+      els.reviewCreativeChecks.map((input) => [input.dataset.reviewDimension, input.checked]),
+    );
+    if (action === "approve" && !currentReviewMaster()) {
+      els.productionReviewStatus.textContent = "正式审片母版不可用，不能确认发布。";
+      return;
+    }
+    if (
+      action === "approve"
+      && (
+        !els.reviewWatchedFullVideo.checked
+        || Object.values(creativeChecks).some((value) => value !== true)
+      )
+    ) {
+      els.productionReviewStatus.textContent = "请先完整观看，并逐项确认叙事、节奏、视觉、声音和可发布性。";
+      return;
+    }
+    const payload = {
+      action,
+      note,
+      expected_project_revision: state.projectRevision,
+    };
+    if (action === "approve") {
+      payload.watched_full_video = true;
+      payload.creative_checks = creativeChecks;
+    }
+    if (startRaw && endRaw) {
+      payload.start_sec = Number(startRaw);
+      payload.end_sec = Number(endRaw);
+    }
+    els.productionReview.dataset.submitting = "1";
+    els.productionReviewStatus.textContent = action === "approve" ? "正在确认…" : "正在提交返修意见…";
+    renderProductionUi();
+    try {
+      const r = await apiFetch(
+        `/projects/${encodeURIComponent(state.projectId)}/runs/${encodeURIComponent(state.runId)}/review`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+      );
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        if (data.code === "E_REVISION_CONFLICT") await refreshSessionState().catch(() => {});
+        throw new Error(data.error || `review failed: ${r.status}`);
+      }
+      applyProductionSnapshot(data);
+      if (!data.production_state) {
+        state.productionState = action === "approve" ? "accepted" : "revising";
+      }
+      els.productionReviewStatus.textContent = action === "approve"
+        ? "已记录：可以发布。"
+        : "返修意见已进入同一个工程。";
+      if (action === "request_changes") {
+        els.reviewNote.value = "";
+        els.reviewStartSec.value = "";
+        els.reviewEndSec.value = "";
+      }
+      await autoSaveSession();
+    } catch (err) {
+      els.productionReviewStatus.textContent = err.message || "审片意见未能提交。";
+    } finally {
+      delete els.productionReview.dataset.submitting;
       render();
     }
   }
@@ -2574,18 +6927,36 @@
   // ── wiring ──────────────────────────────────────────────────────────
 
   els.newSessionBtn.addEventListener("click", () => {
-    createSession().catch((err) => {
+    createSession(state.projectId ? { fork_from_project_id: state.projectId } : {}).catch((err) => {
       state.errors.push(`create session failed: ${err.message}`);
       setConnPill("failed", "failed");
       render();
     });
   });
+  els.newProjectBtn?.addEventListener("click", openCreateProjectDialog);
+  els.projectBtn?.addEventListener("click", () => {
+    const open = els.projectBtn.getAttribute("aria-expanded") !== "true";
+    els.projectBtn.setAttribute("aria-expanded", String(open));
+    els.projectBtn.setAttribute("aria-label", open ? "收起 Projects 与会话" : "打开 Projects 与会话");
+    els.projectBtn.title = open ? "收起 Projects 与会话" : "打开 Projects 与会话";
+    els.appMain?.classList.toggle("project-sidebar-collapsed", !open);
+    if (els.projectSidebar) {
+      els.projectSidebar.hidden = !open;
+      els.projectSidebar.setAttribute("aria-hidden", String(!open));
+    }
+  });
+
+  els.requestChangesBtn?.addEventListener("click", () => submitProductionReview("request_changes"));
+  els.approveProductionBtn?.addEventListener("click", () => submitProductionReview("approve"));
 
   els.uploadBtn.addEventListener("click", () => els.uploadInput.click());
   els.uploadInput.addEventListener("change", () => {
-    const file = els.uploadInput.files?.[0];
-    if (!file) return;
-    uploadFile(file).catch((err) => {
+    const files = Array.from(els.uploadInput.files || []);
+    if (!files.length) return;
+    files.reduce((chain, file, index) => chain.then(async () => {
+      setUploadStatus(`正在上传 ${index + 1}/${files.length} · ${file.name}`);
+      await uploadFile(file);
+    }), Promise.resolve()).catch((err) => {
       state.errors.push(`upload failed: ${err.message}`);
       render();
     }).finally(() => { els.uploadInput.value = ""; });
@@ -2605,9 +6976,31 @@
     });
   });
 
+  els.libraryRoughcutBtn?.addEventListener("click", () => {
+    startRoughcutPreparation().catch((err) => {
+      state.errors.push(`粗剪准备失败: ${err.message}`);
+      render();
+    });
+  });
+
   let _speakingUtterance = null;
 
   document.addEventListener("click", (e) => {
+    const librarySection = e.target.closest("[data-library-section]");
+    if (librarySection) {
+      state.librarySection = librarySection.dataset.librarySection === "non-media" ? "non-media" : "media";
+      state.libraryFocusName = "";
+      renderMediaLibrary();
+      if (stageTabs.includes("library")) refreshPanel("library");
+      return;
+    }
+
+    const markdownLink = e.target.closest("a.md-link");
+    if (markdownLink && openNonMediaLibraryLink(markdownLink)) {
+      e.preventDefault();
+      return;
+    }
+
     // ── Entity reference click → navigate ──
     const entity = e.target.closest(".md-entity[data-entity-kind]");
     if (entity) {
@@ -2626,6 +7019,28 @@
           if (svg) { svg.setAttribute("href", "#i-check"); setTimeout(() => svg.setAttribute("href", "#i-copy"), 1200); }
         });
       }
+      return;
+    }
+
+    // ── Copy user message ──
+    const copyUserBtn = e.target.closest("[data-copy-user]");
+    if (copyUserBtn) {
+      const turnIdx = Number(copyUserBtn.dataset.copyUser);
+      const turn = state.turns[turnIdx];
+      if (turn?.userMessage) {
+        navigator.clipboard.writeText(turn.userMessage).then(() => {
+          const svg = copyUserBtn.querySelector("svg use");
+          if (svg) { svg.setAttribute("href", "#i-check"); setTimeout(() => svg.setAttribute("href", "#i-copy"), 1200); }
+        });
+      }
+      return;
+    }
+
+    // ── Retract last user turn ──
+    const retractBtn = e.target.closest("[data-retract-user]");
+    if (retractBtn) {
+      const turnIdx = Number(retractBtn.dataset.retractUser);
+      retractTurn(turnIdx);
       return;
     }
 
@@ -2654,6 +7069,14 @@
       return;
     }
 
+    const roughcutBtn = e.target.closest("[data-library-roughcut]");
+    if (roughcutBtn) {
+      startRoughcutPreparation(roughcutBtn.dataset.libraryRoughcut).catch((err) => {
+        state.errors.push(`粗剪准备失败: ${err.message}`);
+        render();
+      });
+      return;
+    }
     const annotateBtn = e.target.closest("[data-library-annotate]");
     if (annotateBtn) {
       const assetId = annotateBtn.dataset.libraryAnnotate;
@@ -2666,676 +7089,37 @@
     const loadBtn = e.target.closest("[data-library-load]");
     if (loadBtn) {
       const assetId = loadBtn.dataset.libraryLoad;
-      loadMediaAnnotations(assetId).catch((err) => {
+      Promise.all([loadMediaAnnotations(assetId), loadRoughcutManifest(assetId)]).catch((err) => {
         state.errors.push(`load annotations failed: ${err.message}`);
         render();
       });
+      return;
+    }
+    const reviewBtn = e.target.closest("[data-roughcut-review]");
+    if (reviewBtn) {
+      reviewRoughcut(reviewBtn).catch((err) => {
+        state.errors.push(`复核保存失败: ${err.message}`);
+        render();
+      });
+      return;
+    }
+    const seekBtn = e.target.closest("[data-roughcut-seek]");
+    if (seekBtn) {
+      const player = seekBtn.closest(".library-card")?.querySelector(".roughcut-preview");
+      if (player) {
+        player.currentTime = Number(seekBtn.dataset.roughcutSeek || 0);
+        player.play().catch(() => {});
+      }
     }
   });
 
-  // ── /model picker ───────────────────────────────────────────────────
-  // Lists the backend's priority-ordered model catalog + thinking-effort
-  // tiers, marks the active pick, and lets the user switch. The selection is
-  // global + persisted (config.json:lumeri_v3_model / lumeri_v3_effort) — the
-  // same store the CLI /model uses — so it sticks across sessions/restarts.
-  async function fetchModelInfo() {
-    const r = await fetch("/model");
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.json();
-  }
-
-  async function postModelSelection(body) {
-    const r = await fetch("/model", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
-    return data;
-  }
-
-  function openModelPicker() {
-    let overlay = $("#model-modal");
-    if (!overlay) {
-      overlay = document.createElement("div");
-      overlay.id = "model-modal";
-      overlay.className = "auth-modal";
-      overlay.hidden = true;
-      overlay.innerHTML = `
-        <div class="model-backdrop" data-model-close></div>
-        <div class="auth-dialog model-dialog" role="dialog" aria-modal="true" aria-labelledby="model-title">
-          <button type="button" class="auth-x" data-model-close aria-label="关闭">×</button>
-          <h2 id="model-title">模型与思考强度</h2>
-          <p class="model-lock-note" id="model-lock-note" hidden></p>
-          <div class="model-list" id="model-list"></div>
-          <div class="model-add-wrap" id="model-add-wrap">
-            <button type="button" class="model-add-btn" id="model-add-btn">+ 添加模型</button>
-            <div class="model-add-dropdown" id="model-add-dropdown" hidden>
-              <div class="model-add-search-wrap">
-                <input type="text" class="model-add-search" id="model-add-search" placeholder="搜索或输入模型 ID…">
-                <span class="model-add-spinner" id="model-add-spinner" hidden></span>
-              </div>
-              <div class="model-add-list" id="model-add-list"></div>
-              <button type="button" class="model-add-custom" id="model-add-custom" hidden>添加自定义模型</button>
-            </div>
-          </div>
-          <div class="model-effort-label">思考强度</div>
-          <div class="model-efforts" id="model-efforts"></div>
-          <div class="model-save-wrap" id="model-save-wrap" hidden>
-            <button type="button" class="model-save-btn" id="model-save-btn">保存</button>
-          </div>
-          <p class="auth-error" id="model-error" hidden></p>
-        </div>`;
-      document.body.appendChild(overlay);
-      overlay.querySelectorAll("[data-model-close]").forEach((el) =>
-        el.addEventListener("click", () => { overlay.hidden = true; }));
-      document.addEventListener("keydown", (e) => {
-        if (e.key === "Escape" && !overlay.hidden) overlay.hidden = true;
-      });
-    }
-    const errEl = $("#model-error", overlay);
-    const setErr = (msg) => {
-      if (!errEl) return;
-      if (msg) { errEl.textContent = msg; errEl.hidden = false; }
-      else { errEl.hidden = true; }
-    };
-
-    let scannedModels = [];
-    let lastInfo = null;
-    let pendingModel = null;
-    let pendingEffort = null;
-
-    function renderInfo(info) {
-      lastInfo = info;
-      const active = info.active || {};
-      const locked = !!active.locked;
-      if (locked) {
-        pendingModel = active.model;
-        pendingEffort = active.effort;
-      }
-      if (pendingModel === null) pendingModel = active.model;
-      if (pendingEffort === null) pendingEffort = active.effort;
-      const selModel = pendingModel || active.model;
-      const selEffort = pendingEffort || active.effort;
-      const list = $("#model-list", overlay);
-      const canDelete = (info.priority || []).length > 1;
-      list.innerHTML = (info.priority || []).map((it, i) => {
-        const on = it.id === selModel;
-        return `
-          <div class="model-row${on ? " active" : ""}">
-            <button type="button" class="model-row-select" data-model-id="${escapeHTML(it.id)}"${locked ? " disabled" : ""}>
-              <span class="model-dot">${on ? "●" : "○"}</span>
-              <span class="model-name">${escapeHTML(it.label)}${i === 0 ? ' <span class="model-tag">默认</span>' : ""}</span>
-              <span class="model-id">${escapeHTML(it.id)}</span>
-            </button>${canDelete && !locked ? `<button type="button" class="model-del" data-del-id="${escapeHTML(it.id)}" aria-label="删除 ${escapeHTML(it.label)}">×</button>` : ""}
-          </div>`;
-      }).join("");
-      const efforts = $("#model-efforts", overlay);
-      efforts.innerHTML = (info.efforts || []).map((e) => {
-        const on = e === selEffort;
-        return `<button type="button" class="model-chip${on ? " active" : ""}" data-effort="${escapeHTML(e)}"${locked ? " disabled" : ""}>${escapeHTML(e)}</button>`;
-      }).join("");
-
-      list.querySelectorAll("[data-model-id]").forEach((btn) =>
-        btn.addEventListener("click", () => { pendingModel = btn.dataset.modelId; renderInfo(info); }));
-      list.querySelectorAll("[data-del-id]").forEach((btn) =>
-        btn.addEventListener("click", (e) => { e.stopPropagation(); removeModel(btn.dataset.delId); }));
-      efforts.querySelectorAll("[data-effort]").forEach((btn) =>
-        btn.addEventListener("click", () => { pendingEffort = btn.dataset.effort; renderInfo(info); }));
-
-      const changed = selModel !== active.model || selEffort !== active.effort;
-      const saveWrap = $("#model-save-wrap", overlay);
-      if (saveWrap) saveWrap.hidden = locked || !changed;
-      const addWrap = $("#model-add-wrap", overlay);
-      if (addWrap) addWrap.hidden = locked;
-      const lockNote = $("#model-lock-note", overlay);
-      if (lockNote) {
-        lockNote.hidden = !locked;
-        lockNote.textContent = locked
-          ? `已强制锁定最强模型：${active.label || active.model} · ${active.effort || "max"} 思考强度`
-          : "";
-      }
-    }
-
-    async function apply() {
-      setErr("");
-      try {
-        const body = {};
-        if (pendingModel) body.model = pendingModel;
-        if (pendingEffort) body.effort = pendingEffort;
-        const data = await postModelSelection(body);
-        pendingModel = data.active?.model || pendingModel;
-        pendingEffort = data.active?.effort || pendingEffort;
-        renderInfo(data);
-      } catch (e) {
-        setErr(`保存失败：${e.message}`);
-      }
-    }
-
-    $("#model-save-btn", overlay).addEventListener("click", apply);
-
-    async function removeModel(id) {
-      setErr("");
-      try {
-        const r = await fetch("/model/remove", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id }),
-        });
-        const data = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
-        renderInfo(data);
-      } catch (e) {
-        setErr(`删除失败：${e.message}`);
-      }
-    }
-
-    async function addModel(id, label) {
-      setErr("");
-      try {
-        const r = await fetch("/model/add", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id, label: label || id }),
-        });
-        const data = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
-        renderInfo(data);
-        closeAddDropdown();
-      } catch (e) {
-        setErr(`添加失败：${e.message}`);
-      }
-    }
-
-    // ── add-model dropdown ──
-    const addBtn = $("#model-add-btn", overlay);
-    const dropdown = $("#model-add-dropdown", overlay);
-    const searchInp = $("#model-add-search", overlay);
-    const addList = $("#model-add-list", overlay);
-    const customBtn = $("#model-add-custom", overlay);
-    const spinner = $("#model-add-spinner", overlay);
-
-    function closeAddDropdown() {
-      dropdown.hidden = true;
-      searchInp.value = "";
-      customBtn.hidden = true;
-    }
-
-    addBtn.addEventListener("click", () => {
-      if (!dropdown.hidden) { closeAddDropdown(); return; }
-      dropdown.hidden = false;
-      searchInp.value = "";
-      searchInp.focus();
-      renderAddList("");
-      if (!scannedModels.length) scanModels();
-    });
-
-    document.addEventListener("click", (e) => {
-      const wrap = $("#model-add-wrap", overlay);
-      if (wrap && !wrap.contains(e.target)) closeAddDropdown();
-    });
-
-    searchInp.addEventListener("input", () => {
-      renderAddList(searchInp.value);
-    });
-
-    customBtn.addEventListener("click", () => {
-      const v = searchInp.value.trim();
-      if (v) addModel(v, v);
-    });
-
-    function renderAddList(query) {
-      const q = query.toLowerCase().trim();
-      const currentIds = new Set(
-        [...overlay.querySelectorAll("[data-model-id]")].map((el) => el.dataset.modelId)
-      );
-      let filtered = scannedModels.filter((m) => !currentIds.has(m.id));
-      if (q) filtered = filtered.filter((m) =>
-        m.id.toLowerCase().includes(q) || (m.name || "").toLowerCase().includes(q)
-      );
-      addList.innerHTML = filtered.slice(0, 20).map((m) => {
-        const name = m.name ? ` <span class="model-add-name">${escapeHTML(m.name)}</span>` : "";
-        return `<button type="button" class="model-add-opt" data-add-id="${escapeHTML(m.id)}">${escapeHTML(m.id)}${name}</button>`;
-      }).join("") || (q ? '<div class="model-add-empty">无匹配结果</div>' : '<div class="model-add-empty">扫描中…</div>');
-      addList.querySelectorAll("[data-add-id]").forEach((btn) =>
-        btn.addEventListener("click", () => addModel(btn.dataset.addId, btn.dataset.addId)));
-      customBtn.hidden = !q || filtered.some((m) => m.id === q);
-    }
-
-    let scanAbortCtrl = null;
-    async function scanModels() {
-      if (scanAbortCtrl) scanAbortCtrl.abort();
-      const ctrl = scanAbortCtrl = new AbortController();
-      spinner.hidden = false;
-      try {
-        const r = await fetch("/config/list-models", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({}),
-          signal: ctrl.signal,
-        });
-        const d = await r.json().catch(() => ({}));
-        if (ctrl.signal.aborted) return;
-        if (d.models && d.models.length) {
-          scannedModels = d.models;
-          renderAddList(searchInp.value);
-        }
-      } catch (e) {
-        if (e.name === "AbortError") return;
-      }
-      spinner.hidden = true;
-    }
-
-    setErr("");
-    $("#model-list", overlay).innerHTML = '<div class="model-loading">加载中…</div>';
-    $("#model-efforts", overlay).innerHTML = "";
-    overlay.hidden = false;
-    fetchModelInfo().then(renderInfo).catch((e) => setErr(`加载失败：${e.message}`));
-  }
-
-  // ── AI 供应商 Setup 面板 ─────────────────────────────────────────────
-  // 列常见 provider（Vertex/Gemini/OpenAI/Claude/OpenRouter）+ 自定义(OpenAI 兼容)，
-  // 密钥经 POST /config 白名单存盘、即时生效；测试连接走 POST /config/test-brain。
-  function openSetupPanel() {
-    let overlay = $("#setup-modal");
-    if (!overlay) {
-      overlay = document.createElement("div");
-      overlay.id = "setup-modal";
-      overlay.className = "auth-modal";
-      overlay.hidden = true;
-      overlay.innerHTML = `
-        <div class="model-backdrop" data-setup-close></div>
-        <div class="auth-dialog setup-dialog" role="dialog" aria-modal="true" aria-labelledby="setup-title">
-          <button type="button" class="auth-x" data-setup-close aria-label="关闭">×</button>
-          <h2 id="setup-title">AI 供应商配置</h2>
-          <p class="setup-sub">拖动排序供应商优先级，选中后配置密钥与模型。</p>
-          <div class="setup-providers" id="setup-providers"></div>
-          <div class="setup-fields" id="setup-fields"></div>
-          <div class="setup-actions">
-            <button type="button" class="setup-test" id="setup-test">测试连接</button>
-            <button type="button" class="setup-save" id="setup-save">保存并启用</button>
-          </div>
-          <p class="setup-result" id="setup-result" hidden></p>
-          <div class="setup-divider"></div>
-          <h3 class="setup-section-title">搜索引擎</h3>
-          <p class="setup-sub">配置联网搜索的 API 密钥。留空则自动降级到 DuckDuckGo（免费、无需密钥）。</p>
-          <div class="search-provider-chips" id="search-provider-chips"></div>
-          <div class="search-fields" id="search-fields"></div>
-          <div class="setup-actions">
-            <button type="button" class="setup-save search-save" id="search-save">保存搜索配置</button>
-          </div>
-          <p class="setup-result" id="search-result" hidden></p>
-          <p class="auth-error" id="setup-error" hidden></p>
-        </div>`;
-      document.body.appendChild(overlay);
-      overlay.querySelectorAll("[data-setup-close]").forEach((el) =>
-        el.addEventListener("click", () => { overlay.hidden = true; }));
-      document.addEventListener("keydown", (e) => {
-        if (e.key === "Escape" && !overlay.hidden) overlay.hidden = true;
-      });
-    }
-    const st = { info: null, sel: "", vals: {}, curProvider: "", scannedModels: [], providerOrder: [] };
-    const errEl = $("#setup-error", overlay);
-    const resEl = $("#setup-result", overlay);
-    const setErr = (m) => { if (m) { errEl.textContent = m; errEl.hidden = false; } else errEl.hidden = true; };
-    const setRes = (m, ok) => {
-      if (!m) { resEl.hidden = true; return; }
-      resEl.textContent = m; resEl.hidden = false;
-      resEl.className = "setup-result " + (ok ? "ok" : "bad");
-    };
-
-    const FIELD_META = {
-      vertex_project:  { label: "GCP 项目 ID", ph: "my-project-123" },
-      vertex_location: { label: "区域", ph: "global / us-east5 / us-central1" },
-      base_url:        { label: "Base URL", ph: "https://…/v1/chat/completions" },
-      key:             { label: "API Key", ph: "sk-…（留空=沿用已存）" },
-    };
-
-    function providerCard(p, active) {
-      return `<div class="setup-pcard${active ? " active" : ""}" data-pid="${escapeHTML(p.id)}" draggable="true">
-        <span class="setup-drag" title="拖动排序">☰</span>
-        <div class="setup-ptext">
-          <span class="setup-pname">${escapeHTML(p.label)}</span>
-          <span class="setup-phint">${escapeHTML(p.hint)}</span>
-        </div>
-      </div>`;
-    }
-
-    function keyStateLabel(p, info) {
-      if (!p.key_field) return "";
-      const map = { openrouter_api_key: "openrouter", gemini_api_key: "gemini", anthropic_api_key: "anthropic", openai_api_key: "openai" };
-      const has = info.has_key && info.has_key[map[p.key_field]];
-      return has ? ' <span class="setup-haskey">已配置</span>' : "";
-    }
-
-    function getProviders() {
-      if (!st.info) return [];
-      return st.providerOrder.map((id) => (st.info.providers || []).find((x) => x.id === id)).filter(Boolean);
-    }
-
-    // ── drag-to-reorder ──
-    let dragSrc = null;
-    function initDrag(container) {
-      container.addEventListener("dragstart", (e) => {
-        const card = e.target.closest("[data-pid]");
-        if (!card) return;
-        dragSrc = card;
-        card.classList.add("dragging");
-        e.dataTransfer.effectAllowed = "move";
-        e.dataTransfer.setData("text/plain", card.dataset.pid);
-      });
-      container.addEventListener("dragend", (e) => {
-        const card = e.target.closest("[data-pid]");
-        if (card) card.classList.remove("dragging");
-        container.querySelectorAll("[data-pid]").forEach((c) => c.classList.remove("drag-over"));
-        dragSrc = null;
-      });
-      container.addEventListener("dragover", (e) => {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = "move";
-        const card = e.target.closest("[data-pid]");
-        container.querySelectorAll("[data-pid]").forEach((c) => c.classList.remove("drag-over"));
-        if (card && card !== dragSrc) card.classList.add("drag-over");
-      });
-      container.addEventListener("drop", (e) => {
-        e.preventDefault();
-        const target = e.target.closest("[data-pid]");
-        if (!target || !dragSrc || target === dragSrc) return;
-        const fromId = dragSrc.dataset.pid;
-        const toId = target.dataset.pid;
-        const arr = st.providerOrder;
-        const fi = arr.indexOf(fromId), ti = arr.indexOf(toId);
-        if (fi < 0 || ti < 0) return;
-        arr.splice(fi, 1);
-        arr.splice(ti, 0, fromId);
-        renderProviders();
-      });
-    }
-
-    function renderProviders() {
-      const container = $("#setup-providers", overlay);
-      const cur = st.sel;
-      container.innerHTML = getProviders().map((p) => providerCard(p, p.id === cur)).join("");
-      container.querySelectorAll("[data-pid]").forEach((c) => {
-        c.addEventListener("click", (e) => {
-          if (e.target.closest(".setup-drag")) return;
-          selectProvider(c.dataset.pid);
-        });
-      });
-    }
-
-    // ── model combo-box (auto-scan + free input) ──
-    let scanAbort = null;
-    function renderModelField(box, p, curVal) {
-      const wrap = document.createElement("label");
-      wrap.className = "setup-f";
-      wrap.innerHTML = `<span>模型 ID</span><div class="setup-model-wrap">
-        <input type="text" data-f="model" value="${escapeHTML(curVal)}" placeholder="输入模型 ID 或从列表选择">
-        <span class="setup-model-spinner" hidden></span>
-        <div class="setup-model-list" hidden></div>
-      </div>`;
-      box.appendChild(wrap);
-
-      const inp = wrap.querySelector('input[data-f="model"]');
-      const spinner = wrap.querySelector(".setup-model-spinner");
-      const listEl = wrap.querySelector(".setup-model-list");
-
-      inp.addEventListener("input", () => {
-        st.vals.model = inp.value;
-        filterModelList(inp.value, listEl, inp);
-      });
-      inp.addEventListener("focus", () => {
-        if (st.scannedModels.length) { filterModelList(inp.value, listEl, inp); listEl.hidden = false; }
-      });
-
-      document.addEventListener("click", (e) => {
-        if (!wrap.contains(e.target)) listEl.hidden = true;
-      });
-
-      // presets as immediate fallback
-      if (p.model_presets && p.model_presets.length) {
-        st.scannedModels = p.model_presets.map((m) => ({ id: m }));
-        renderModelList(st.scannedModels, listEl, inp);
-      }
-
-      // auto-scan on render
-      autoScanModels(inp, listEl, spinner, p);
-    }
-
-    async function autoScanModels(inp, listEl, spinner, p) {
-      if (scanAbort) scanAbort.abort();
-      const ctrl = scanAbort = new AbortController();
-      spinner.hidden = false;
-      try {
-        const body = buildBody();
-        const r = await fetch("/config/list-models", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body), signal: ctrl.signal,
-        });
-        const d = await r.json().catch(() => ({}));
-        if (ctrl.signal.aborted) return;
-        if (d.models && d.models.length) {
-          st.scannedModels = d.models;
-          renderModelList(d.models, listEl, inp);
-        }
-      } catch (e) {
-        if (e.name === "AbortError") return;
-      }
-      spinner.hidden = true;
-    }
-
-    function renderModelList(models, listEl, inp) {
-      listEl.innerHTML = models.map((m) => {
-        const name = m.name ? `<span class="setup-model-name">${escapeHTML(m.name)}</span>` : "";
-        return `<div class="setup-model-opt" data-mid="${escapeHTML(m.id)}">${escapeHTML(m.id)}${name}</div>`;
-      }).join("");
-      listEl.querySelectorAll("[data-mid]").forEach((opt) => {
-        opt.addEventListener("click", () => {
-          inp.value = opt.dataset.mid;
-          st.vals.model = opt.dataset.mid;
-          listEl.hidden = true;
-        });
-      });
-    }
-
-    function filterModelList(query, listEl, inp) {
-      if (!st.scannedModels.length) return;
-      const q = query.toLowerCase();
-      const filtered = q ? st.scannedModels.filter((m) =>
-        m.id.toLowerCase().includes(q) || (m.name && m.name.toLowerCase().includes(q))
-      ) : st.scannedModels;
-      renderModelList(filtered, listEl, inp);
-      listEl.hidden = filtered.length === 0;
-    }
-
-    function renderFields() {
-      const p = getProviders().find((x) => x.id === st.sel);
-      const box = $("#setup-fields", overlay);
-      if (!p) { box.innerHTML = ""; return; }
-      box.innerHTML = "";
-      st.scannedModels = [];
-
-      for (const f of p.fields) {
-        if (f === "model") {
-          let val = st.vals.model ?? "";
-          if (!val && st.sel === st.curProvider) val = st.info.model || "";
-          renderModelField(box, p, val);
-          continue;
-        }
-        const meta = FIELD_META[f] || { label: f, ph: "" };
-        let val = st.vals[f] ?? "";
-        if (!val) {
-          if (f === "vertex_project") val = st.info.vertex_project || "";
-          else if (f === "vertex_location") val = st.info.vertex_location || "";
-          else if (f === "base_url") val = st.info.base_url || "";
-        }
-        const label = document.createElement("label");
-        label.className = "setup-f";
-        label.innerHTML = `<span>${escapeHTML(meta.label)}</span>
-          <input type="text" data-f="${f}" value="${escapeHTML(val)}" placeholder="${escapeHTML(meta.ph)}">`;
-        box.appendChild(label);
-      }
-      if (p.key_field) {
-        const label = document.createElement("label");
-        label.className = "setup-f";
-        label.innerHTML = `<span>${escapeHTML(FIELD_META.key.label)}${keyStateLabel(p, st.info)}</span>
-          <input type="password" data-f="key" value="" placeholder="${escapeHTML(FIELD_META.key.ph)}">`;
-        box.appendChild(label);
-      }
-
-      const effs = st.info.efforts || [];
-      const curEff = st.vals.effort || st.info.effort || "medium";
-      const effDiv = document.createElement("div");
-      effDiv.innerHTML = `<div class="setup-effort-label">思考强度</div><div class="setup-efforts">${effs.map((e) =>
-        `<button type="button" class="setup-echip${e === curEff ? " active" : ""}" data-eff="${escapeHTML(e)}">${escapeHTML(e)}</button>`).join("")}</div>`;
-      box.appendChild(effDiv);
-
-      box.querySelectorAll("input[data-f]").forEach((inp) => {
-        if (inp.dataset.f !== "model") inp.addEventListener("input", () => { st.vals[inp.dataset.f] = inp.value; });
-      });
-      box.querySelectorAll("[data-eff]").forEach((b) =>
-        b.addEventListener("click", () => {
-          st.vals.effort = b.dataset.eff;
-          box.querySelectorAll("[data-eff]").forEach((x) => x.classList.toggle("active", x === b));
-        }));
-    }
-
-    function selectProvider(pid) {
-      st.sel = pid;
-      st.vals = { effort: st.vals.effort };
-      st.scannedModels = [];
-      renderProviders();
-      setRes(""); setErr("");
-      renderFields();
-    }
-
-    function buildBody() {
-      const p = getProviders().find((x) => x.id === st.sel);
-      const body = { provider: st.sel };
-      if (st.vals.model) body.model = st.vals.model;
-      if (st.vals.effort) body.effort = st.vals.effort;
-      if (st.vals.base_url) body.base_url = st.vals.base_url;
-      if (st.vals.vertex_project) body.vertex_project = st.vals.vertex_project;
-      if (st.vals.vertex_location) body.location = st.vals.vertex_location, body.vertex_location = st.vals.vertex_location;
-      if (p && p.key_field && st.vals.key) body[p.key_field] = st.vals.key;
-      return body;
-    }
-
-    async function doSave() {
-      setErr(""); setRes("保存中…", true);
-      try {
-        const r = await fetch("/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(buildBody()) });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-        setRes("已保存并启用 ✓（新会话即生效）", true);
-      } catch (e) { setRes(""); setErr(`保存失败：${e.message}`); }
-    }
-
-    async function doTest() {
-      setErr(""); setRes("测试中…（可能需数秒）", true);
-      try {
-        const r = await fetch("/config/test-brain", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(buildBody()) });
-        const d = await r.json().catch(() => ({}));
-        if (d.ok) setRes(`连接成功 ✓ ${d.provider}/${d.model} — 回样「${d.sample || ""}」`, true);
-        else setRes(`连接失败：${d.error || "未知错误"}（${d.provider || ""}/${d.model || ""}）`, false);
-      } catch (e) { setRes(""); setErr(`测试失败：${e.message}`); }
-    }
-
-    $("#setup-save", overlay).onclick = doSave;
-    $("#setup-test", overlay).onclick = doTest;
-
-    // ── 搜索引擎配置 ──
-    const SEARCH_PROVIDERS = [
-      { id: "auto",       label: "自动",       hint: "按优先级自动检测已配置的引擎", fields: [] },
-      { id: "tavily",     label: "Tavily",     hint: "AI 优化搜索", fields: [{ key: "tavily_api_key", label: "API Key", ph: "tvly-…" }] },
-      { id: "brave",      label: "Brave",      hint: "隐私优先搜索", fields: [{ key: "brave_api_key", label: "API Key", ph: "BSA…" }] },
-      { id: "serper",     label: "Serper",      hint: "Google 搜索 API", fields: [{ key: "serper_api_key", label: "API Key", ph: "" }] },
-      { id: "exa",        label: "Exa",         hint: "语义搜索", fields: [{ key: "exa_api_key", label: "API Key", ph: "" }] },
-      { id: "bing",       label: "Bing",        hint: "微软 Bing 搜索", fields: [{ key: "bing_api_key", label: "API Key", ph: "" }] },
-      { id: "google_cse", label: "Google CSE",  hint: "自定义搜索引擎", fields: [{ key: "google_cse_key", label: "API Key", ph: "" }, { key: "google_cse_id", label: "搜索引擎 ID (CX)", ph: "" }] },
-      { id: "searxng",    label: "SearXNG",     hint: "自托管、免费", fields: [{ key: "searxng_url", label: "实例 URL", ph: "https://searx.example.com" }, { key: "searxng_api_key", label: "Bearer Token（可选）", ph: "" }] },
-      { id: "duckduckgo",  label: "DuckDuckGo", hint: "免费、无需密钥", fields: [] },
-    ];
-    let searchSel = "auto";
-    const searchVals = {};
-    const searchResEl = $("#search-result", overlay);
-    const setSearchRes = (m, ok) => {
-      if (!m) { searchResEl.hidden = true; return; }
-      searchResEl.textContent = m; searchResEl.hidden = false;
-      searchResEl.className = "setup-result " + (ok ? "ok" : "bad");
-    };
-
-    function renderSearchChips(searchInfo) {
-      const chips = $("#search-provider-chips", overlay);
-      chips.innerHTML = SEARCH_PROVIDERS.map((sp) => {
-        const on = sp.id === searchSel;
-        const hasKey = searchInfo && searchInfo.has_key && searchInfo.has_key[sp.id];
-        const dot = hasKey ? '<span class="search-key-dot"></span>' : "";
-        return `<button type="button" class="search-chip${on ? " active" : ""}" data-sp="${escapeHTML(sp.id)}">${dot}${escapeHTML(sp.label)}</button>`;
-      }).join("");
-      chips.querySelectorAll("[data-sp]").forEach((btn) =>
-        btn.addEventListener("click", () => { searchSel = btn.dataset.sp; renderSearchChips(searchInfo); renderSearchFields(); }));
-    }
-
-    function renderSearchFields() {
-      const box = $("#search-fields", overlay);
-      const sp = SEARCH_PROVIDERS.find((p) => p.id === searchSel);
-      if (!sp || !sp.fields.length) {
-        box.innerHTML = sp && sp.id === "auto"
-          ? '<p class="search-hint">自动模式按优先级探测：Tavily → Serper → Brave → Exa → Google CSE → Bing → SearXNG → DuckDuckGo</p>'
-          : '<p class="search-hint">无需配置</p>';
-        return;
-      }
-      box.innerHTML = sp.fields.map((f) => {
-        const val = searchVals[f.key] || "";
-        const isSecret = f.key.includes("api_key") || f.key.includes("key");
-        return `<label class="setup-f"><span>${escapeHTML(f.label)}</span>
-          <input type="${isSecret ? "password" : "text"}" data-sf="${escapeHTML(f.key)}" value="${escapeHTML(val)}" placeholder="${escapeHTML(f.ph || "留空=沿用已存")}"></label>`;
-      }).join("");
-      box.querySelectorAll("input[data-sf]").forEach((inp) =>
-        inp.addEventListener("input", () => { searchVals[inp.dataset.sf] = inp.value; }));
-    }
-
-    async function doSearchSave() {
-      setSearchRes("保存中…", true);
-      try {
-        const body = { search_provider: searchSel };
-        for (const [k, v] of Object.entries(searchVals)) { if (v) body[k] = v; }
-        const r = await fetch("/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-        setSearchRes("已保存 ✓", true);
-      } catch (e) { setSearchRes(`保存失败：${e.message}`, false); }
-    }
-
-    $("#search-save", overlay).onclick = doSearchSave;
-
-    setErr(""); setRes("");
-    const provBox = $("#setup-providers", overlay);
-    provBox.innerHTML = '<div class="model-loading">加载中…</div>';
-    $("#setup-fields", overlay).innerHTML = "";
-    initDrag(provBox);
-    overlay.hidden = false;
-    fetch("/config").then((r) => r.json()).then((cfg) => {
-      const info = cfg.brain;
-      if (!info) { setErr("需先登录才能配置供应商"); return; }
-      st.info = info;
-      st.vals = { effort: info.effort || "medium" };
-      st.providerOrder = (info.providers || []).map((p) => p.id);
-      const cur = info.provider === "openai" && info.base_url ? "custom" : (info.provider || "openrouter");
-      st.curProvider = cur;
-      const idx = st.providerOrder.indexOf(cur);
-      if (idx > 0) { st.providerOrder.splice(idx, 1); st.providerOrder.unshift(cur); }
-      renderProviders();
-      selectProvider(cur);
-      // 搜索引擎初始化
-      const searchInfo = cfg.search || {};
-      searchSel = searchInfo.provider || "auto";
-      renderSearchChips(searchInfo);
-      renderSearchFields();
-    }).catch((e) => setErr(`加载失败：${e.message}`));
-  }
+  const { openModelPicker, openSetupPanel } = window.LumeriV3Settings.createSettings({
+    $,
+    apiFetch,
+    escapeHTML,
+    normalizedByokProvider,
+    getCurrentAuthSession: () => currentAuthSession,
+  });
 
   // ── slash-command palette ───────────────────────────────────────────
   // A "/" at the start of an empty-ish line opens a floating command menu
@@ -3345,6 +7129,7 @@
   const SLASH_COMMANDS = [
     { name: "help",    desc: "所有命令" },
     { name: "new",     desc: "开启新会话" },
+    { name: "project", desc: "新建 Project" },
     { name: "clear",   desc: "清空当前对话" },
     { name: "upload",  desc: "上传素材" },
     { name: "plan",    desc: "只规划，批准后执行" },
@@ -3356,7 +7141,11 @@
   ];
   const slash = { open: false, items: [], sel: 0 };
 
-  function knownSlash(name) { return SLASH_COMMANDS.some((c) => c.name === name); }
+  function availableSlashCommands() {
+    return SLASH_COMMANDS;
+  }
+
+  function knownSlash(name) { return availableSlashCommands().some((c) => c.name === name); }
 
   // Command name iff the line is `/name` (any trailing arg ignored) and known.
   function parseSlashName(line) {
@@ -3370,7 +7159,7 @@
   function slashMatch(line) {
     if (!line.startsWith("/") || line.includes(" ")) return null;
     const frag = line.slice(1).toLowerCase();
-    const matches = SLASH_COMMANDS.filter((c) => c.name.startsWith(frag));
+    const matches = availableSlashCommands().filter((c) => c.name.startsWith(frag));
     return matches.length ? matches : null;
   }
 
@@ -3404,6 +7193,7 @@
     if (name === "help") { els.promptInput.value = "/"; slashSync(); els.promptInput.focus(); return; }
     switch (name) {
       case "new":     els.newSessionBtn.click(); break;
+      case "project": openCreateProjectDialog(); break;
       case "clear":   state.turns = []; state.currentTurn = null; render(); break;
       case "upload":  els.uploadBtn.click(); break;
       case "plan":    els.planBtn?.click(); break;
@@ -3449,15 +7239,36 @@
   });
 
   els.sendBtn.addEventListener("click", () => {
-    const msg = els.promptInput.value.trim();
-    if (!msg) return;
-    const name = parseSlashName(msg);
+    const rawMessage = els.promptInput.value.trim();
+    const selectedContext = selectedComposerContextRefs();
+    const msg = rawMessage || (selectedContext.length ? "请根据我拖入的内容继续。" : "");
+    const name = rawMessage && parseSlashName(rawMessage);
     if (name) { execSlash(name); return; }
-    const action = state.turnInProgress ? steerTurn(msg) : submitTurn(msg);
-    action.then(() => { els.promptInput.value = ""; slashClose(); syncShell(); })
+    if (!state.sessionId) return;
+    if (state.turnInProgress && !rawMessage && !selectedContext.length) { stopCurrentTurn(); return; }
+    if (!SpeechRecognition && !rawMessage && !selectedContext.length) return;
+    if (voiceInput.listening) {
+      stopVoiceInput();
+      return;
+    }
+    if (!rawMessage && !selectedContext.length) {
+      startVoiceInput();
+      return;
+    }
+    const selectedGuides = selectedSkillSpaceArtifacts();
+    (state.turnInProgress
+      ? steerTurn(msg, selectedGuides, selectedContext)
+      : submitTurn(msg))
+      .then((sent) => {
+        if (sent === false) return;
+        els.promptInput.value = "";
+        clearComposerContext();
+        slashClose();
+        syncShell();
+      })
                    .catch((err) => {
-                     state.errors.push(`${state.turnInProgress ? "steer" : "submit turn"} failed: ${err.message}`);
-                     state.currentTurn?.banners.push({ kind: "info", text: state.turnInProgress ? "引导未送达，请再试一次" : "任务未能开始，请稍后重试" });
+                     state.errors.push(`submit turn failed: ${err.message}`);
+                     state.currentTurn?.banners.push({ kind: "info", text: "任务未能开始，请稍后重试" });
                      render();
                    });
   });
@@ -3486,6 +7297,40 @@
   const plusMenu = $("#plus-menu");
   const previewStage = $("#preview-stage");
   const assetsTray = $("#assets-tray");
+  const COMPOSER_CONTEXT_MIME = "application/x-lumeri-project-context";
+
+  document.addEventListener("dragstart", (event) => {
+    const source = event.target.closest?.("[data-context-drag]");
+    if (!source || !event.dataTransfer) return;
+    const ref = contextFromDragElement(source);
+    if (!ref) { event.preventDefault(); return; }
+    event.dataTransfer.effectAllowed = "copy";
+    event.dataTransfer.setData(COMPOSER_CONTEXT_MIME, JSON.stringify(ref));
+    event.dataTransfer.setData("text/plain", `${composerContextKindLabel(ref.kind)}：${ref.label}`);
+    source.classList.add("is-context-dragging");
+  });
+  document.addEventListener("dragend", (event) => {
+    event.target.closest?.("[data-context-drag]")?.classList.remove("is-context-dragging");
+    shell.classList.remove("is-context-drop");
+  });
+  shell.addEventListener("dragover", (event) => {
+    if (!Array.from(event.dataTransfer?.types || []).includes(COMPOSER_CONTEXT_MIME)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    shell.classList.add("is-context-drop");
+  });
+  shell.addEventListener("dragleave", (event) => {
+    if (!shell.contains(event.relatedTarget)) shell.classList.remove("is-context-drop");
+  });
+  shell.addEventListener("drop", (event) => {
+    const raw = event.dataTransfer?.getData(COMPOSER_CONTEXT_MIME);
+    if (!raw) return;
+    event.preventDefault();
+    shell.classList.remove("is-context-drop");
+    try {
+      if (addComposerContext(JSON.parse(raw))) els.promptInput.focus();
+    } catch {}
+  });
 
   // Grow the pill past one line; reveal the ice send-disc once there is text.
   // The grow decision is measured at the NON-grown (buttons-inline) width so it
@@ -3501,7 +7346,14 @@
     shell.classList.toggle("is-grown", grown);
     ta.style.height = "auto";
     ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
-    shell.classList.toggle("has-text", ta.value.trim().length > 0);
+    const msg = els.promptInput.value.trim();
+    const shortcut = msg && parseSlashName(msg);
+    const hasContext = selectedComposerContextRefs().length > 0;
+    const canSubmit = (!!msg || hasContext) && (!!state.sessionId || !!shortcut);
+    const showPrimary = !!state.sessionId || !!shortcut;
+    shell.classList.toggle("has-text", canSubmit);
+    shell.classList.toggle("show-primary", showPrimary);
+    syncComposerAction();
   }
   els.promptInput.addEventListener("input", syncShell);
 
@@ -3539,12 +7391,10 @@
 
   function renderVoiceState() {
     shell.classList.toggle("is-listening", voiceInput.listening);
-    els.voiceInputBtn.classList.toggle("is-listening", voiceInput.listening);
-    els.voiceInputBtn.setAttribute("aria-pressed", String(voiceInput.listening));
-    els.voiceInputBtn.setAttribute("aria-label", voiceInput.listening ? "停止语音输入" : "语音输入");
-    els.voiceInputBtn.title = voiceInput.listening ? "停止语音输入" : "语音输入";
-    els.voiceInputBtn.querySelector("use")?.setAttribute("href", voiceInput.listening ? "#i-stop" : "#i-mic");
+    els.sendBtn.classList.toggle("is-listening", voiceInput.listening);
+    els.sendBtn.setAttribute("aria-pressed", String(voiceInput.listening));
     syncShell();
+    render();
   }
 
   function stopVoiceInput(message = "语音已转成文字，请确认后发送") {
@@ -3559,7 +7409,7 @@
       return false;
     }
     voiceInput.requesting = true;
-    els.voiceInputBtn.setAttribute("aria-busy", "true");
+    els.sendBtn.setAttribute("aria-busy", "true");
     setVoiceStatus("正在申请麦克风权限…", true);
     let stream = null;
     try {
@@ -3582,7 +7432,7 @@
       // speech recognizer can own the microphone without two active captures.
       stream?.getTracks().forEach((track) => track.stop());
       voiceInput.requesting = false;
-      els.voiceInputBtn.removeAttribute("aria-busy");
+      els.sendBtn.removeAttribute("aria-busy");
     }
   }
 
@@ -3648,15 +7498,9 @@
   }
 
   if (!SpeechRecognition) {
-    els.voiceInputBtn.classList.add("is-unavailable");
-    els.voiceInputBtn.setAttribute("aria-disabled", "true");
-    els.voiceInputBtn.title = "当前浏览器不支持语音输入";
+    els.sendBtn.classList.add("is-unavailable");
+    els.sendBtn.setAttribute("aria-disabled", "true");
   }
-  els.voiceInputBtn.addEventListener("click", () => {
-    if (state.turnInProgress) stopCurrentTurn();
-    else startVoiceInput();
-  });
-
   // Starter suggestion chips (rail empty state): click fills the composer.
   document.getElementById("rail-empty")?.addEventListener("click", (e) => {
     const chip = e.target.closest(".suggest-chip");
@@ -3664,6 +7508,13 @@
     els.promptInput.value = chip.dataset.suggest || chip.textContent.trim();
     syncShell();
     els.promptInput.focus();
+  });
+  els.railHistory?.addEventListener("scroll", () => {
+    state._followChatBottom = chatIsNearBottom();
+    syncChatScrollButton();
+  }, { passive: true });
+  els.chatScrollBottom?.addEventListener("click", () => {
+    scrollChatToBottom();
   });
 
   // "+" is the single entry point. Popover opens upward from the shell.
@@ -3726,7 +7577,7 @@
   // Summoned media-library tray.
   function toggleTray(open) {
     assetsTray.hidden = !open;
-    if (open) fetchMediaLibrary().catch(() => {});
+    return open ? fetchMediaLibrary().catch(() => {}) : Promise.resolve();
   }
   $("#assets-tray-close")?.addEventListener("click", () => toggleTray(false));
   assetsTray?.addEventListener("click", (e) => { if (e.target === assetsTray) toggleTray(false); });
@@ -3737,12 +7588,152 @@
   const timelineDrawer = $("#timeline-drawer");
   const WorkspaceLayout = window.LumeriWorkspaceLayout;
 
-  const STAGE_VIEWS = {
+  function renderSkillSpaceSelection() {
+    if (!els.skillSpaceSelection) return;
+    const selected = selectedSkillSpaceArtifacts();
+    const moduleMeta = stagePanel?.querySelector(
+      '[data-workspace-module="skills"] .workspace-module-meta'
+    );
+    if (moduleMeta) moduleMeta.textContent = `${selected.length} 个已选`;
+    els.skillSpaceSelection.hidden = selected.length === 0;
+    els.inputShell.classList.toggle("has-skill-space", selected.length > 0);
+    els.skillSpaceSelection.innerHTML = selected.map((item) => `
+      <button type="button" class="skill-space-chip" data-skill-space-remove="${escapeHTML(skillSpaceKey(item))}" title="从本会话移除 ${escapeHTML(item.title)}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-spark"/></svg>
+        <span>${escapeHTML(item.title)}</span>
+        <svg class="skill-space-chip-close" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
+      </button>`).join("");
+  }
+
+  function renderComposerContext() {
+    if (!els.composerContext) return;
+    const selected = selectedComposerContextRefs();
+    els.composerContext.hidden = selected.length === 0;
+    els.inputShell.classList.toggle("has-composer-context", selected.length > 0);
+    els.composerContext.innerHTML = selected.map((item) => `
+      <button type="button" class="composer-context-chip" data-composer-context-remove="${escapeHTML(composerContextKey(item))}" title="移除 ${escapeHTML(item.label)}">
+        <span class="composer-context-kind">${escapeHTML(composerContextKindLabel(item.kind))}</span>
+        <span>${escapeHTML(item.label)}</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg>
+      </button>`).join("");
+  }
+
+  function resetSkillCloudState() {
+    state.skillCloudArtifacts = [];
+    state.skillCloudStatus = "idle";
+    skillSpaceSelections.clear();
+    renderSkillSpaceSelection();
+    if (stageTabs?.includes("skills")) refreshPanel("skills");
+  }
+
+  async function fetchSkillCloud({ force = false } = {}) {
+    if (state.skillCloudStatus === "loading") return;
+    if (!force && state.skillCloudStatus === "ready") return;
+    state.skillCloudStatus = "loading";
+    try {
+      const response = await apiFetch("/skill-cloud/artifacts");
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        state.skillCloudStatus = response.status === 401 ? "signed-out" : "error";
+        state.skillCloudArtifacts = [];
+        return;
+      }
+      state.skillCloudArtifacts = normalizeSkillSpaceRefs(payload.artifacts || []);
+      state.skillCloudStatus = "ready";
+    } catch {
+      state.skillCloudArtifacts = [];
+      state.skillCloudStatus = "error";
+    }
+  }
+
+  function skillSpaceKindLabel(kind) {
+    return kind === "workflow" ? "Workflow" : "Skill";
+  }
+
+  async function renderSkillSpacePanel(body) {
+    if (!body) return;
+    const sessionId = state.sessionId;
+    if (state.skillCloudStatus === "idle" || state.skillCloudStatus === "error") {
+      body.innerHTML = `<p class="placeholder">正在读取云端能力…</p>`;
+      await fetchSkillCloud({ force: state.skillCloudStatus === "error" });
+    }
+    if (!body.isConnected || !stageTabs.includes("skills") || state.sessionId !== sessionId) return;
+    if (state.skillCloudStatus === "loading") {
+      body.innerHTML = `<p class="placeholder">正在读取云端能力…</p>`;
+      return;
+    }
+    if (state.skillCloudStatus === "signed-out") {
+      body.innerHTML = `<p class="placeholder">登录后可选择云端 Skill</p>`;
+      return;
+    }
+    if (state.skillCloudStatus === "error") {
+      body.innerHTML = `<div class="skill-space-empty"><p>云端能力暂时无法读取</p><button type="button" data-skill-space-retry>重试</button></div>`;
+      return;
+    }
+    const artifacts = state.skillCloudArtifacts;
+    if (!artifacts.length) {
+      body.innerHTML = `<div class="skill-space-empty"><p>还没有可用的云端 Skill</p><span>让 Agent 上云后会出现在这里</span></div>`;
+      return;
+    }
+    const selected = new Set(selectedSkillSpaceArtifacts().map(skillSpaceKey));
+    const ownedCount = artifacts.filter((item) => item.access === "owned").length;
+    body.innerHTML = `
+      <div class="skill-space-summary">
+        <span>${artifacts.length} 个可用</span>
+        <span>${ownedCount} 个属于你</span>
+      </div>
+      <div class="skill-space-list">
+        ${artifacts.map((item) => {
+          const key = skillSpaceKey(item);
+          const active = selected.has(key);
+          const accessLabel = item.access === "owned" ? "我的" : "公共";
+          return `<button type="button" class="skill-space-card${active ? " selected" : ""}" data-skill-space-select="${escapeHTML(key)}" aria-pressed="${active}">
+            <span class="skill-space-card-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><use href="#${active ? "i-check" : "i-spark"}"/></svg>
+            </span>
+            <span class="skill-space-card-copy">
+              <span class="skill-space-card-title">${escapeHTML(item.title)}</span>
+              <span class="skill-space-card-description">${escapeHTML(item.description || "云端创作能力")}</span>
+              <span class="skill-space-card-meta">${skillSpaceKindLabel(item.kind)} · v${escapeHTML(item.version)} · ${accessLabel}</span>
+            </span>
+          </button>`;
+        }).join("")}
+      </div>`;
+  }
+
+  function toggleSkillSpaceArtifact(key, { remove = false } = {}) {
+    if (!state.sessionId) return;
+    let selected = skillSpaceSelections.get(state.sessionId);
+    if (!selected) {
+      selected = new Map();
+      skillSpaceSelections.set(state.sessionId, selected);
+    }
+    const artifact = state.skillCloudArtifacts.find((item) => skillSpaceKey(item) === key);
+    if (remove || selected.has(key)) selected.delete(key);
+    else if (artifact) selected.set(key, artifact);
+    if (!selected.size) skillSpaceSelections.delete(state.sessionId);
+    renderSkillSpaceSelection();
+    refreshPanel("skills");
+  }
+
+  const VIDEO_STAGE_VIEWS = {
     timeline: { label: "时间线", ico: '<path d="M5 10v4M9 7v10M13 9v6M17 6v12M21 10v4"/>' },
     outline:  { label: "大纲", ico: '<rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/><path d="M7 10h6M7 13.5h9.5"/>' },
     tasks:    { label: "后台任务", ico: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>' },
     files:    { label: "文件", ico: '<path d="M3.5 6.5c0-1.1.9-2 2-2h3.6c.5 0 .9.2 1.2.6l1.4 1.9H18.5c1.1 0 2 .9 2 2v8.5c0 1.1-.9 2-2 2h-13c-1.1 0-2-.9-2-2z"/>' },
+    library:  { label: "素材库", ico: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>' },
+    skills:   { label: "Skill Space", ico: '<path d="M12 3.5l1.7 4.1 4.3 1.7-4.3 1.7-1.7 4.1-1.7-4.1L6 9.3l4.3-1.7z"/><path d="M18.5 14.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/>' },
+    properties: { label: "属性", ico: '<path d="M4 6h10M18 6h2M4 12h3M11 12h9M4 18h8M16 18h4"/><circle cx="16" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="14" cy="18" r="2"/>' },
   };
+  const STAGE_VIEWS = isQuantaSurface
+    ? {
+        quanta: { label: "状态树", ico: '<circle cx="6" cy="6" r="2"/><circle cx="18" cy="12" r="2"/><circle cx="6" cy="18" r="2"/><path d="M8 6h3a3 3 0 013 3v0a3 3 0 003 3M8 18h3a3 3 0 003-3v0a3 3 0 013-3"/>' },
+        tasks: VIDEO_STAGE_VIEWS.tasks,
+        files: VIDEO_STAGE_VIEWS.files,
+        library: VIDEO_STAGE_VIEWS.library,
+        skills: VIDEO_STAGE_VIEWS.skills,
+      }
+    : VIDEO_STAGE_VIEWS;
   const PREVIEW_ICO = '<rect x="3.5" y="5" width="17" height="12" rx="2.5"/><path d="M10.4 8.6l3.8 2.4-3.8 2.4z"/><path d="M8.5 20h7"/>';
   const stageTabsBox = $("#stage-tabs");
   const stageTabList = $("#stage-tab-list");
@@ -3754,22 +7745,25 @@
   let activeTab = "preview";
   let bgActive = false;   // any session running / has pending jobs → tasks tab badge
   let didMigrateModules = false;
-  const DEFAULT_MODULES = ["timeline", "outline", "tasks"];
-  const PANEL_MODULES = new Set(["outline", "tasks", "files"]);
-  const ALL_WORKSPACE_MODULES = ["preview", "outline", "tasks", "timeline", "files"];
-  const WORKSPACE_ORDER_KEY = "lumeri:v3:workspace-order";
-  const WORKSPACE_SIZES_KEY = "lumeri:v3:workspace-sizes";
+  const DEFAULT_MODULES = isQuantaSurface ? ["quanta", "tasks", "library"] : ["timeline", "outline", "tasks"];
+  const PANEL_MODULES = new Set(isQuantaSurface ? ["quanta", "tasks", "files", "library", "skills"] : ["outline", "tasks", "files", "library", "skills", "properties"]);
+  const ALL_WORKSPACE_MODULES = isQuantaSurface
+    ? ["quanta", "preview", "tasks", "files", "library", "skills"]
+    : ["preview", "outline", "tasks", "timeline", "properties", "files", "library", "skills"];
+  const WORKSPACE_ORDER_KEY = `${surfaceStoragePrefix}:workspace-order`;
+  const WORKSPACE_SIZES_KEY = `${surfaceStoragePrefix}:workspace-sizes`;
+  const QUANTA_CORE_LAYOUT_KEY = `${surfaceStoragePrefix}:core-row-layout`;
   let workspaceOrder = [...ALL_WORKSPACE_MODULES];
   let workspaceSizes = {};
   try {
-    stageTabs = JSON.parse(window.localStorage.getItem("lumeri:v3:stage-tabs") || "[]")
+    stageTabs = JSON.parse(window.localStorage.getItem(`${surfaceStoragePrefix}:stage-tabs`) || "[]")
       .filter((k) => STAGE_VIEWS[k]);
   } catch {}
   try {
     // One-time migration from exclusive tabs to the simultaneous modular desk.
-    if (window.localStorage.getItem("lumeri:v3:module-layout") !== "1") {
+    if (window.localStorage.getItem(`${surfaceStoragePrefix}:module-layout`) !== "1") {
       stageTabs = [...new Set([...DEFAULT_MODULES, ...stageTabs])];
-      window.localStorage.setItem("lumeri:v3:module-layout", "1");
+      window.localStorage.setItem(`${surfaceStoragePrefix}:module-layout`, "1");
       didMigrateModules = true;
     }
   } catch {
@@ -3784,15 +7778,30 @@
     const saved = JSON.parse(window.localStorage.getItem(WORKSPACE_SIZES_KEY) || "{}");
     if (saved && typeof saved === "object") workspaceSizes = saved;
   } catch {}
+  try {
+    // State Tree is Quanta's primary editing object. Migrate layouts saved by
+    // the earlier shared-shell build once, preserving every support module's
+    // relative order and size while promoting the tree to the first full row.
+    if (isQuantaSurface && window.localStorage.getItem(QUANTA_CORE_LAYOUT_KEY) !== "1") {
+      workspaceOrder = ["quanta", ...workspaceOrder.filter((id) => id !== "quanta")];
+      workspaceSizes.quanta = { ...workspaceSizes.quanta, width: 100, height: 72 };
+      window.localStorage.setItem(WORKSPACE_ORDER_KEY, JSON.stringify(workspaceOrder));
+      window.localStorage.setItem(WORKSPACE_SIZES_KEY, JSON.stringify(workspaceSizes));
+      window.localStorage.setItem(QUANTA_CORE_LAYOUT_KEY, "1");
+    }
+  } catch {}
 
   function saveStageTabs() {
-    try { window.localStorage.setItem("lumeri:v3:stage-tabs", JSON.stringify(stageTabs)); } catch {}
+    try { window.localStorage.setItem(`${surfaceStoragePrefix}:stage-tabs`, JSON.stringify(stageTabs)); } catch {}
   }
   function saveWorkspaceLayout() {
     try {
       window.localStorage.setItem(WORKSPACE_ORDER_KEY, JSON.stringify(workspaceOrder));
       window.localStorage.setItem(WORKSPACE_SIZES_KEY, JSON.stringify(workspaceSizes));
     } catch {}
+    if (segmentWorkspaceState().open && !segmentWorkspaceState().applyingView) {
+      broadcastSegmentView({ layout: workspaceSizes });
+    }
   }
   function orderedStageTabs() {
     return workspaceOrder.filter((id) => stageTabs.includes(id))
@@ -3816,7 +7825,10 @@
       gap: 8,
     };
     const packed = WorkspaceLayout.flowModules(
-      ids.map((id) => ({ id, ...WorkspaceLayout.clampSize(id, workspaceSizes[id]) })),
+      ids.map((id) => {
+        const size = WorkspaceLayout.clampSize(id, workspaceSizes[id]);
+        return { id, ...size, ...(isQuantaSurface && id === "quanta" ? { width: 100 } : {}) };
+      }),
       bounds,
     );
     workspaceBoard.querySelectorAll("[data-workspace-module]").forEach((module) => {
@@ -3826,6 +7838,13 @@
       module.style.transform = `translate3d(${place.x + inset}px, ${place.y + inset}px, 0)`;
       module.style.width = `${place.width}px`;
       module.style.height = `${place.height}px`;
+      if (module.dataset.workspaceModule === "timeline" && WorkspaceLayout.timelineScale) {
+        const scale = WorkspaceLayout.timelineScale(place.width, place.height);
+        if (module.style.getPropertyValue("--timeline-ui-scale") !== String(scale)) {
+          module.style.setProperty("--timeline-ui-scale", String(scale));
+          window.requestAnimationFrame(applyTimelineTrackScale);
+        }
+      }
     });
   }
   function hideWorkspaceModule(id) {
@@ -3850,8 +7869,12 @@
     const body = panelBodyFor(view);
     if (!body) return;
     if (view === "outline") renderOutlinePanel(body);
+    else if (view === "quanta") renderQuantaPanel(body);
     else if (view === "tasks") renderTasksPanel(body);
     else if (view === "files") renderFilesPanel(body);
+    else if (view === "library") renderLibraryPanel(body);
+    else if (view === "skills") renderSkillSpacePanel(body);
+    else if (view === "properties") renderPropertiesPanel(body);
   }
   let tasksPanelRefreshTimer = null;
   function scheduleTasksPanelRefresh() {
@@ -3879,7 +7902,7 @@
               <svg viewBox="0 0 24 24" aria-hidden="true">${STAGE_VIEWS[k].ico}</svg><span class="label">${STAGE_VIEWS[k].label}</span>
             </span>
             ${k === "tasks" && bgActive ? `<span class="tab-badge" title="有后台任务在运行"></span>` : ""}
-            <span class="workspace-module-meta">${k === "outline" ? "镜头结构" : k === "tasks" ? "运行状态" : "只读浏览"}</span>
+          <span class="workspace-module-meta">${k === "quanta" ? "离散结构" : k === "outline" ? "镜头结构" : k === "tasks" ? "运行状态" : k === "library" ? (state.librarySection === "media" ? "媒体素材" : "非媒体素材") : k === "skills" ? `${selectedSkillSpaceArtifacts().length} 个已选` : k === "properties" ? "精确微调" : "只读浏览"}</span>
             <button type="button" class="workspace-module-refresh" data-module-refresh="${k}" title="刷新${STAGE_VIEWS[k].label}" aria-label="刷新${STAGE_VIEWS[k].label}"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-refresh"/></svg></button>
             <button type="button" class="workspace-module-close" data-module-close="${k}" title="隐藏${STAGE_VIEWS[k].label}" aria-label="隐藏${STAGE_VIEWS[k].label}"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button>
           </div>
@@ -3907,7 +7930,7 @@
         </span>` : ""}
       </button>`;
     stageTabList.innerHTML =
-      tabHtml("preview", "预览", PREVIEW_ICO, false)
+      tabHtml("preview", isQuantaSurface ? "画布" : "预览", PREVIEW_ICO, false)
       + orderedStageTabs().map((k) => tabHtml(k, STAGE_VIEWS[k].label, STAGE_VIEWS[k].ico, true)).join("");
     syncWorkspaceModules();
   }
@@ -4021,6 +8044,17 @@
     });
   }
 
+  // A vertical drop means "put us one above the other". Persist both modules
+  // in the full-row regime so the flow layout cannot immediately fold them
+  // back into the same row. A later horizontal drop reverses this via
+  // ensureSideBySide().
+  function ensureStacked(aId, bId) {
+    if (!WorkspaceLayout?.fullRowSize) return;
+    [aId, bId].forEach((id) => {
+      workspaceSizes[id] = WorkspaceLayout.fullRowSize(id, workspaceSizes[id]);
+    });
+  }
+
   // Dragging changes only module order; justified flow then re-tiles the desk
   // edge-to-edge without disturbing module contents.
   let draggedModule = null;
@@ -4030,6 +8064,8 @@
   const clearDropState = () => {
     workspaceBoard?.querySelectorAll(".is-drop-before, .is-drop-after").forEach((el) =>
       el.classList.remove("is-drop-before", "is-drop-after"));
+    workspaceBoard?.querySelectorAll("[data-drop-axis]").forEach((el) =>
+      el.removeAttribute("data-drop-axis"));
     dropTarget = null;
   };
   workspaceBoard?.addEventListener("dragstart", (e) => {
@@ -4052,6 +8088,7 @@
     const dy = (e.clientY - (rect.top + rect.height / 2)) / Math.max(1, rect.height);
     dropHorizontal = Math.abs(dx) > Math.abs(dy);
     dropAfter = dropHorizontal ? dx > 0 : dy > 0;
+    target.dataset.dropAxis = dropHorizontal ? "horizontal" : "vertical";
     target.classList.add(dropAfter ? "is-drop-after" : "is-drop-before");
   });
   workspaceBoard?.addEventListener("drop", (e) => {
@@ -4061,6 +8098,7 @@
     const targetIndex = workspaceOrder.indexOf(dropTarget);
     workspaceOrder.splice(Math.max(0, targetIndex + (dropAfter ? 1 : 0)), 0, draggedModule);
     if (dropHorizontal) ensureSideBySide(draggedModule, dropTarget);
+    else ensureStacked(draggedModule, dropTarget);
     stageTabs = orderedStageTabs();
     saveStageTabs();
     saveWorkspaceLayout();
@@ -4190,7 +8228,7 @@
     if (document.visibilityState === "hidden") return;
     let active = false;
     try {
-      const r = await fetch("/sessions");
+      const r = await apiFetch("/sessions?compact=1");
       if (r.ok) {
         const sessions = (await r.json()).sessions || [];
         active = sessions.some((s) => s.turn_in_progress || (s.pending_jobs || []).length > 0);
@@ -4218,6 +8256,48 @@
     return Math.floor(s / 86400) + " 天前";
   };
 
+  // ── Quanta state tree: canonical Project structure, not demo fixtures ──
+  async function renderQuantaPanel(body) {
+    if (!body) return;
+    if (!state.sessionId) { body.innerHTML = `<p class="placeholder">暂无会话</p>`; return; }
+    if (!state.projectQuanta) {
+      body.innerHTML = `<p class="placeholder">加载状态树…</p>`;
+      await fetchProjectQuanta({ force: true });
+    }
+    if (!body.isConnected || !stageTabs.includes("quanta")) return;
+    const scopes = quantaScopes();
+    const states = quantaStates();
+    if (!states.length) {
+      body.innerHTML = `<p class="placeholder">暂无状态 — 在右侧让 Lumeri 起草离散内容</p>`;
+      return;
+    }
+    selectedQuantaContext();
+    let stateNumber = 0;
+    body.innerHTML = scopes.map(({ scope, ancestors }) => {
+      const scopeStates = (Array.isArray(scope.children) ? scope.children : []).filter((quantum) => quantum && !quantum.hidden);
+      if (!scopeStates.length) return "";
+      const path = ancestors.map((node) => node.title || node.id).filter(Boolean).join(" / ");
+      const rows = scopeStates.map((quantum) => {
+        stateNumber += 1;
+        const active = quantum.id === state.selectedQuantaStateId;
+        const dwell = Number(quantum.dwell_sec || 0);
+        const visibleCount = Array.isArray(quantum.visible_block_ids) ? quantum.visible_block_ids.length : 0;
+        return `<button type="button" class="quanta-tree-state${active ? " active" : ""}" data-quanta-state="${escapeHTML(quantum.id || "")}" aria-pressed="${active}">
+          <span class="quanta-tree-index">${stateNumber}</span>
+          <span class="quanta-tree-main">
+            <span class="quanta-tree-name">${escapeHTML(quantum.id || `状态 ${stateNumber}`)}</span>
+            <span class="quanta-tree-meta">${visibleCount} 个元素 · ${dwell > 0 ? `${dwell.toFixed(1)} 秒` : "手动"} · ${quantum.advance === "auto" ? "自动" : "等待"}</span>
+          </span>
+        </button>`;
+      }).join("");
+      return `<section class="quanta-tree-scope">
+        ${path ? `<div class="quanta-tree-path">${escapeHTML(path)}</div>` : ""}
+        <h3>${escapeHTML(scope.title || scope.id || "未命名内容")}</h3>
+        ${rows}
+      </section>`;
+    }).join("");
+  }
+
   // ── outline panel: the shotlist riding /timeline ──────────────────────
   const SHOT_STATUS = { draft: ["草稿", ""], filled: ["已配素材", "filled"], placed: ["已上时间线", "placed"] };
   async function renderOutlinePanel(body) {
@@ -4225,7 +8305,7 @@
     if (!state.sessionId) { body.innerHTML = `<p class="placeholder">暂无会话</p>`; return; }
     let sl = null;
     try {
-      const r = await fetch(`/sessions/${state.sessionId}/timeline`);
+      const r = await apiFetch(`/sessions/${state.sessionId}/timeline`);
       if (r.ok) sl = (await r.json()).shotlist;
     } catch {}
     if (!body.isConnected || !stageTabs.includes("outline")) return;
@@ -4236,7 +8316,7 @@
     if (sl.logline) html += `<p class="outline-logline">${escapeHTML(sl.logline)}</p>`;
     let no = 0;
     for (const sc of scenes) {
-      if (sc.title) html += `<div class="outline-scene" data-scene-id="${escapeHTML(sc.id)}">${escapeHTML(sc.title)}</div>`;
+      if (sc.title) html += `<div class="outline-scene" draggable="true" data-context-drag="outline-scene" data-scene-id="${escapeHTML(sc.id)}" data-context-label="${escapeHTML(sc.title)}" title="拖到输入框作为上下文">${escapeHTML(sc.title)}</div>`;
       for (const shot of (sc.shots || [])) {
         no += 1;
         const st = SHOT_STATUS[shot.status] || SHOT_STATUS.draft;
@@ -4247,7 +8327,7 @@
           shot.mood || "",
         ].filter(Boolean).join(" · ");
         html += `
-          <div class="outline-row" data-shot-id="${escapeHTML(shot.id)}">
+          <div class="outline-row" draggable="true" data-context-drag="outline-shot" data-shot-id="${escapeHTML(shot.id)}" data-scene-id="${escapeHTML(sc.id)}" data-context-label="${escapeHTML(shot.description || "未命名镜头")}" title="拖到输入框作为上下文">
             <span class="outline-no ${st[1]}" title="${st[0]}">${no}</span>
             <span class="outline-main">
               <span class="outline-beat">${escapeHTML(shot.description || "(未命名镜头)")}</span>
@@ -4259,38 +8339,122 @@
     body.innerHTML = html;
   }
 
-  // ── background tasks panel: GET /sessions (runners + pending jobs) ────
+  // ── background tasks panel: group active work by Project ──────────────
+  function creatorTaskLabel(summary, kind = "") {
+    const text = String(summary || "").trim();
+    const haystack = `${kind} ${text}`.toLowerCase();
+    const labels = [
+      [/(render|export|encode|transcod|ffmpeg|渲染|导出|转码)/, "正在渲染画面"],
+      [/(generate[_ -]?video|video generation|生成视频)/, "正在生成视频"],
+      [/(generate[_ -]?image|image generation|生成图像)/, "正在生成图像"],
+      [/(generate[_ -]?audio|voice|speech|生成音频|配音)/, "正在处理声音"],
+      [/(download|fetch|stock media|下载|获取素材|搜索素材)/, "正在准备素材"],
+      [/(test|check|verify|inspect|probe|测试|检查|验证|审查)/, "正在检查结果"],
+      [/(build|compile|install|构建|编译|安装)/, "正在准备项目"],
+      [/(analyse|analyze|detect|track|分析|识别|跟踪)/, "正在分析画面"],
+    ];
+    const internal = /(^|\s)(local:|python\d*|node|bash|zsh|sh|uv|npm|pnpm|ffmpeg|git)(\s|$|:)|[\\/]|--?[a-z\d_-]+|[;&|`$<>]|\b(?:job|shell|build)_[a-z\d_-]+\b/i;
+    const hasChinese = /[\u3400-\u9fff]/.test(text);
+    if (text && hasChinese && !internal.test(text)) return text.slice(0, 32);
+    const match = labels.find(([pattern]) => pattern.test(haystack));
+    if (match) return match[1];
+    if (/subagent|agent/.test(String(kind).toLowerCase())) return "正在协助处理";
+    return "正在处理创作任务";
+  }
+
+  function creatorTaskStatus(status) {
+    return ({
+      submitted: "准备中",
+      pending: "等待中",
+      running: "进行中",
+      killing: "停止中…",
+      done: "已完成",
+      failed: "失败",
+    })[String(status || "").toLowerCase()] || "进行中";
+  }
+
   async function renderTasksPanel(body) {
     if (!body) return;
     let sessions = null;
     try {
-      const r = await fetch("/sessions");
+      const r = await apiFetch("/sessions?compact=1");
       if (r.ok) sessions = (await r.json()).sessions;
     } catch {}
     if (!body.isConnected || !stageTabs.includes("tasks")) return;
     if (!Array.isArray(sessions)) { body.innerHTML = `<p class="placeholder">读取失败</p>`; return; }
-    if (!sessions.length) { body.innerHTML = `<p class="placeholder">暂无运行中的会话</p>`; return; }
-    body.innerHTML = sessions.map((s) => {
-      const mine = s.session_id === state.sessionId;
-      const cls = s.turn_in_progress ? "running" : "";
-      const stateTxt = s.turn_in_progress ? "执行中" : "空闲";
-      const jobs = (s.pending_jobs || []).map((j) => `
-        <div class="task-row task-job">
-          <span class="task-dot ${j.last_polled_status === "failed" ? "failed" : "running"}"></span>
-          <span class="task-main">
-            <span class="task-name">${escapeHTML(j.summary || j.kind || j.job_id || "任务")}</span>
-            <span class="task-sub">${escapeHTML([j.provider, j.last_polled_status].filter(Boolean).join(" · "))}</span>
-          </span>
-        </div>`).join("");
-      const shellJobs = mine ? renderShellJobRows() : "";
+    const activeSessions = sessions.filter((s) => (
+      s.turn_in_progress
+      || (s.pending_jobs || []).length > 0
+      || (s.active_subagents || []).length > 0
+    ));
+    if (!activeSessions.length) { body.innerHTML = `<p class="placeholder">暂无进行中的后台任务</p>`; return; }
+    const missingProjectName = activeSessions.some((session) => (
+      session.project_id && !projectSidebarState.projectNames.has(String(session.project_id))
+    ));
+    if (missingProjectName) {
+      try {
+        const knownProjects = await fetchProjects();
+        projectSidebarState.projectNames = projectNamesFrom(knownProjects);
+      } catch {}
+    }
+
+    const projects = new Map();
+    activeSessions.forEach((session) => {
+      const projectId = String(session.project_id || "");
+      const key = projectId || `session:${session.session_id}`;
+      const group = projects.get(key) || { projectId, sessions: [] };
+      group.sessions.push(session);
+      projects.set(key, group);
+    });
+    body.innerHTML = [...projects.values()].map((group) => {
+      const currentProject = !!(
+        (group.projectId && group.projectId === state.projectId)
+        || group.sessions.some((session) => session.session_id === state.sessionId)
+      );
+      const knownProjectName = projectSidebarState.projectNames.get(group.projectId) || "";
+      const currentProjectName = state.projectName && state.projectName !== group.projectId
+        ? state.projectName
+        : "";
+      const projectLabel = currentProject
+        ? (knownProjectName || currentProjectName || "当前 Project")
+        : (knownProjectName || (group.projectId ? "其他 Project" : "独立会话"));
+      const rows = group.sessions.map((s) => {
+        const mine = s.session_id === state.sessionId;
+        const sessionRow = s.turn_in_progress ? `
+          <div class="task-row task-session">
+            <span class="task-dot running"></span>
+            <span class="task-main">
+              <span class="task-name">会话${mine ? " · 当前" : ""}</span>
+              <span class="task-sub">执行中${s.plan_mode ? " · 计划模式" : ""} · ${fmtAgo(s.last_used_at)}</span>
+            </span>
+          </div>` : "";
+        const jobs = (s.pending_jobs || []).map((j) => `
+          <div class="task-row task-job">
+            <span class="task-dot ${j.last_polled_status === "failed" ? "failed" : "running"}"></span>
+            <span class="task-main">
+              <span class="task-name">${escapeHTML(creatorTaskLabel(j.summary, j.kind))}</span>
+              <span class="task-sub">${escapeHTML(creatorTaskStatus(j.last_polled_status))}</span>
+            </span>
+          </div>`).join("");
+        const subagents = (s.active_subagents || []).map((agent) => `
+          <div class="task-row task-subagent">
+            <span class="task-dot running"></span>
+            <span class="task-main">
+              <span class="task-name"><span class="task-kind">子代理</span>${escapeHTML(creatorTaskLabel(agent.goal, "subagent"))}</span>
+              <span class="task-sub">正在协助处理</span>
+            </span>
+          </div>`).join("");
+        const shellJobs = mine ? renderShellJobRows() : "";
+        return sessionRow + jobs + subagents + shellJobs;
+      }).join("");
       return `
-        <div class="task-row" title="${escapeHTML(s.session_id)}">
-          <span class="task-dot ${cls}"></span>
-          <span class="task-main">
-            <span class="task-name">${escapeHTML(s.session_id)}${mine ? " · 当前" : ""}</span>
-            <span class="task-sub">${stateTxt}${s.plan_mode ? " · 计划模式" : ""} · ${fmtAgo(s.last_used_at)}</span>
-          </span>
-        </div>${jobs}${shellJobs}`;
+        <section class="task-project" data-project-id="${escapeHTML(group.projectId)}">
+          <div class="task-project-head">
+            <span class="task-project-label">${escapeHTML(projectLabel)}</span>
+            <span class="task-project-count">${group.sessions.length} 个会话</span>
+          </div>
+          <div class="task-project-rows">${rows}</div>
+        </section>`;
     }).join("");
   }
 
@@ -4300,16 +8464,16 @@
     if (!state.backgroundTasks.size) return "";
     const statusText = (t) => {
       if (t._killing) return "停止中…";
-      if (t.status === "running") return "运行中";
+      if (t.status === "running") return "进行中";
       if (t.status === "done") return t.exit_code === 0 || t.exit_code == null ? "完成" : `完成 (退出码 ${t.exit_code})`;
       if (t.status === "failed") return t.error === "killed by kill_job" ? "已停止" : "失败";
       return t.status || "";
     };
-    return [...state.backgroundTasks.values()].map((t) => `
+    return [...state.backgroundTasks.values()].filter((t) => t.status === "running" || t._killing).map((t) => `
       <div class="task-row task-job" data-job-id="${escapeHTML(t.job_id)}">
         <span class="task-dot ${t.status === "failed" ? "failed" : t.status === "done" ? "done" : "running"}"></span>
         <span class="task-main">
-          <span class="task-name">${escapeHTML(t.summary || t.job_id)}</span>
+          <span class="task-name">${escapeHTML(creatorTaskLabel(t.summary, "shell"))}</span>
           <span class="task-sub">${escapeHTML(statusText(t))}${t.elapsed_sec != null ? ` · ${Math.round(t.elapsed_sec)}s` : ""}</span>
         </span>
         ${t.status === "running" && !t._killing
@@ -4324,7 +8488,7 @@
     t._killing = true;
     scheduleTasksPanelRefresh();
     try {
-      const r = await fetch(
+      const r = await apiFetch(
         `/sessions/${state.sessionId}/tasks/${encodeURIComponent(jobId)}/kill`,
         { method: "POST" },
       );
@@ -4342,90 +8506,84 @@
     if (btn) killBackgroundTask(btn.getAttribute("data-task-kill"));
   });
 
-  // ── session history drawer (right-side hamburger) ─────────────────────
-  let historyDrawerOpen = false;
-  function toggleHistoryDrawer(force) {
-    const open = force ?? !historyDrawerOpen;
-    if (open === historyDrawerOpen) return;
-    historyDrawerOpen = open;
-    els.historyToggleBtn.setAttribute("aria-expanded", String(open));
-    if (open) {
-      els.historyDrawer.hidden = false;
-      els.historyDrawer.classList.remove("closing");
-      renderHistoryDrawer();
-    } else {
-      els.historyDrawer.classList.add("closing");
-      els.historyDrawer.addEventListener("animationend", () => {
-        if (!historyDrawerOpen) {
-          els.historyDrawer.hidden = true;
-          els.historyDrawer.classList.remove("closing");
-        }
-      }, { once: true });
+  function hydrateHistoryMessages(session) {
+    state.turns = [];
+    state.currentTurn = null;
+    state.sessionTitle = session.title || null;
+    state.userMessageCount = 0;
+    els.sessionLabel.textContent = state.sessionTitle || state.sessionId || "—";
+    const msgs = session.messages || [];
+    let currentTurn = null;
+    for (const msg of msgs) {
+      if (msg.role === "user") {
+        currentTurn = newTurn(msg.content || "", msg.timestamp, msg.skillSpace || [], msg.workspaceContext || []);
+        state.turns.push(currentTurn);
+        state.userMessageCount++;
+      } else if (msg.role === "status" && msg.statusType === "guidance" && currentTurn) {
+        currentTurn.guidance.push(msg.content || "");
+      } else if (msg.role === "status" && currentTurn) {
+        currentTurn.assistantText = msg.content || "";
+        currentTurn.completedAt = Number(msg.timestamp) || Date.now();
+        currentTurn.complete = true;
+      }
+    }
+    state.currentTurn = state.turns[state.turns.length - 1] || null;
+    if (state.sessionId && Array.isArray(session.timeline_markers)) {
+      const markers = session.timeline_markers.filter((marker) => (
+        marker && Number.isFinite(Number(marker.time)) && Number(marker.time) >= 0
+      )).slice(0, 500);
+      try { window.localStorage.setItem(markerKey(), JSON.stringify(markers)); } catch {}
+      TL.markers = markers;
     }
   }
-  els.historyToggleBtn.addEventListener("click", () => toggleHistoryDrawer());
 
-  async function renderHistoryDrawer() {
-    const body = els.historyDrawerBody;
-    if (!body) return;
-    body.innerHTML = `<p class="placeholder">加载中…</p>`;
-    let sessions = null;
-    try {
-      const r = await fetch("/session-history/list?limit=50");
-      if (r.ok) sessions = (await r.json()).sessions;
-    } catch {}
-    if (!historyDrawerOpen) return;
-    if (!Array.isArray(sessions)) { body.innerHTML = `<p class="placeholder">读取失败</p>`; return; }
-    if (!sessions.length) { body.innerHTML = `<p class="placeholder">暂无历史会话</p>`; return; }
-    body.innerHTML = sessions.map((s) => {
-      const title = s.title || "Lumeri Session";
-      const time = s.updated_at ? fmtAgo(new Date(s.updated_at).getTime() / 1000) : "";
-      const msgs = s.message_count || 0;
-      return `
-        <button type="button" class="history-row" data-snapshot-id="${escapeHTML(s.id)}">
-          <span class="task-main">
-            <span class="task-name">${escapeHTML(title)}</span>
-            <span class="task-sub">${msgs} 条消息${time ? " · " + time : ""}</span>
-          </span>
-        </button>`;
-    }).join("");
+  async function restoreHistoryRecord(session) {
+    if (!session.project_id) {
+      const activationSeq = ++runtimeActivationSeq;
+      if (state.sessionId) await autoSaveSession();
+      await detachRuntime();
+      if (activationSeq !== runtimeActivationSeq) return false;
+      resetRuntimeView();
+      state.sessionId = null;
+      state.chatOnly = true;
+      state.activeHistoryId = session.id || null;
+      hydrateHistoryMessages(session);
+      render();
+      return true;
+    }
 
-    body.querySelectorAll(".history-row").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const id = btn.dataset.snapshotId;
-        if (!id) return;
-        loadHistorySession(id);
-        toggleHistoryDrawer(false);
-      });
+    if (!session.v3_session_id || !session.run_id) {
+      throw new Error("历史工程缺少 session/run 关联，已拒绝创建替代工程。");
+    }
+    const resumed = await resumeSession(session.v3_session_id, {
+      project_id: session.project_id,
+      run_id: session.run_id,
+      hydrateHistory: () => {
+        if (!restoreCachedSessionView(session.v3_session_id)) {
+          hydrateHistoryMessages(session);
+        }
+      },
     });
+    if (!resumed) return false;
+    await autoSaveSession();
+    render();
+    return true;
   }
 
   async function loadHistorySession(snapshotId) {
     try {
-      const r = await fetch(`/session-history/${encodeURIComponent(snapshotId)}`);
-      if (!r.ok) return;
+      const r = await apiFetch(`/session-history/${encodeURIComponent(snapshotId)}`);
+      if (!r.ok) return false;
       const session = await r.json();
-      state.turns = [];
-      state.currentTurn = null;
-      state.sessionTitle = session.title || null;
-      state.userMessageCount = 0;
-      els.sessionLabel.textContent = state.sessionTitle || state.sessionId || "—";
-      const msgs = session.messages || [];
-      let currentTurn = null;
-      for (const msg of msgs) {
-        if (msg.role === "user") {
-          currentTurn = newTurn(msg.content || "");
-          state.turns.push(currentTurn);
-          state.userMessageCount++;
-        } else if (msg.role === "status" && msg.statusType === "guidance" && currentTurn) {
-          currentTurn.guidance.push(msg.content || "");
-        } else if (msg.role === "status" && currentTurn) {
-          currentTurn.assistantText = msg.content || "";
-          currentTurn.complete = true;
-        }
+      return restoreHistoryRecord(session);
+    } catch (err) {
+      state.errors.push(`history restore failed: ${err.message}`);
+      if (state.currentTurn) {
+        state.currentTurn.banners.push({ kind: "turn_error", text: "历史工程未能恢复；没有切换到一个假的空工程。" });
       }
       render();
-    } catch {}
+      return false;
+    }
   }
 
   // ── files panel: whitelisted read-only browser (/files/*) ────────────
@@ -4439,15 +8597,29 @@
   };
   async function renderFilesPanel(body) {
     if (!body) return;
+    if (isTesterManagedWorkspace()) {
+      body.innerHTML = `<p class="placeholder">测试版仅显示当前会话已登记的产物</p>`;
+      return;
+    }
     if (!filesState) {
       let roots = [];
       try {
-        const r = await fetch("/files/roots");
+        const r = await apiFetch("/files/roots");
         if (r.ok) roots = (await r.json()).roots || [];
       } catch {}
       if (!body.isConnected || !stageTabs.includes("files")) return;
       let html = "";
       if (state.sessionId) {
+        if (state.projectId && state.projectSourceRoot) {
+          html += `<button type="button" class="file-row" data-file-root="project_source">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-folder"/></svg>
+            <span class="file-name">Project 源文件夹</span></button>`;
+        }
+        if (state.projectId) {
+          html += `<button type="button" class="file-row" data-file-root="project_edit">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-folder"/></svg>
+            <span class="file-name">Lumeri 剪辑目录</span></button>`;
+        }
         html += `<button type="button" class="file-row" data-file-root="session">
           <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-folder"/></svg>
           <span class="file-name">当前会话工作区</span></button>`;
@@ -4463,7 +8635,7 @@
     const qs = `root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}${session ? `&session=${encodeURIComponent(session)}` : ""}`;
     let data = null;
     try {
-      const r = await fetch(`/files/list?${qs}`);
+      const r = await apiFetch(`/files/list?${qs}`);
       if (r.ok) data = await r.json();
     } catch {}
     if (!body.isConnected || !stageTabs.includes("files")) return;
@@ -4489,11 +8661,125 @@
       ${rows || `<p class="placeholder">空目录</p>`}
       ${data.truncated ? `<p class="placeholder">（仅显示前 500 项）</p>` : ""}`;
   }
+  async function renderLibraryPanel(body) {
+    if (!body) return;
+    const sessionId = state.sessionId;
+    const activationSeq = runtimeActivationSeq;
+    const isCurrentLibraryPanel = () => (
+      body.isConnected
+      && stageTabs.includes("library")
+      && state.sessionId === sessionId
+      && runtimeActivationSeq === activationSeq
+    );
+    if (state.mediaLibraryStatus === "idle" || state.mediaLibraryStatus === "error") {
+      body.innerHTML = `${librarySectionsHtml()}<p class="placeholder">加载中…</p>`;
+      await fetchMediaLibrary();
+      if (!isCurrentLibraryPanel()) return;
+    }
+    if (state.mediaLibraryStatus === "loading") {
+      body.innerHTML = `${librarySectionsHtml()}<p class="placeholder">加载中…</p>`;
+      return;
+    }
+    if (state.mediaLibraryStatus === "signed-out" && state.librarySection === "media") {
+      body.innerHTML = `${librarySectionsHtml()}<p class="placeholder">登录后可用</p>`;
+      return;
+    }
+    const visibleAssets = libraryAssetsForSection();
+    if (!visibleAssets.length) {
+      body.innerHTML = `${librarySectionsHtml()}<p class="placeholder">${state.librarySection === "media" ? "暂无媒体素材" : "暂无非媒体素材"}</p>`;
+      return;
+    }
+    const roughcutIds = visibleAssets
+      .filter((asset) => {
+        if (state.librarySection !== "media") return false;
+        const assetId = asset.asset_id || asset.id || "";
+        const summary = asset.annotation_summary || {};
+        const tags = [...(summary.tags || []), ...(summary.labels || [])];
+        return assetId && tags.includes("roughcut") && !state.roughcutManifests.has(assetId);
+      })
+      .map((asset) => asset.asset_id || asset.id);
+    if (roughcutIds.length) {
+      await Promise.all(roughcutIds.map((assetId) => loadRoughcutManifest(assetId).catch(() => null)));
+      if (!isCurrentLibraryPanel()) return;
+    }
+    if (state.librarySection === "non-media") {
+      body.innerHTML = `${librarySectionsHtml()}${renderNonMediaLibraryCards(visibleAssets)}`;
+      syncLibrarySectionUi();
+      scrollFocusedLibraryAsset();
+      return;
+    }
+    const cards = visibleAssets.map((asset) => {
+      const assetId = asset.asset_id || asset.id || "";
+      const kind = asset.media_kind || "media";
+      const kindLabel = LIBRARY_KIND_LABEL[kind] || "素材";
+      const title = libraryDisplayName(asset, kindLabel);
+      const summary = asset.annotation_summary || {};
+      const allTags = [...(summary.tags || []), ...(summary.labels || [])];
+      const shownTags = allTags.slice(0, 2);
+      const moreTags = allTags.length - shownTags.length;
+      const thumb = asset.thumbnail_src
+        ? `<img class="library-thumb" src="${escapeHTML(asset.thumbnail_src)}" alt="" loading="lazy" />`
+        : `<div class="library-thumb blank" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#${LIBRARY_KIND_ICON[kind] || "i-file"}"/></svg></div>`;
+      const tagsHtml = shownTags.length
+        ? `<div class="library-tags">${shownTags.map((t) => `<span>${escapeHTML(t)}</span>`).join("")}${moreTags > 0 ? `<span>+${moreTags}</span>` : ""}</div>`
+        : "";
+      const dur = kind !== "image" && formatMediaDuration(asset.duration);
+      const roughcut = state.roughcutManifests.get(assetId);
+      return `
+        <div class="library-card" data-library-asset="${escapeHTML(assetId)}" title="${escapeHTML(asset.name || assetId)}">
+          ${thumb}
+          <div class="library-card-body">
+            <div class="library-title">${escapeHTML(title)}</div>
+            <div class="library-meta">${escapeHTML(kindLabel)}${dur ? " · " + escapeHTML(dur) : ""}</div>
+            ${tagsHtml}
+            ${asset.tester_session_asset ? "" : `<div class="library-card-actions">
+              ${kind === "video" || kind === "audio" ? `<button type="button" class="library-small-btn icon-btn" title="粗剪准备" aria-label="粗剪准备" data-panel-lib-roughcut="${escapeHTML(assetId)}"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-wand"/></svg></button>` : ""}
+              <button type="button" class="library-small-btn icon-btn" title="标注" aria-label="标注" data-panel-lib-annotate="${escapeHTML(assetId)}"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-wand"/></svg></button>
+              <button type="button" class="library-small-btn icon-btn" title="标记" aria-label="标记" data-panel-lib-load="${escapeHTML(assetId)}"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-marker"/></svg></button>
+            </div>`}
+            ${roughcut ? renderRoughcutReview(asset, roughcut) : ""}
+          </div>
+        </div>`;
+    }).join("");
+    body.innerHTML = `${librarySectionsHtml()}${cards}`;
+    syncLibrarySectionUi();
+    wireRoughcutControls(body);
+  }
+
   stagePanel?.addEventListener("click", (e) => {
+    const skillSelect = e.target.closest("[data-skill-space-select]");
+    if (skillSelect) { toggleSkillSpaceArtifact(skillSelect.dataset.skillSpaceSelect); return; }
+    if (e.target.closest("[data-skill-space-retry]")) {
+      state.skillCloudStatus = "idle";
+      refreshPanel("skills");
+      return;
+    }
+    const quantaState = e.target.closest("[data-quanta-state]");
+    if (quantaState) {
+      state.selectedQuantaStateId = quantaState.dataset.quantaState;
+      renderQuantaCanvas();
+      refreshPanel("quanta");
+      return;
+    }
+    const libRoughcut = e.target.closest("[data-panel-lib-roughcut]");
+    if (libRoughcut) { startRoughcutPreparation(libRoughcut.dataset.panelLibRoughcut).catch(() => {}); return; }
+    const libAnnotate = e.target.closest("[data-panel-lib-annotate]");
+    if (libAnnotate) { annotateLibraryAsset(libAnnotate.dataset.panelLibAnnotate).catch(() => {}); return; }
+    const libLoad = e.target.closest("[data-panel-lib-load]");
+    if (libLoad) { Promise.all([loadMediaAnnotations(libLoad.dataset.panelLibLoad), loadRoughcutManifest(libLoad.dataset.panelLibLoad)]).then(() => refreshPanel("library")).catch(() => {}); return; }
+    const roughcutReview = e.target.closest("[data-roughcut-review]");
+    if (roughcutReview) { reviewRoughcut(roughcutReview).then(() => refreshPanel("library")).catch(() => {}); return; }
+    const roughcutSeek = e.target.closest("[data-roughcut-seek]");
+    if (roughcutSeek) {
+      const player = roughcutSeek.closest(".library-card")?.querySelector(".roughcut-preview");
+      if (player) { player.currentTime = Number(roughcutSeek.dataset.roughcutSeek || 0); player.play().catch(() => {}); }
+      return;
+    }
     const rootBtn = e.target.closest("[data-file-root]");
     if (rootBtn) {
       const key = rootBtn.dataset.fileRoot;
-      filesState = { root: key, session: key === "session" ? state.sessionId : "", path: "" };
+      const sessionBound = ["session", "project_source", "project_edit"].includes(key);
+      filesState = { root: key, session: sessionBound ? state.sessionId : "", path: "" };
       refreshPanel("files");
       return;
     }
@@ -4514,19 +8800,36 @@
     }
   });
 
+  els.skillSpaceSelection?.addEventListener("click", (e) => {
+    const remove = e.target.closest("[data-skill-space-remove]");
+    if (!remove) return;
+    toggleSkillSpaceArtifact(remove.dataset.skillSpaceRemove, { remove: true });
+  });
+  els.composerContext?.addEventListener("click", (e) => {
+    const remove = e.target.closest("[data-composer-context-remove]");
+    if (!remove) return;
+    removeComposerContext(remove.dataset.composerContextRemove);
+  });
+
   // Visible live modules refresh together; files/history remain stable while
   // the user is reading or navigating them.
   window.setInterval(() => {
     if (document.visibilityState === "hidden") return;
+    if (stageTabs.includes("quanta")) fetchProjectQuanta();
     if (stageTabs.includes("outline")) refreshPanel("outline");
     if (stageTabs.includes("tasks")) refreshPanel("tasks");
   }, 5000);
 
+  window.setInterval(() => {
+    if (document.visibilityState === "hidden" || !state.turnInProgress) return;
+    render();
+  }, 1000);
+
   // First-run discovery pulse on "+" (controls are hidden behind it now).
   try {
-    if (!window.localStorage.getItem("lumeri:v3:plus-seen")) {
+    if (!window.localStorage.getItem(`${surfaceStoragePrefix}:plus-seen`)) {
       plusBtn.classList.add("pulse");
-      window.localStorage.setItem("lumeri:v3:plus-seen", "1");
+      window.localStorage.setItem(`${surfaceStoragePrefix}:plus-seen`, "1");
     }
   } catch {}
 
@@ -4547,7 +8850,7 @@
   // the same session) stay in sync.
   async function setPlanMode(enabled) {
     if (!state.sessionId) return;
-    const r = await fetch(`/sessions/${state.sessionId}/plan_mode`, {
+    const r = await apiFetch(`/sessions/${state.sessionId}/plan_mode`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled }),
@@ -4593,14 +8896,14 @@
   }
   async function syncSandbox() {
     try {
-      const r = await fetch("/settings/sandbox");
+      const r = await apiFetch("/settings/sandbox");
       if (r.ok) renderSandbox(!!(await r.json()).sandbox_disabled);
     } catch {}
   }
   els.sandboxBtn.addEventListener("click", async () => {
     const next = !els.sandboxBtn.classList.contains("off");
     try {
-      const r = await fetch("/settings/sandbox", {
+      const r = await apiFetch("/settings/sandbox", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ disabled: next }),
@@ -4614,238 +8917,62 @@
   syncSandbox();
   setupTimelineDirectEdit();
 
-  // ── account / login (Google + email one-time-code) ──────────────────
-  function setupAuth() {
-    const modal = $("#auth-modal");
-    const accountBtn = $("#account-btn");
-    if (!modal || !accountBtn) return;
-    const viewSignin = $("#auth-view-signin");
-    const viewAccount = $("#auth-view-account");
-    const googleBtn = $("#auth-google-btn");
-    const divider = $("#auth-divider");
-    const emailForm = $("#auth-email-form");
-    const codeForm = $("#auth-code-form");
-    const emailInput = $("#auth-email");
-    const codeInput = $("#auth-code");
-    const sendBtn = $("#auth-send-code");
-    const verifyBtn = $("#auth-verify");
-    const resendBtn = $("#auth-resend");
-    const changeBtn = $("#auth-change-email");
-    const codeTarget = $("#auth-code-target");
-    const errBox = $("#auth-error");
-    const logoutBtn = $("#auth-logout");
-    const acctEmail = $("#auth-account-email");
-    const avatar = $("#auth-avatar");
+  const { setupAuth } = window.LumeriV3Auth.createAuth({
+    $,
+    apiFetch,
+    byokAllowed,
+    getCurrentAuthSession: () => currentAuthSession,
+    setCurrentAuthSession: (next) => { currentAuthSession = next; },
+    resetSkillCloudState,
+    openModelPicker,
+    openSetupPanel,
+    els,
+    slashSync,
+  });
+  setupAuth(initialAuthSession);
 
-    let session = null;
-    let pendingEmail = "";
-    let resendTimer = null;
-
-    const showErr = (msg) => { errBox.textContent = msg || ""; errBox.hidden = !msg; };
-    const clearErr = () => showErr("");
-
-    // Signed in = Google photo when present, else round initial badge;
-    // signed out = person icon. Email lives in title.
-    function applySession(data) {
-      session = data || {};
-      const acct = session.account;
-      if (acct && acct.email) {
-        if (acct.picture) {
-          accountBtn.innerHTML = "";
-          const img = document.createElement("img");
-          img.className = "account-photo";
-          img.alt = "";
-          img.referrerPolicy = "no-referrer";
-          img.src = acct.picture;
-          img.onerror = () => { accountBtn.textContent = acct.email.trim().charAt(0).toUpperCase(); };
-          accountBtn.appendChild(img);
-        } else {
-          accountBtn.textContent = acct.email.trim().charAt(0).toUpperCase();
-        }
-        accountBtn.title = acct.email;
-        accountBtn.setAttribute("aria-label", `账户：${acct.email}`);
-        accountBtn.classList.add("signed-in");
-      } else {
-        accountBtn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-user"/></svg>';
-        accountBtn.title = "登录 / 账户";
-        accountBtn.setAttribute("aria-label", "登录 / 账户");
-        accountBtn.classList.remove("signed-in");
+  async function restoreCurrentSessionOrCreate() {
+    let saved = null;
+    try {
+      const r = await apiFetch("/session-history");
+      if (r.ok) {
+        saved = await r.json();
       }
+    } catch {}
+    // Failure to read any history may start a new project.  Once a persisted
+    // production/chat record was read, however, its restore error must escape
+    // to the boot error UI; silently replacing it would orphan real work.
+    if (saved?.project_id || (saved?.messages || []).length) {
+      return restoreHistoryRecord(saved);
     }
-
-    async function refreshSession() {
-      try {
-        const r = await fetch("/auth/session");
-        if (r.ok) applySession(await r.json());
-      } catch {}
-      return session;
-    }
-
-    async function postAuth(url, body) {
-      const r = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body || {}),
-      });
-      let data = {};
-      try { data = await r.json(); } catch {}
-      if (!r.ok) throw new Error(data.user_message || data.error || `请求失败 (${r.status})`);
-      return data;
-    }
-
-    function stopResend() { if (resendTimer) { clearInterval(resendTimer); resendTimer = null; } }
-    function startResend(secs) {
-      stopResend();
-      let left = secs;
-      const tick = () => {
-        resendBtn.disabled = left > 0;
-        resendBtn.textContent = left > 0 ? `重新发送（${left}s）` : "重新发送";
-        if (left <= 0) { stopResend(); return; }
-        left -= 1;
-      };
-      tick();
-      resendTimer = setInterval(tick, 1000);
-    }
-
-    function showEmailStep() { emailForm.hidden = false; codeForm.hidden = true; stopResend(); }
-    function showCodeStep(email) {
-      pendingEmail = email;
-      codeTarget.textContent = email;
-      emailForm.hidden = true;
-      codeForm.hidden = false;
-      codeInput.value = "";
-      startResend(60);
-      codeInput.focus();
-    }
-
-    function renderModal() {
-      clearErr();
-      const acct = session && session.account;
-      viewAccount.hidden = !acct;
-      viewSignin.hidden = !!acct;
-      if (acct) {
-        acctEmail.textContent = acct.email || acct.name || "已登录";
-        if (acct.picture) {
-          avatar.classList.add("has-photo");
-          avatar.innerHTML = "";
-          const img = document.createElement("img");
-          img.className = "account-photo";
-          img.alt = "";
-          img.referrerPolicy = "no-referrer";
-          img.src = acct.picture;
-          img.onerror = () => {
-            avatar.classList.remove("has-photo");
-            avatar.textContent = (acct.email || acct.name || "?").trim().charAt(0).toUpperCase();
-          };
-          avatar.appendChild(img);
-        } else {
-          avatar.classList.remove("has-photo");
-          avatar.textContent = (acct.email || acct.name || "?").trim().charAt(0).toUpperCase();
-        }
-        return;
-      }
-      const hasGoogle = !!(session && session.has_google_client_id);
-      googleBtn.hidden = !hasGoogle;
-      divider.hidden = !hasGoogle;
-      showEmailStep();
-    }
-
-    function openModal() {
-      renderModal();
-      modal.hidden = false;
-      if (!(session && session.account)) emailInput.focus();
-    }
-    function closeModal() { modal.hidden = true; stopResend(); clearErr(); }
-
-    async function requestCode(email) {
-      clearErr();
-      sendBtn.disabled = true; sendBtn.textContent = "发送中…";
-      try {
-        await postAuth("/auth/email/start", { email });
-        showCodeStep(email);
-      } catch (e) {
-        showErr(e.message);
-      } finally {
-        sendBtn.disabled = false; sendBtn.textContent = "发送验证码";
-      }
-    }
-
-    accountBtn.addEventListener("click", () => { modal.hidden ? openModal() : closeModal(); });
-    modal.querySelectorAll("[data-auth-close]").forEach((el) => el.addEventListener("click", closeModal));
-    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !modal.hidden) closeModal(); });
-
-    googleBtn.addEventListener("click", async () => {
-      clearErr();
-      try {
-        const data = await postAuth("/auth/google/start", {});
-        if (!data.authorization_url) throw new Error("Google 登录未配置");
-        const win = window.open(data.authorization_url, "lumeri-google-login", "width=480,height=640");
-        const onMsg = async (ev) => {
-          if (ev.origin !== location.origin) return;
-          if (!ev.data || ev.data.type !== "lumeri-auth-complete") return;
-          window.removeEventListener("message", onMsg);
-          try { win && win.close(); } catch {}
-          await refreshSession();
-          if (session && session.account) { renderModal(); setTimeout(closeModal, 600); }
-          else showErr("Google 登录未完成");
-        };
-        window.addEventListener("message", onMsg);
-      } catch (e) { showErr(e.message); }
-    });
-
-    emailForm.addEventListener("submit", (e) => {
-      e.preventDefault();
-      const v = emailInput.value.trim();
-      if (v) requestCode(v);
-    });
-    resendBtn.addEventListener("click", () => { if (pendingEmail) requestCode(pendingEmail); });
-    changeBtn.addEventListener("click", () => { showEmailStep(); clearErr(); emailInput.focus(); });
-
-    codeForm.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      clearErr();
-      const code = codeInput.value.replace(/\D/g, "");
-      if (code.length !== 6) { showErr("请输入 6 位数字验证码"); return; }
-      verifyBtn.disabled = true; verifyBtn.textContent = "登录中…";
-      try {
-        const data = await postAuth("/auth/email/verify", { email: pendingEmail, code });
-        applySession(data);
-        renderModal();
-        setTimeout(closeModal, 500);
-      } catch (e2) {
-        showErr(e2.message);
-      } finally {
-        verifyBtn.disabled = false; verifyBtn.textContent = "登录";
-      }
-    });
-
-    logoutBtn.addEventListener("click", async () => {
-      try { applySession(await postAuth("/auth/logout", {})); } catch {}
-      renderModal();
-    });
-
-    refreshSession().then(() => {
-      const params = new URLSearchParams(location.search || "");
-      if (params.get("login") === "1" || params.get("auth") === "1") openModal();
-    });
+    return createSession();
   }
-  setupAuth();
 
-  // boot
-  createSession().catch((err) => {
+  // Normal Web boot restores the durable current project. CLI preview only
+  // observes the explicit live session supplied by the terminal.
+  const boot = isCliPreview ? attachSession(cliPreviewSessionId) : isSegmentWindow ? attachSession(segmentWindowSessionId) : restoreCurrentSessionOrCreate();
+  if (!isCliPreview && !isSegmentWindow) {
+    bindProjectSidebarInteractions();
+    renderProjectSidebar();
+  }
+  if (!isCliPreview) window.setInterval(refreshProjectSessionIndicators, 8000);
+  boot.catch((err) => {
     state.errors.push(`initial session failed: ${err.message}`);
     setConnPill("failed", "failed");
     render();
   });
+  if (isSegmentWindow) {
+    boot.then(() => {
+      if (state.sessionId === segmentWindowSessionId) openSegmentWorkspace(segmentWindowClipId);
+    }).catch(() => {});
+  }
 
-  // teardown on page hide
+  // Detach the browser only. Session runners are server-owned and may be
+  // executing in parallel with other chats or while this page reloads.
   window.addEventListener("beforeunload", () => {
     stopTimelinePoll();
     if (voiceInput.listening) {
       try { voiceInput.recognition?.abort(); } catch {}
-    }
-    if (state.sessionId) {
-      navigator.sendBeacon?.(`/sessions/${state.sessionId}/close`);
     }
   });
 })();

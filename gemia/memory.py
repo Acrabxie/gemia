@@ -170,7 +170,13 @@ def _read_json(path: Path, default: Any) -> Any:
 
 def read_user_config() -> dict[str, Any]:
     data = _read_json(config_path(), {})
-    return data if isinstance(data, dict) else {}
+    legacy = data if isinstance(data, dict) else {}
+    try:
+        from gemia.local_config import merge_with_secret_config
+
+        return merge_with_secret_config(legacy)
+    except Exception:
+        return legacy
 
 
 def write_user_config(patch: dict[str, Any]) -> dict[str, Any]:
@@ -182,15 +188,61 @@ def write_user_config(patch: dict[str, Any]) -> dict[str, Any]:
     default. Writes are atomic-ish (whole-file rewrite, pretty-printed).
     """
     path = config_path()
-    config = read_user_config()
+    # The old file remains a compatibility/secret mirror.  Read it directly so
+    # a public overlay is never accidentally serialized back into that layer.
+    config = _read_json(path, {})
+    if not isinstance(config, dict):
+        config = {}
+    try:
+        from gemia.local_config import merge_with_secret_config
+
+        runtime_config = merge_with_secret_config(config)
+    except Exception:
+        runtime_config = copy.deepcopy(config)
     for key, value in patch.items():
         if value is None:
             config.pop(key, None)
+            runtime_config.pop(key, None)
         else:
             config[key] = value
+            runtime_config[key] = value
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return config
+    if any(
+        key in patch
+        for key in (
+            "lumeri_v3_provider",
+            "lumeri_v3_model",
+            "lumeri_v3_effort",
+            "brain_active_profile",
+            "brain_provider_profiles",
+        )
+    ):
+        try:
+            from gemia import brain_config
+            from gemia.local_config import write_public_update
+
+            public_body: dict[str, Any] = {}
+            for config_key, body_key in (
+                ("lumeri_v3_provider", "provider"),
+                ("lumeri_v3_model", "model"),
+                ("lumeri_v3_effort", "effort"),
+            ):
+                if config_key in patch:
+                    public_body[body_key] = patch.get(config_key) or ""
+            if public_body:
+                brain_config.apply_update(
+                    runtime_config, public_body, sync_env=False
+                )
+            write_public_update(runtime_config, {})
+        except Exception:
+            pass
+    try:
+        from gemia.local_config import merge_with_secret_config
+
+        return merge_with_secret_config(config)
+    except Exception:
+        return config
 
 
 def _clean_string(value: Any) -> str:
@@ -646,42 +698,6 @@ _MODEL_OVERRIDE_ENV = "LUMERI_V3_MODEL"
 _MODEL_OVERRIDE_CONFIG = "lumeri_v3_model"
 _EFFORT_OVERRIDE_ENV = "LUMERI_V3_EFFORT"
 _EFFORT_OVERRIDE_CONFIG = "lumeri_v3_effort"
-_FORCE_STRONGEST_CONFIG = "lumeri_v3_force_strongest"
-_STRONGEST_MODEL_CONFIG = "lumeri_v3_strongest_model"
-_STRONGEST_PROVIDER_CONFIG = "lumeri_v3_strongest_provider"
-_STRONGEST_EFFORT_CONFIG = "lumeri_v3_strongest_effort"
-
-
-def _config_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def strongest_model_lock(slot: str = "planner") -> dict[str, Any]:
-    """Return the fail-closed strongest-model lock for the planner slot."""
-    if slot != "planner":
-        return {"enabled": False}
-    config = read_user_config()
-    enabled = _config_bool(config.get(_FORCE_STRONGEST_CONFIG))
-    if not enabled:
-        return {"enabled": False}
-    catalog = model_catalog(slot)
-    fallback = catalog[0]["id"] if catalog else _slot_default(slot, load_model_profile())
-    model = _clean_string(config.get(_STRONGEST_MODEL_CONFIG)) or fallback
-    provider = (
-        _clean_string(config.get(_STRONGEST_PROVIDER_CONFIG))
-        or _clean_string(config.get("lumeri_v3_provider"))
-    ).lower()
-    effort = _clean_string(config.get(_STRONGEST_EFFORT_CONFIG)).lower() or "max"
-    if effort not in effort_options(slot):
-        effort = "max"
-    return {
-        "enabled": True,
-        "model": model,
-        "provider": provider,
-        "effort": effort,
-    }
 
 
 def _slot_info(slot: str, profile: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -720,6 +736,37 @@ def model_catalog(slot: str = "planner") -> list[dict[str, str]]:
     return items
 
 
+def _selection_catalog(slot: str = "planner") -> list[dict[str, str]]:
+    """Return the models selectable inside the active provider configuration."""
+    if slot != "planner":
+        return model_catalog(slot)
+    from gemia import brain_config
+
+    config = read_user_config()
+    status = brain_config.read_status(config)
+    provider = str(status.get("provider") or "").strip()
+    spec = brain_config.provider_spec(provider)
+    if not spec:
+        return model_catalog(slot)
+
+    labels = {item["id"]: item["label"] for item in model_catalog(slot)}
+    model_ids = list(spec.get("model_presets") or [])
+    current = (
+        _clean_string(config.get(_MODEL_OVERRIDE_CONFIG))
+        or _clean_string(os.environ.get(_MODEL_OVERRIDE_ENV))
+    )
+    if current and brain_config.model_matches_provider(provider, current) and current not in model_ids:
+        model_ids.append(current)
+    recommended = brain_config.recommended_model(provider)
+    if recommended in model_ids:
+        model_ids.remove(recommended)
+        model_ids.insert(0, recommended)
+    return [
+        {"id": model_id, "label": labels.get(model_id, model_id), "provider": provider}
+        for model_id in model_ids
+    ]
+
+
 def effort_options(slot: str = "planner") -> list[str]:
     info = _slot_info(slot)
     efforts = info.get("efforts")
@@ -735,35 +782,22 @@ def default_effort(slot: str = "planner") -> str:
 def active_model_selection(slot: str = "planner") -> dict[str, Any]:
     """Resolve the currently-active model + effort for ``slot``.
 
-    Reflects the same override precedence the orchestrator uses (env → config →
+    Reflects the same override precedence the orchestrator uses (config → env →
     backend default) so the UI shows exactly what a turn will run with.
     """
-    catalog = model_catalog(slot)
+    catalog = _selection_catalog(slot)
     default_model = catalog[0]["id"] if catalog else _slot_default(slot, load_model_profile())
-    lock = strongest_model_lock(slot)
-    if lock.get("enabled"):
-        model = str(lock.get("model") or default_model)
-        label = next((item["label"] for item in catalog if item["id"] == model), model)
-        return {
-            "model": model,
-            "label": label,
-            "effort": str(lock.get("effort") or "max"),
-            "provider": str(lock.get("provider") or ""),
-            "locked": True,
-            "lock_reason": "strongest",
-            "is_default_model": False,
-            "is_default_effort": False,
-            "default_model": default_model,
-            "default_effort": default_effort(slot),
-        }
+    config = read_user_config()
+    from gemia import brain_config
 
+    provider = str(brain_config.read_status(config).get("provider") or "")
     model_override = (
-        _clean_string(os.environ.get(_MODEL_OVERRIDE_ENV))
-        or _clean_string(read_user_config().get(_MODEL_OVERRIDE_CONFIG))
+        _clean_string(config.get(_MODEL_OVERRIDE_CONFIG))
+        or _clean_string(os.environ.get(_MODEL_OVERRIDE_ENV))
     )
     effort_override = (
-        _clean_string(os.environ.get(_EFFORT_OVERRIDE_ENV)).lower()
-        or _clean_string(read_user_config().get(_EFFORT_OVERRIDE_CONFIG)).lower()
+        _clean_string(config.get(_EFFORT_OVERRIDE_CONFIG)).lower()
+        or _clean_string(os.environ.get(_EFFORT_OVERRIDE_ENV)).lower()
     )
 
     model = model_override or default_model
@@ -777,7 +811,7 @@ def active_model_selection(slot: str = "planner") -> dict[str, Any]:
         "is_default_effort": not effort_override,
         "default_model": default_model,
         "default_effort": default_effort(slot),
-        "locked": False,
+        "provider": provider,
     }
 
 
@@ -808,6 +842,7 @@ def set_model_selection(
     *,
     model: Any = _UNSET,
     effort: Any = _UNSET,
+    fast_mode: Any = _UNSET,
     slot: str = "planner",
 ) -> dict[str, Any]:
     """Persist a ``/model`` selection and return the new active selection.
@@ -816,12 +851,7 @@ def set_model_selection(
     ``None`` / ``""`` / ``"default"`` = reset to the backend default; any other
     value = set it (model accepts id, index, or fuzzy match).
     """
-    lock = strongest_model_lock(slot)
-    if lock.get("enabled") and (model is not _UNSET or effort is not _UNSET):
-        raise ValueError(
-            f"model is locked to strongest: {lock.get('model')} (effort={lock.get('effort')})"
-        )
-    catalog = model_catalog(slot)
+    catalog = _selection_catalog(slot)
     patch: dict[str, Any] = {}
 
     if model is not _UNSET:
@@ -844,6 +874,12 @@ def set_model_selection(
 
     if patch:
         write_user_config(patch)
+    if fast_mode is not _UNSET:
+        if not isinstance(fast_mode, bool):
+            raise ValueError("fast_mode must be a boolean")
+        from gemia.local_config import write_public_update
+
+        write_public_update(read_user_config(), {"fast_mode": fast_mode})
     return active_model_selection(slot)
 
 
@@ -858,6 +894,7 @@ def apply_model_selection(payload: dict[str, Any], slot: str = "planner") -> dic
     return set_model_selection(
         model=payload["model"] if "model" in payload else _UNSET,
         effort=payload["effort"] if "effort" in payload else _UNSET,
+        fast_mode=payload["fast_mode"] if "fast_mode" in payload else _UNSET,
         slot=slot,
     )
 
@@ -866,9 +903,9 @@ def model_selection_payload(slot: str = "planner") -> dict[str, Any]:
     """Full ``/model`` GET payload: catalog + effort options + active selection."""
     from gemia.model_strength import MEDIA_MODEL_PRIORITY
 
-    return {
+    payload = {
         "slot": slot,
-        "priority": model_catalog(slot),
+        "priority": _selection_catalog(slot),
         "efforts": effort_options(slot),
         "active": active_model_selection(slot),
         "media_strength_policy": {
@@ -884,6 +921,20 @@ def model_selection_payload(slot: str = "planner") -> dict[str, Any]:
             for media_slot, backends in MEDIA_MODEL_PRIORITY.items()
         },
     }
+    try:
+        from gemia.local_config import load_or_create
+
+        local = load_or_create(read_user_config())
+        payload["fast_mode"] = local.get("features", {}).get("fast_mode", {})
+    except Exception:
+        payload["fast_mode"] = {
+            "enabled": False,
+            "available": False,
+            "effective": False,
+            "provider": "openai_subscription",
+            "quality_policy": "reasoning_unchanged",
+        }
+    return payload
 
 
 def _save_priority_list(slot: str, items: list[dict[str, str]]) -> None:

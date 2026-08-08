@@ -181,7 +181,9 @@ CustomPanelControl(
 
 **Returns:** `Any` — schema-dependent, user-defined
 
-**Validation:** Delegated to optional `validator(schema, answer)` function, or pass-through if no validator
+**Validation:** Requires a host-registered `validator(schema, answer)` function.
+Model-authored `elicit` calls cannot supply executable validators, so they must
+use the built-in controls instead; an unvalidated custom panel fails closed.
 
 ---
 

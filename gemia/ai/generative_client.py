@@ -66,7 +66,11 @@ class GenerativeClient:
             )
         self._backend = "openrouter"
         self._model = _resolve_image_model(model_tier)
-        self.proxy = os.environ.get("GEMIA_PROXY") or _read_config_key("proxy") or ""
+        self.proxy = (
+            ""
+            if self._base_source.startswith("cloud:")
+            else os.environ.get("GEMIA_PROXY") or _read_config_key("proxy") or ""
+        )
         self.timeout_sec = int(os.environ.get("GEMIA_IMAGE_TIMEOUT_SEC", str(_DEFAULT_TIMEOUT_SEC)))
 
     # ── Public API ────────────────────────────────────────────────────────
@@ -435,6 +439,14 @@ def _resolve_image_model(tier: str) -> str:
 
 
 def _resolve_base_url() -> tuple[str, str]:
+    try:
+        from gemia import cloud_accounts
+
+        if cloud_accounts.enabled():
+            return _DEFAULT_BASE_URL, "cloud:openrouter"
+    except Exception:
+        if os.environ.get("LUMERI_CLOUD_ACCOUNTS", "").strip().lower() in {"1", "true", "yes"}:
+            return _DEFAULT_BASE_URL, "cloud:unavailable"
     for source, value in (
         ("env:OPENROUTER_IMAGE_URL", os.environ.get("OPENROUTER_IMAGE_URL")),
         ("env:GEMIA_OPENROUTER_IMAGE_URL", os.environ.get("GEMIA_OPENROUTER_IMAGE_URL")),
@@ -454,6 +466,15 @@ def _resolve_base_url() -> tuple[str, str]:
 
 def _resolve_api_key(base_url: str = "", base_source: str = "") -> str:
     """Return an OpenRouter image key from env/config, with a narrow compat fallback."""
+    try:
+        from gemia import cloud_accounts
+
+        cloud_key = cloud_accounts.credential_for_provider("openrouter")
+        if cloud_key is not None:
+            return cloud_key
+    except Exception:
+        if os.environ.get("LUMERI_CLOUD_ACCOUNTS", "").strip().lower() in {"1", "true", "yes"}:
+            return ""
     for name in ("OPENROUTER_API_KEY", "GEMIA_OPENROUTER_API_KEY", "GEMIA_IMAGE_API_KEY"):
         value = str(os.environ.get(name) or "").strip()
         if value:

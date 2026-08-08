@@ -75,3 +75,37 @@ def test_sizes_are_continuous_clamped_and_legacy_grid_values_migrate() -> None:
         "panel": {"width": 16, "height": 100},
         "legacy": {"width": 33.333, "height": 30},
     }
+
+
+def test_vertical_drop_promotes_both_modules_to_separate_rows() -> None:
+    result = run_node("""(() => {
+      const preview=L.fullRowSize('preview', L.DEFAULT_SIZES.preview);
+      const outline=L.fullRowSize('outline', L.DEFAULT_SIZES.outline);
+      const flow=L.flowModules([
+        {id:'preview',...preview},
+        {id:'outline',...outline},
+      ],{width:900,height:600,gap:8});
+      return {preview,outline,rows:flow.rows.map(row=>row.ids)};
+    })()""")
+
+    assert result == {
+        "preview": {"width": 78, "height": 64},
+        "outline": {"width": 78, "height": 64},
+        "rows": [["preview"], ["outline"]],
+    }
+
+
+def test_timeline_uses_one_uniform_scale_and_never_crops_its_chrome() -> None:
+    result = run_node("""({
+      full: L.timelineScale(784, 184),
+      proportional: L.timelineScale(627.2, 147.2),
+      widthLimited: L.timelineScale(496, 148),
+      floor: L.timelineScale(278, 114),
+    })""")
+
+    assert result == {
+        "full": 1,
+        "proportional": 0.8,
+        "widthLimited": 0.633,
+        "floor": 0.5,
+    }

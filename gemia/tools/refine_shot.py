@@ -22,6 +22,20 @@ def _project(ctx: ToolContext):
     return ctx.project
 
 
+def _find_shot_text_clip(clips: list[dict[str, Any]], *, shot_start: float, text_content: str | None = None) -> dict[str, Any] | None:
+    for clip in clips:
+        if clip.get("media_kind") != "text":
+            continue
+        if abs(float(clip.get("start") or 0.0) - shot_start) >= 0.01:
+            continue
+        if text_content is not None:
+            config = clip.get("text_config") if isinstance(clip.get("text_config"), dict) else {}
+            if str(config.get("content") or "") != text_content:
+                continue
+        return clip
+    return None
+
+
 async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     # Lazy imports: avoid cycles with timeline and shotlist dispatchers.
     from gemia.tools import shotlist as _shotlist
@@ -95,8 +109,14 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         # For video, adjust source_out via trim; for image/lottie, adjust duration.
         # Enable ripple to reflow subsequent clips when duration changes.
         if media_kind == "video":
+            source_in = float(shot_clip.get("source_in") or 0.0)
             await _timeline.dispatch_trim(
-                {"clip_id": clip_id, "source_out": new_duration, "ripple": True}, ctx
+                {
+                    "clip_id": clip_id,
+                    "source_out": source_in + new_duration,
+                    "ripple": True,
+                },
+                ctx,
             )
         else:
             # image/lottie: set duration directly.
@@ -104,25 +124,25 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
                 {"clip_id": clip_id, "duration": new_duration, "ripple": True}, ctx
             )
 
-        # Retime the text overlay if present (find by start time == shot clip's start).
+        # Retime the shot text clip if present (find by start time, not by a special overlay track).
         if shot.get("on_screen_text"):
             shot_start = shot_clip.get("start") or 0.0
-            overlay_tracks = [t for t in (timeline.get("tracks") or [])
-                            if t.get("kind") == "overlay"]
-            if overlay_tracks:
-                overlay_id = str(overlay_tracks[0].get("id") or "OV1")
-                for clip in clips:
-                    if (str(clip.get("track_id")) == overlay_id and
-                        abs(float(clip.get("start") or 0.0) - shot_start) < 0.01 and
-                        clip.get("media_kind") == "text"):
-                        await _timeline.dispatch_set_time(
-                            {"clip_id": clip.get("id"), "duration": new_duration}, ctx
-                        )
-                        break
+            text_clip = _find_shot_text_clip(
+                clips,
+                shot_start=float(shot_start),
+                text_content=str(shot.get("on_screen_text") or ""),
+            )
+            if text_clip is not None:
+                await _timeline.dispatch_set_time(
+                    {"clip_id": text_clip.get("id"), "duration": new_duration}, ctx
+                )
 
         # Update the shot IR.
+        shot_fields: dict[str, Any] = {"duration_sec": new_duration}
+        if media_kind == "video" and shot.get("source_in") is not None:
+            shot_fields["source_out"] = float(shot["source_in"]) + new_duration
         await _shotlist.dispatch_update_shot(
-            {"shot_id": shot_id, "fields": {"duration_sec": new_duration}}, ctx
+            {"shot_id": shot_id, "fields": shot_fields}, ctx
         )
 
     # ── asset_id: replace the shot's footage
@@ -184,6 +204,7 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
             insert_args["source_out"] = old_duration
         else:  # image/lottie
             insert_args["duration"] = old_duration
+        insert_args["_provenance"] = {"shot_id": shot_id}
 
         result = await _timeline.dispatch_insert(insert_args, ctx)
         new_clip_id = result.get("clip_id")
@@ -194,6 +215,11 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
                 "shot_id": shot_id,
                 "fields": {
                     "asset_id": new_asset_id,
+                    "library_asset_id": None,
+                    "source_in": None,
+                    "source_out": None,
+                    "evidence": None,
+                    "alternatives": [],
                     "clip_id": new_clip_id,
                     "source": "search",
                     "status": "placed",
@@ -220,24 +246,21 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
                 ),
             }
 
-        # Remove the old text overlay if present.
+        # Remove the old text clip if present.
         timeline = project.load().get("timeline") or {}
         clips = timeline.get("clips") or []
         shot_clip = next((c for c in clips if str(c.get("id")) == clip_id), None)
         if shot_clip:
-            shot_start = shot_clip.get("start") or 0.0
-            overlay_tracks = [t for t in (timeline.get("tracks") or [])
-                            if t.get("kind") == "overlay"]
-            if overlay_tracks:
-                overlay_id = str(overlay_tracks[0].get("id") or "OV1")
-                for clip in clips:
-                    if (str(clip.get("track_id")) == overlay_id and
-                        abs(float(clip.get("start") or 0.0) - shot_start) < 0.01 and
-                        clip.get("media_kind") == "text"):
-                        await _timeline.dispatch_delete({"clip_id": clip.get("id")}, ctx)
-                        break
+            shot_start = float(shot_clip.get("start") or 0.0)
+            old_text_clip = _find_shot_text_clip(
+                clips,
+                shot_start=shot_start,
+                text_content=str(shot.get("on_screen_text") or "") if shot.get("on_screen_text") else None,
+            )
+            if old_text_clip is not None:
+                await _timeline.dispatch_delete({"clip_id": old_text_clip.get("id")}, ctx)
 
-        # Insert new text overlay if the new text is non-empty.
+        # Insert new text clip if the new text is non-empty.
         if new_text:
             shot_duration = shot.get("duration_sec") or 3.0
             await _timeline.dispatch_insert(
@@ -292,20 +315,17 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         # Delete the media clip.
         await _timeline.dispatch_delete({"clip_id": clip_id}, ctx)
 
-        # Delete the text overlay if present (search by content since start times may have shifted).
+        # Delete the text clip if present (search by content since start times may have shifted).
         if text_content:
             timeline = project.load().get("timeline") or {}
             clips = timeline.get("clips") or []
-            overlay_tracks = [t for t in (timeline.get("tracks") or [])
-                            if t.get("kind") == "overlay"]
-            if overlay_tracks:
-                overlay_id = str(overlay_tracks[0].get("id") or "OV1")
-                for clip in clips:
-                    if (str(clip.get("track_id")) == overlay_id and
-                        clip.get("media_kind") == "text" and
-                        (clip.get("text_config") or {}).get("content") == text_content):
-                        await _timeline.dispatch_delete({"clip_id": clip.get("id")}, ctx)
-                        break
+            for clip in clips:
+                if clip.get("media_kind") != "text":
+                    continue
+                config = clip.get("text_config") if isinstance(clip.get("text_config"), dict) else {}
+                if str(config.get("content") or "") == text_content:
+                    await _timeline.dispatch_delete({"clip_id": clip.get("id")}, ctx)
+                    break
 
         # Reset the shot IR.
         new_status = "filled" if shot.get("asset_id") else "draft"

@@ -69,12 +69,14 @@ def test_effects_warnings_typed_and_media_kind_aware() -> None:
     warnings = export_support.effects_warnings(
         "video", {"blend_mode": "screen", "speed": 2.0, "rotation": 90},
     )
-    assert len(warnings) == 3
-    assert {w.split(":", 2)[1] for w in warnings} == {"blend_mode", "speed", "rotation"}
+    assert len(warnings) == 2
+    assert {w.split(":", 2)[1] for w in warnings} == {"blend_mode", "speed"}
     assert all(w.startswith("W_NOT_EXPORTED:") for w in warnings)
-    # Rendered on the overlay path -> no warning there, but video-track warns.
+    # Geometry renders on both the overlay and base-video paths.
     assert export_support.effects_warnings("image", {"scale": 0.5, "opacity": 0.4}) == []
-    assert len(export_support.effects_warnings("video", {"scale": 0.5})) == 1
+    assert export_support.effects_warnings(
+        "video", {"x": 10, "y": 20, "scale": 0.5, "rotation": 17}
+    ) == []
     # x/y render for text; scale/opacity do not.
     assert export_support.effects_warnings("text", {"x": 10, "y": 10}) == []
     assert len(export_support.effects_warnings("text", {"scale": 2.0})) == 1
@@ -94,8 +96,8 @@ def test_noop_values_and_deletions_do_not_warn() -> None:
     ) == []
     # Explicit null deletes a key — deleting an unrendered key is fine.
     assert export_support.effects_warnings("video", {"blend_mode": None}) == []
-    # But real values on the same fields DO warn.
-    assert len(export_support.effects_warnings("video", {"rotation": 180})) == 1
+    # Continuous video rotation is now a rendered geometry field.
+    assert export_support.effects_warnings("video", {"rotation": 37}) == []
 
 
 def test_transition_warnings_per_kind() -> None:
@@ -177,8 +179,8 @@ def test_set_clip_effects_tool_result_carries_warnings(tmp_path: Path) -> None:
         ctx,
     )
     assert out["applied"] is True  # warn, never reject
-    assert len(out["warnings"]) == 3
-    assert {w.split(":", 2)[1] for w in out["warnings"]} == {"blend_mode", "speed", "rotation"}
+    assert len(out["warnings"]) == 2
+    assert {w.split(":", 2)[1] for w in out["warnings"]} == {"blend_mode", "speed"}
 
     # Rendered fields produce no warnings key at all.
     out_ok = _call(
@@ -249,8 +251,8 @@ def test_route_set_effects_response_carries_warnings(tmp_path) -> None:
     })
     assert h.status == 200  # warn, never reject
     warnings = h.body_json["warnings"]
-    assert len(warnings) == 3
-    assert {w.split(":", 2)[1] for w in warnings} == {"blend_mode", "speed", "rotation"}
+    assert len(warnings) == 2
+    assert {w.split(":", 2)[1] for w in warnings} == {"blend_mode", "speed"}
     # ...and the edit still applied + returned the normal timeline payload.
     assert "tracks" in h.body_json
 
@@ -293,9 +295,8 @@ def test_route_add_transition_response_warns_only_for_unrendered_kinds(tmp_path)
 
 
 def test_export_manifest_lists_dropped_fields(tmp_path: Path) -> None:
-    """set_clip_effects {blend_mode, speed, rotation} + a wipe transition →
-    the manifest records all four drops; the untouched clip contributes none
-    (default-stamped identity effects are exempt)."""
+    """Unrendered blend/speed plus a wipe reach the honesty manifest, while
+    the now-rendered continuous video rotation does not appear as a drop."""
     src = tmp_path / "clip.mp4"
     subprocess.run(
         ["ffmpeg", "-y", "-f", "lavfi",
@@ -335,12 +336,17 @@ def test_export_manifest_lists_dropped_fields(tmp_path: Path) -> None:
     by_field = {(d["clip_id"], d["field"]): d["reason"] for d in dropped}
     assert by_field[("cA", "blend_mode")] == "not_rendered"
     assert by_field[("cA", "speed")] == "not_rendered"
-    assert by_field[("cA", "rotation")] == "not_rendered"
     assert by_field[("cA", "transition_after")] == "kind_not_supported"
     # The untouched clip contributes nothing (no-op exemption).
     assert not any(d["clip_id"] == "cB" for d in dropped)
     # wipe is never planned as a render.
     assert manifest["transitions_rendered"] == 0
+    assert manifest["machine_status"] == "rejected"
+    assert any(
+        blocker.get("code") == "dropped_fields"
+        for blocker in manifest["machine_blockers"]
+    )
+    assert manifest["render_receipt"]["accepted"] is False
     # Manifest file on disk carries the same honesty payload.
     on_disk = json.loads(Path(manifest["manifest_path"]).read_text(encoding="utf-8"))
     assert on_disk["dropped_fields"] == dropped

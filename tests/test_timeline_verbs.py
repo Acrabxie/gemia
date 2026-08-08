@@ -66,7 +66,7 @@ def test_insert_video_appends_and_returns_summary(sample_video_path: str, tmp_pa
     assert timeline["timeline"]["clip_count"] == 1
 
 
-def test_insert_text_autocreates_overlay_track(tmp_path: Path) -> None:
+def test_insert_text_defaults_to_overlay_track(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
 
     out = _call(
@@ -203,6 +203,52 @@ def test_inspect_timeline_registers_composited_frame(sample_video_path: str, tmp
     assert out["sample_times"][0] == pytest.approx(0.5, abs=0.05)
     assert out["thumbnail_for_next_message"] is True
     assert Path(out["thumbnail_path"]).exists()
+
+
+def test_inspect_timeline_accepts_explicit_sample_times(
+    sample_video_path: str, tmp_path: Path
+) -> None:
+    ctx = _ctx(tmp_path)
+    aid = _register_video(ctx, sample_video_path)
+    _call("timeline_insert_clip", {"asset_id": aid}, ctx)
+
+    out = _call(
+        "inspect_timeline",
+        {"times_sec": [0.25, 1.25], "label": "inspect-explicit"},
+        ctx,
+    )
+
+    assert out["sample_times"] == pytest.approx([0.25, 1.25], abs=0.05)
+    assert len(out["frame_asset_ids"]) == 2
+
+
+def test_inspect_timeline_normalizes_legacy_all_fields_shape(
+    sample_video_path: str, tmp_path: Path
+) -> None:
+    ctx = _ctx(tmp_path)
+    aid = _register_video(ctx, sample_video_path)
+    _call("timeline_insert_clip", {"asset_id": aid}, ctx)
+
+    out = _call(
+        "inspect_timeline",
+        {
+            "frame": 0,
+            "time_sec": 0,
+            "time": 0,
+            "start_frame": 0,
+            "end_frame": 60,
+            "start_sec": 0,
+            "end_sec": 2,
+            "start": 0,
+            "end": 2,
+            "max_frames": 2,
+            "label": "inspect-legacy",
+        },
+        ctx,
+    )
+
+    assert out["sample_times"] == pytest.approx([0.5, 1.5], abs=0.08)
+    assert len(out["frame_asset_ids"]) == 2
 
 
 # ── M7: track-level ducking verb ─────────────────────────────────────────

@@ -8,8 +8,9 @@ Design contract (docs/timeline-v1/01-op-vocabulary.md, user-approved 2026-06-13)
   SSE event. No big apply-patch(json) black box.
 - ``ripple`` defaults to False everywhere: ops never shift other clips unless
   the model explicitly opts in.
-- v1 surface: video tracks + overlay (image/text) tracks. Audio tracks and
-  keyframes are reserved; the patch layer rejects them.
+- video clips use video tracks; image/text/Lottie use overlay tracks by
+  default; audio uses audio tracks. Images may explicitly target V* when they
+  are the base picture. The separation is part of the canonical export graph.
 - Mutation verbs return the post-state compact summary so the model does not
   need a follow-up ``get_timeline`` call.
 
@@ -21,6 +22,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from gemia.errors import RECOVERY_SWITCH_TOOL, ToolError
 from gemia.tools._context import ToolContext
 from gemia.tools._ffmpeg import ffprobe_duration
 from gemia.video.lottie_renderer import select_lottie_renderer
@@ -28,6 +30,44 @@ from lumerai.export_support import effects_warnings, transition_warnings
 
 
 _TEXT_DEFAULT_DURATION = 3.0
+
+
+def _is_formal_production(ctx: ToolContext) -> bool:
+    """True only for a durable ProductionRun, never for legacy documents."""
+
+    return bool(
+        ctx.extra.get("production_store")
+        and ctx.extra.get("project_id")
+        and ctx.extra.get("run_id")
+    )
+
+
+def _reject_unrendered(warnings: list[str], *, operation: str) -> None:
+    if not warnings:
+        return
+    raise ToolError(
+        f"{operation} was refused because the canonical renderer cannot reproduce it",
+        code="E_RENDER_UNSUPPORTED",
+        recovery=RECOVERY_SWITCH_TOOL,
+        hint="Use a rendered field/transition or bake the effect into a project-local media asset.",
+        detail="; ".join(warnings),
+    )
+
+
+def _bind_durable_receipt(ctx: ToolContext, result: dict[str, Any]) -> None:
+    store = ctx.extra.get("production_store")
+    project_id = str(ctx.extra.get("project_id") or "")
+    receipt = result.get("render_receipt")
+    if store is None or not project_id or not isinstance(receipt, dict):
+        return
+    from gemia.render_receipt import bind_render_receipt_revision
+
+    revision = int(store.load_project(project_id).get("revision") or 0)
+    bind_render_receipt_revision(
+        receipt,
+        project_revision=revision,
+        receipt_path=result.get("receipt_path"),
+    )
 
 
 def _project(ctx: ToolContext):
@@ -70,6 +110,45 @@ def _float_arg(args: dict[str, Any], name: str, *, required: bool = False) -> fl
 async def dispatch_get(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     history = int(args.get("history") or 0)
     return _project(ctx).inspect(history=max(0, min(history, 20)))
+
+
+async def dispatch_get_segment(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    """Return one Clip's structural document and reservation summary."""
+    project = _project(ctx).load()
+    clip_id = str(args.get("clip_id") or "")
+    clip = next((c for c in project.get("timeline", {}).get("clips", []) if str(c.get("id") or "") == clip_id), None)
+    if not isinstance(clip, dict):
+        raise ValueError(f"clip not found: {clip_id}")
+    from gemia.segment_document import persisted_segment, segment_manifest
+    document = persisted_segment(project, clip, create=False)
+    return {"clip_id": clip_id, "segment": document, "manifest": segment_manifest(project, clip)}
+
+
+async def dispatch_segment_edit(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    """Agent-side structural edit; reservation checks happen in the patch path."""
+    project = _project(ctx)
+    clip_id = str(args.get("clip_id") or "")
+    expected = args.get("expected_segment_revision")
+    if expected is None:
+        raise ValueError("segment_edit requires expected_segment_revision from get_segment")
+    action = str(args.get("action") or "set_layer")
+    op = {
+        "op": "segment_edit", "clip_id": clip_id, "action": action,
+        "entity_ref": str(args.get("entity_ref") or ""),
+        "entity_refs": [str(x) for x in (args.get("entity_refs") or []) if str(x or "")],
+        "changes": args.get("changes") if isinstance(args.get("changes"), dict) else {},
+        "new_state_id": args.get("new_state_id"), "index": args.get("index"),
+        "expected_segment_revision": int(expected), "actor": "agent",
+        "client_op_id": str(args.get("client_op_id") or uuid.uuid4().hex),
+    }
+    result = project.apply_ops([op], label="segment_edit", client_op_id=op["client_op_id"])
+    state = result.get("project_state") or project.load()
+    clip = next((c for c in state.get("timeline", {}).get("clips", []) if str(c.get("id") or "") == clip_id), None)
+    if not isinstance(clip, dict):
+        raise ValueError(f"clip not found after segment edit: {clip_id}")
+    from gemia.segment_document import persisted_segment, segment_manifest
+    document = persisted_segment(state, clip, create=False)
+    return {"applied": True, "clip_id": clip_id, "segment": document, "manifest": segment_manifest(state, clip), "seq": result.get("patch_seq_end")}
 
 
 # ── insert ──────────────────────────────────────────────────────────────
@@ -132,10 +211,14 @@ async def dispatch_insert(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
         }
         source_in = _float_arg(args, "source_in") or 0.0
         source_out = _float_arg(args, "source_out")
+        if source_in < 0.0:
+            raise ValueError("source_in must be >= 0")
         if record.kind in {"video", "audio", "lottie"}:
             if source_out is None:
                 source_out = probe_duration or source_in + 0.1
-            duration = max(round(source_out - source_in, 6), 0.1)
+            if source_out <= source_in:
+                raise ValueError("source_out must be greater than source_in")
+            duration = round(source_out - source_in, 6)
         else:  # image
             duration = _float_arg(args, "duration") or _TEXT_DEFAULT_DURATION
             source_in, source_out = 0.0, duration
@@ -149,36 +232,35 @@ async def dispatch_insert(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
             "source_out": round(source_out, 6),
         }
 
-    # Resolve target track; auto-create OV1/A1 for the first overlay/audio clip.
+    # Resolve target track; images default to an overlay, while callers that
+    # are building the base picture can still opt into V1 explicitly.
     track_id = str(args.get("track_id") or "")
     if media_kind == "image":
-        # Images can go on video or overlay tracks (explicit track_id = V1 for main chain)
         if track_id:
-            # Explicit track specified; ensure it exists
             if not any(str(t.get("id")) == track_id for t in tracks):
-                # Find kind for track_id to know what kind of track to create
-                track_kind = "video" if track_id == "V1" else "overlay"
+                track_kind = "video" if track_id.startswith("V") else "overlay"
                 ops.append({"op": "add_track", "kind": track_kind, "track_id": track_id})
         else:
-            # Default to overlay if no explicit track
             overlay_tracks = [t for t in tracks if t.get("kind") == "overlay"]
             track_id = str(overlay_tracks[0]["id"]) if overlay_tracks else "OV1"
             if not any(str(t.get("id")) == track_id for t in tracks):
                 ops.append({"op": "add_track", "kind": "overlay", "track_id": track_id})
-    elif media_kind in {"text", "lottie"}:
-        overlay_tracks = [t for t in tracks if t.get("kind") == "overlay"]
-        if not track_id:
-            track_id = str(overlay_tracks[0]["id"]) if overlay_tracks else "OV1"
-        if not any(str(t.get("id")) == track_id for t in tracks):
-            ops.append({"op": "add_track", "kind": "overlay", "track_id": track_id})
     elif media_kind == "audio":
         audio_tracks = [t for t in tracks if t.get("kind") == "audio"]
         if not track_id:
             track_id = str(audio_tracks[0]["id"]) if audio_tracks else "A1"
         if not any(str(t.get("id")) == track_id for t in tracks):
             ops.append({"op": "add_track", "kind": "audio", "track_id": track_id})
-    else:
-        track_id = track_id or "V1"
+    elif media_kind in {"text", "lottie"}:
+        overlay_tracks = [t for t in tracks if t.get("kind") == "overlay"]
+        if not track_id:
+            track_id = str(overlay_tracks[0]["id"]) if overlay_tracks else "OV1"
+        if not any(str(t.get("id")) == track_id for t in tracks):
+            ops.append({"op": "add_track", "kind": "overlay", "track_id": track_id})
+    else:  # video
+        video_tracks = [t for t in tracks if t.get("kind") == "video"]
+        if not track_id:
+            track_id = str(video_tracks[0]["id"]) if video_tracks else "V1"
         if not any(str(t.get("id")) == track_id for t in tracks):
             ops.append({"op": "add_track", "kind": "video", "track_id": track_id})
     clip["track_id"] = track_id
@@ -193,13 +275,21 @@ async def dispatch_insert(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
     elif at_index is not None:
         at = {"index": int(at_index)}
 
+    provenance = {"verb": "timeline_insert_clip", "session_id": ctx.session_id}
+    internal_provenance = args.get("_provenance")
+    if isinstance(internal_provenance, dict):
+        for key in ("shot_id", "evidence_id", "annotation_id"):
+            value = internal_provenance.get(key)
+            if value not in (None, ""):
+                provenance[key] = str(value)[:200]
+
     insert_op: dict[str, Any] = {
         "op": "insert_clip",
         "data": ({"asset": asset_payload, "clip": clip} if asset_payload else {"clip": clip}),
         "track_id": track_id,
         "at": at,
         "ripple": bool(args.get("ripple", False)),
-        "provenance": {"verb": "timeline_insert_clip", "session_id": ctx.session_id},
+        "provenance": provenance,
     }
     ops.append(insert_op)
 
@@ -302,12 +392,14 @@ async def dispatch_transition(args: dict[str, Any], ctx: ToolContext) -> dict[st
     duration_sec = _float_arg(args, "duration_sec")
     if duration_sec is not None:
         op["duration_sec"] = duration_sec
+    warnings = transition_warnings(op["kind"])
+    if _is_formal_production(ctx):
+        _reject_unrendered(warnings, operation="timeline transition")
     result = _project(ctx).apply_ops([op], label="timeline_add_transition")
     out = _summary(ctx, result, clip_id=clip_id)
     # Export honesty (docs/timeline-canonical-plan.md §4): fade/dissolve render
     # on export since Phase 1; kinds without a renderer (wipe) warn at write —
     # never silently, never rejected (OTIO/replay compatibility).
-    warnings = transition_warnings(op["kind"])
     if warnings:
         out["warnings"] = warnings
         out["export_note"] = (
@@ -323,12 +415,7 @@ async def dispatch_effects(args: dict[str, Any], ctx: ToolContext) -> dict[str, 
     effects = args.get("effects")
     if not isinstance(effects, dict) or not effects:
         raise ValueError("timeline_set_clip_effects needs a non-empty effects object")
-    op = {"op": "set_clip_effects", "clip_id": clip_id, "effects": effects}
     project = _project(ctx)
-    result = project.apply_ops([op], label="timeline_set_clip_effects")
-    out = _summary(ctx, result, clip_id=clip_id)
-    # Export honesty (docs/timeline-canonical-plan.md §4): warn — never reject —
-    # when the write stores fields the exporter will not render today.
     clip = next(
         (
             c
@@ -339,6 +426,13 @@ async def dispatch_effects(args: dict[str, Any], ctx: ToolContext) -> dict[str, 
     )
     media_kind = str((clip or {}).get("media_kind") or "video")
     warnings = effects_warnings(media_kind, effects)
+    if _is_formal_production(ctx):
+        _reject_unrendered(warnings, operation="timeline effect")
+    op = {"op": "set_clip_effects", "clip_id": clip_id, "effects": effects}
+    result = project.apply_ops([op], label="timeline_set_clip_effects")
+    out = _summary(ctx, result, clip_id=clip_id)
+    # Legacy documents keep the old warning-only behavior for replay/OTIO
+    # compatibility. Formal runs fail before the patch above.
     if warnings:
         out["warnings"] = warnings
     return out
@@ -398,6 +492,7 @@ async def dispatch_render_preview(args: dict[str, Any], ctx: ToolContext) -> dic
         output_root=ctx.output_dir,
         label=label,
     )
+    _bind_durable_receipt(ctx, result)
     preview_path = result.get("preview_path")
     asset_id = None
     if preview_path:
@@ -407,16 +502,38 @@ async def dispatch_render_preview(args: dict[str, Any], ctx: ToolContext) -> dic
             kind="video",
             path=preview_path,
             summary=f"timeline preview ({label}, seq={result.get('patch_seq')})",
+            source={
+                "kind": "derived_preview",
+                "render_id": result.get("render_id"),
+                "project_revision": (result.get("render_receipt") or {}).get("project_revision"),
+                "graph_hash": result.get("graph_hash"),
+                "render_receipt": result.get("render_receipt"),
+            },
+            license={"basis": "derived_from_project_assets"},
         )
     resolution = result.get("resolution") if isinstance(result.get("resolution"), dict) else {}
-    return {
+    payload = {
         "asset_id": asset_id,
         "render_id": result.get("render_id"),
         "duration": result.get("duration"),
         "width": resolution.get("width"),
         "height": resolution.get("height"),
-        "note": "low-res proxy preview of the timeline document; use analyze_media to look at it",
+        "graph_hash": result.get("graph_hash"),
+        "source_manifest_hash": result.get("source_manifest_hash"),
+        "render_receipt": result.get("render_receipt"),
+        "machine_status": result.get("machine_status"),
+        "machine_blockers": result.get("machine_blockers") or [],
+        "dropped_fields": result.get("dropped_fields") or [],
+        "note": "draft preset rendered through the same canonical graph as final export",
     }
+    if _is_formal_production(ctx) and payload["dropped_fields"]:
+        payload.update({
+            "status": "failed",
+            "error": "preview graph contains fields the canonical renderer dropped",
+            "error_code": "E_RENDER_DROPPED_FIELDS",
+            "recovery": RECOVERY_SWITCH_TOOL,
+        })
+    return payload
 
 
 # ── project export ──────────────────────────────────────────────────────
@@ -428,13 +545,24 @@ async def dispatch_project_export(args: dict[str, Any], ctx: ToolContext) -> dic
     project = _project(ctx)
     quality = str(args.get("quality") or "1080p")
     label = str(args.get("label") or "export")[:40]
+    reality_contract = None
+    production_store = ctx.extra.get("production_store")
+    run_id = str(ctx.extra.get("run_id") or "")
+    project_id = str(ctx.extra.get("project_id") or project.project_id)
+    if production_store is not None and run_id:
+        run = production_store.load_run(project_id, run_id)
+        if isinstance(run.get("reality_contract"), dict):
+            reality_contract = dict(run["reality_contract"])
     result = export_project(
         project.store,
         project.project_id,
         output_root=ctx.output_dir,
         quality=quality,
         label=label,
+        verify_decode=True,
+        reality_contract=reality_contract,
     )
+    _bind_durable_receipt(ctx, result)
     export_path = result.get("export_path")
     asset_id = None
     if export_path:
@@ -444,9 +572,17 @@ async def dispatch_project_export(args: dict[str, Any], ctx: ToolContext) -> dic
             kind="video",
             path=export_path,
             summary=f"project export ({quality}, seq={result.get('patch_seq')})",
+            source={
+                "kind": "derived_export",
+                "render_id": result.get("export_id"),
+                "project_revision": (result.get("render_receipt") or {}).get("project_revision"),
+                "graph_hash": result.get("graph_hash"),
+                "render_receipt": result.get("render_receipt"),
+            },
+            license={"basis": "derived_from_project_assets"},
         )
     resolution = result.get("resolution") if isinstance(result.get("resolution"), dict) else {}
-    return {
+    payload = {
         "asset_id": asset_id,
         "export_id": result.get("export_id"),
         "duration": result.get("duration"),
@@ -458,8 +594,27 @@ async def dispatch_project_export(args: dict[str, Any], ctx: ToolContext) -> dic
         "audio_clips": result.get("audio_clips_rendered"),
         "has_audio": bool(result.get("has_audio")),
         "export_path": export_path,
-        "note": "full-quality export; use analyze_media to inspect, or deliver the file directly",
+        "graph_hash": result.get("graph_hash"),
+        "source_manifest_hash": result.get("source_manifest_hash"),
+        "render_receipt": result.get("render_receipt"),
+        "receipt_path": result.get("receipt_path"),
+        "machine_status": result.get("machine_status"),
+        "machine_blockers": result.get("machine_blockers") or [],
+        "dropped_fields": result.get("dropped_fields") or [],
+        "note": (
+            "full export passed machine delivery gates; human review is still pending"
+            if result.get("machine_status") == "passed"
+            else "export file exists but failed machine delivery gates; inspect machine_blockers"
+        ),
     }
+    if _is_formal_production(ctx) and str(payload.get("machine_status")) != "passed":
+        payload.update({
+            "status": "failed",
+            "error": "final export did not pass the production machine gate",
+            "error_code": "E_DELIVERY_GATE",
+            "recovery": RECOVERY_SWITCH_TOOL,
+        })
+    return payload
 
 
 async def dispatch_export_otio(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:

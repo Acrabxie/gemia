@@ -19,6 +19,7 @@ from gemia.errors import GemiaError
 ACCOUNT_SCHEMA_VERSION = 1
 ACCOUNTS_ROOT = Path.home() / ".gemia" / "accounts"
 ACTIVE_ACCOUNT_PATH = ACCOUNTS_ROOT / "active.json"
+MACHINE_WORKSPACE_ID = "local_machine_workspace"
 CONFIG_PATH = Path.home() / ".gemia" / "config.json"
 GOOGLE_TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -188,6 +189,39 @@ def sign_out() -> None:
         ACTIVE_ACCOUNT_PATH.unlink()
     except FileNotFoundError:
         pass
+
+
+def activate_cloud_account(cloud_account: dict[str, Any]) -> dict[str, Any]:
+    """Bind a verified cloud identity to this machine's one shared workspace."""
+    cloud_id = _clean_string(cloud_account.get("id"))
+    email = normalize_email(_clean_string(cloud_account.get("email")))
+    if not cloud_id:
+        raise AuthError("Cloud account id is missing")
+    workspace_id = _machine_workspace_id()
+    now = _utc_now()
+    existing = _read_json(account_profile_path(workspace_id), {})
+    profile = {
+        "version": ACCOUNT_SCHEMA_VERSION,
+        "account_id": workspace_id,
+        "cloud_account_id": cloud_id,
+        "provider": "lumeri-cloud",
+        "onboarding_completed": cloud_account.get("onboarding_completed") is True,
+        "age_band": _clean_string(cloud_account.get("age_band")),
+        "provider_mode": _clean_string(cloud_account.get("provider_mode")),
+        "model_provider": _clean_string(cloud_account.get("provider")),
+        "provider_subject": cloud_id,
+        "email": email,
+        "email_verified": True,
+        "name": _clean_string(cloud_account.get("display_name")) or email.split("@", 1)[0],
+        "picture": _clean_string(cloud_account.get("picture_url")),
+        "created_at": existing.get("created_at") if isinstance(existing, dict) else now,
+        "updated_at": now,
+    }
+    _ensure_account_dirs(workspace_id)
+    _atomic_write_json(account_profile_path(workspace_id), profile)
+    _bootstrap_account_memory(profile)
+    _write_active(workspace_id)
+    return _public_profile(profile)
 
 
 def switch_account(account_id: str) -> dict[str, Any]:
@@ -443,11 +477,16 @@ def account_id_for(provider: str, subject: str) -> str:
 
 def account_root(account_id: str) -> Path:
     safe_id = _validate_account_id(account_id)
+    binding = _read_json(ACCOUNTS_ROOT / "workspace.json", {})
+    if isinstance(binding, dict):
+        bound_id = _clean_string(binding.get("workspace_id"))
+        if re.fullmatch(r"[a-zA-Z0-9_-]{8,80}", bound_id):
+            return ACCOUNTS_ROOT / bound_id
     return ACCOUNTS_ROOT / safe_id
 
 
 def account_profile_path(account_id: str) -> Path:
-    return account_root(account_id) / "profile.json"
+    return ACCOUNTS_ROOT / _validate_account_id(account_id) / "profile.json"
 
 
 def account_memory_root(account_id: str) -> Path:
@@ -501,7 +540,12 @@ def _public_profile(profile: dict[str, Any]) -> dict[str, Any]:
     return {
         "version": ACCOUNT_SCHEMA_VERSION,
         "account_id": account_id,
+        "cloud_account_id": _clean_string(profile.get("cloud_account_id")),
         "provider": _clean_string(profile.get("provider")) or "google",
+        "onboarding_completed": profile.get("onboarding_completed") is True,
+        "age_band": _clean_string(profile.get("age_band")),
+        "provider_mode": _clean_string(profile.get("provider_mode")),
+        "model_provider": _clean_string(profile.get("model_provider")),
         "email": _clean_string(profile.get("email")),
         "email_verified": bool(profile.get("email_verified")),
         "name": _clean_string(profile.get("name")),
@@ -534,16 +578,15 @@ def _bootstrap_account_memory(profile: dict[str, Any]) -> None:
             pass
     _write_text_if_missing(
         memory_root / "README.md",
-        "# Gemia Account Memory\n\n"
-        "This local memory belongs to one signed-in Gemia account.\n\n"
+        "# Lumeri Device Memory\n\n"
+        "This local memory belongs to this device's shared creative workspace.\n\n"
         "Do not store secrets, tokens, passwords, or raw private conversations here.\n",
     )
     _write_text_if_missing(
         memory_root / "MEMORY.md",
-        "# Account Memory\n\n"
-        f"- Account provider: `{_clean_string(profile.get('provider')) or 'google'}`\n"
-        f"- Account email: `{_clean_string(profile.get('email'))}`\n"
-        "- This memory root is isolated from other local accounts.\n",
+        "# Device Workspace Memory\n\n"
+        "- Creative data is shared by signed-in accounts on this device.\n"
+        "- Cloud account data, provider credentials, and credits remain account-isolated.\n",
     )
     _write_text_if_missing(daily_path, f"# {daily_path.stem}\n\n- Account memory initialized.\n")
 
@@ -552,7 +595,14 @@ def _ensure_account_dirs(account_id: str) -> None:
     root = account_root(account_id)
     session_history = account_session_root(account_id) / "history"
     memory_root = account_memory_root(account_id)
-    for path in (ACCOUNTS_ROOT, root, account_session_root(account_id), session_history, memory_root):
+    for path in (
+        ACCOUNTS_ROOT,
+        account_profile_path(account_id).parent,
+        root,
+        account_session_root(account_id),
+        session_history,
+        memory_root,
+    ):
         path.mkdir(parents=True, exist_ok=True)
         try:
             path.chmod(0o700)
@@ -566,6 +616,23 @@ def _ensure_root() -> None:
         ACCOUNTS_ROOT.chmod(0o700)
     except OSError:
         pass
+
+
+def _machine_workspace_id() -> str:
+    """Return a stable local workspace id without moving existing creative data."""
+    _ensure_root()
+    binding_path = ACCOUNTS_ROOT / "workspace.json"
+    binding = _read_json(binding_path, {})
+    if isinstance(binding, dict):
+        bound = _clean_string(binding.get("workspace_id"))
+        if re.fullmatch(r"[a-zA-Z0-9_-]{8,80}", bound):
+            return bound
+    active = _read_json(ACTIVE_ACCOUNT_PATH, {})
+    candidate = _clean_string(active.get("account_id")) if isinstance(active, dict) else ""
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{8,80}", candidate):
+        candidate = MACHINE_WORKSPACE_ID
+    _atomic_write_json(binding_path, {"workspace_id": candidate, "created_at": _utc_now()})
+    return candidate
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -632,6 +699,8 @@ __all__ = [
     "ACTIVE_ACCOUNT_PATH",
     "AuthError",
     "GOOGLE_OAUTH_REDIRECT_URI",
+    "MACHINE_WORKSPACE_ID",
+    "activate_cloud_account",
     "account_id_for",
     "account_memory_root",
     "account_session_root",

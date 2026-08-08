@@ -311,7 +311,9 @@ class PanelControl:
 
         result = {}
         for key, control in self.fields.items():
-            field_answer = answer.get(key)
+            if key not in answer or answer[key] is None:
+                return None, f"field '{key}': answer required"
+            field_answer = answer[key]
             value, error = control.validate(field_answer)
             if error:
                 return None, f"field '{key}': {error}"
@@ -351,8 +353,70 @@ class CustomPanelControl:
                 return value, None
             except Exception as e:
                 return None, f"custom validation failed: {e}"
-        # No validator: pass through
-        return answer, None
+        # A wire-roundtripped custom panel cannot carry a callable validator.
+        # Releasing a required wait without validation would be fail-open.
+        return None, "custom panel has no registered validator"
+
+
+def _control_from_dict(
+    ctrl_data: Any,
+    *,
+    path: str,
+    allow_panel: bool = True,
+) -> Union[
+    SelectControl,
+    MultiSelectControl,
+    TextControl,
+    SliderControl,
+    PanelControl,
+    CustomPanelControl,
+]:
+    """Build one control or reject the whole decision schema."""
+    if not isinstance(ctrl_data, dict):
+        raise AskSchemaError(f"{path} must be an object")
+    raw_type = ctrl_data.get("type")
+    try:
+        ctrl_type = AskControlType(raw_type)
+    except (TypeError, ValueError) as exc:
+        raise AskSchemaError(f"{path} has unknown control type: {raw_type!r}") from exc
+
+    kwargs = {key: value for key, value in ctrl_data.items() if key != "type"}
+    try:
+        if ctrl_type is AskControlType.SELECT:
+            return SelectControl(**kwargs)
+        if ctrl_type is AskControlType.MULTI_SELECT:
+            return MultiSelectControl(**kwargs)
+        if ctrl_type is AskControlType.TEXT:
+            return TextControl(**kwargs)
+        if ctrl_type is AskControlType.SLIDER:
+            return SliderControl(**kwargs)
+        if ctrl_type is AskControlType.CUSTOM_PANEL:
+            raise AskSchemaError(
+                f"{path} custom_panel requires a host-registered validator"
+            )
+        if not allow_panel:
+            raise AskSchemaError(f"{path} cannot contain a nested panel")
+        raw_fields = ctrl_data.get("fields")
+        if not isinstance(raw_fields, dict) or not raw_fields:
+            raise AskSchemaError(f"{path}.fields must be a non-empty object")
+        fields = {
+            str(key): _control_from_dict(
+                field_data,
+                path=f"{path}.fields.{key}",
+                allow_panel=False,
+            )
+            for key, field_data in raw_fields.items()
+        }
+        if any(isinstance(field, (PanelControl, CustomPanelControl)) for field in fields.values()):
+            raise AskSchemaError(f"{path}.fields supports only basic controls")
+        return PanelControl(
+            fields=fields,  # type: ignore[arg-type]
+            description=str(ctrl_data.get("description", "")),
+        )
+    except AskError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise AskSchemaError(f"{path} is invalid: {exc}") from exc
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -391,41 +455,35 @@ class AskQuestion:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AskQuestion:
-        """Deserialize from dict (useful for SSE/API roundtrips)."""
-        controls = {}
-        for key, ctrl_data in data.get("controls", {}).items():
-            ctrl_type = ctrl_data.get("type")
-            if ctrl_type == AskControlType.SELECT:
-                controls[key] = SelectControl(**{k: v for k, v in ctrl_data.items() if k != "type"})
-            elif ctrl_type == AskControlType.MULTI_SELECT:
-                controls[key] = MultiSelectControl(**{k: v for k, v in ctrl_data.items() if k != "type"})
-            elif ctrl_type == AskControlType.TEXT:
-                controls[key] = TextControl(**{k: v for k, v in ctrl_data.items() if k != "type"})
-            elif ctrl_type == AskControlType.SLIDER:
-                controls[key] = SliderControl(**{k: v for k, v in ctrl_data.items() if k != "type"})
-            elif ctrl_type == AskControlType.PANEL:
-                # Recursively deserialize panel fields
-                fields = {}
-                for fk, fv in ctrl_data.get("fields", {}).items():
-                    ft = fv.get("type")
-                    if ft == AskControlType.SELECT:
-                        fields[fk] = SelectControl(**{k: w for k, w in fv.items() if k != "type"})
-                    elif ft == AskControlType.MULTI_SELECT:
-                        fields[fk] = MultiSelectControl(**{k: w for k, w in fv.items() if k != "type"})
-                    elif ft == AskControlType.TEXT:
-                        fields[fk] = TextControl(**{k: w for k, w in fv.items() if k != "type"})
-                    elif ft == AskControlType.SLIDER:
-                        fields[fk] = SliderControl(**{k: w for k, w in fv.items() if k != "type"})
-                controls[key] = PanelControl(fields={**fields})
-            elif ctrl_type == AskControlType.CUSTOM_PANEL:
-                controls[key] = CustomPanelControl(schema=ctrl_data.get("schema", {}))
+        """Deserialize a question without silently weakening its schema."""
+        if not isinstance(data, dict):
+            raise AskSchemaError("question must be an object")
+
+        question_id = data.get("question_id")
+        title = data.get("title")
+        if not isinstance(question_id, str) or not question_id.strip():
+            raise AskSchemaError("question_id must be a non-empty string")
+        if not isinstance(title, str) or not title.strip():
+            raise AskSchemaError("title must be a non-empty string")
+
+        raw_controls = data.get("controls")
+        if not isinstance(raw_controls, dict) or not raw_controls:
+            raise AskSchemaError("controls must be a non-empty object")
+
+        controls = {
+            str(key): _control_from_dict(ctrl_data, path=f"controls.{key}")
+            for key, ctrl_data in raw_controls.items()
+        }
+        metadata = data.get("metadata", {})
+        if not isinstance(metadata, dict):
+            raise AskSchemaError("metadata must be an object")
 
         return cls(
-            question_id=data["question_id"],
-            title=data["title"],
-            description=data.get("description", ""),
+            question_id=question_id,
+            title=title,
+            description=str(data.get("description", "")),
             controls=controls,
-            metadata=data.get("metadata", {}),
+            metadata=metadata,
         )
 
 
@@ -474,7 +532,9 @@ def validate_ask_answer(question: AskQuestion, answer: AskAnswer) -> tuple[dict[
 
     validated = {}
     for key, control in question.controls.items():
-        user_answer = answer.answers.get(key)
+        if key not in answer.answers or answer.answers[key] is None:
+            return None, f"control '{key}': answer required"
+        user_answer = answer.answers[key]
         value, error = control.validate(user_answer)
         if error:
             return None, f"control '{key}': {error}"
@@ -494,7 +554,10 @@ def validate_ask_answer_all(
     """
     errors: dict[str, str] = {}
     for key, control in question.controls.items():
-        user_answer = answer.answers.get(key)
+        if key not in answer.answers or answer.answers[key] is None:
+            errors[key] = "answer required"
+            continue
+        user_answer = answer.answers[key]
         _, error = control.validate(user_answer)
         if error:
             errors[key] = error

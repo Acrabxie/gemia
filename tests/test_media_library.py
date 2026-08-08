@@ -6,7 +6,9 @@ from pathlib import Path
 
 from gemia import accounts, media_library
 from gemia.media_library import (
+    LEGACY_PROJECT_SCOPE,
     MediaLibraryError,
+    copy_asset_to_project,
     get_asset,
     import_media,
     library_path,
@@ -135,6 +137,47 @@ def test_media_library_isolated_by_account(monkeypatch, tmp_path: Path) -> None:
     assert len(list_assets("google_account_one")) == 1
     assert len(list_assets("google_account_two")) == 1
     assert Path(str(one["source_path"])).parent != Path(str(two["source_path"])).parent
+
+
+def test_media_library_isolated_by_project_and_copy_is_explicit(monkeypatch, tmp_path: Path) -> None:
+    _patch_account_roots(monkeypatch, tmp_path)
+    account_id = "google_account_one"
+    source = _make_image(tmp_path / "shared.png")
+
+    project_one = import_media(account_id, source, project_id="project-one")
+
+    assert project_one["project_id"] == "project-one"
+    assert [item["asset_id"] for item in list_assets(account_id, project_id="project-one")] == [project_one["asset_id"]]
+    assert list_assets(account_id, project_id="project-two") == []
+    assert get_asset(account_id, project_one["asset_id"], project_id="project-two") is None
+    with pytest.raises(MediaLibraryError, match="media asset not found"):
+        resolve_asset_file(
+            account_id,
+            project_one["asset_id"],
+            "original",
+            project_id="project-two",
+        )
+
+    project_two = copy_asset_to_project(
+        account_id,
+        project_one["asset_id"],
+        source_project_id="project-one",
+        target_project_id="project-two",
+    )
+    assert project_two["project_id"] == "project-two"
+    assert project_two["asset_id"] != project_one["asset_id"]
+    assert project_two["fingerprint"] == project_one["fingerprint"]
+    assert [item["asset_id"] for item in list_assets(account_id, project_id="project-two")] == [project_two["asset_id"]]
+
+
+def test_legacy_account_rows_stay_outside_real_projects(monkeypatch, tmp_path: Path) -> None:
+    _patch_account_roots(monkeypatch, tmp_path)
+    account_id = "google_account_one"
+    legacy = import_media(account_id, _make_image(tmp_path / "legacy.png"))
+
+    assert legacy["project_id"] == LEGACY_PROJECT_SCOPE
+    assert len(list_assets(account_id)) == 1
+    assert list_assets(account_id, project_id="project-new") == []
 
 
 def test_upload_response_keeps_legacy_shape_with_asset_and_clip(monkeypatch, tmp_path: Path) -> None:

@@ -38,6 +38,71 @@ from gemia import lus as _lus
 
 _LOG = logging.getLogger(__name__)
 
+# Session-scoped recall guidance lives in ``ToolContext.extra`` under this
+# JSON-safe key.  It is deliberately separate from the durable user skill
+# store: a failed route is evidence about the current task, not a permanent
+# defect in the skill itself.
+SKILL_RECALL_GUIDANCE_STATE_KEY = "_skill_recall_guidance"
+SKILL_RECALL_GUIDANCE_MAX_QUERIES = 8
+
+
+def sanitize_skill_recall_guidance_memory(value: Any) -> dict[str, Any]:
+    """Return the bounded JSON-safe session memory used by skill recall.
+
+    The small per-query map lets the model explore an alternate query without
+    forgetting an earlier audited route.  A legacy single-entry shape is
+    accepted so in-flight sessions survive rollout of this format.
+    """
+    raw = value if isinstance(value, dict) else {}
+    raw_entries = raw.get("entries")
+    if not isinstance(raw_entries, dict):
+        legacy_query = str(raw.get("scope_query") or "")[:1000]
+        raw_entries = {legacy_query: raw} if legacy_query else {}
+
+    def _names(entry: dict[str, Any], key: str, limit: int) -> list[str]:
+        items = entry.get(key)
+        if not isinstance(items, list):
+            return []
+        return [
+            " ".join(str(item or "").split())[:120]
+            for item in items[:limit]
+            if str(item or "").strip()
+        ]
+
+    entries: dict[str, dict[str, Any]] = {}
+    for raw_query, raw_entry in list(raw_entries.items())[-SKILL_RECALL_GUIDANCE_MAX_QUERIES:]:
+        if not isinstance(raw_entry, dict):
+            continue
+        query = " ".join(str(raw_query or "").split()).casefold()[:1000]
+        if not query:
+            continue
+        try:
+            revision = max(0, int(raw_entry.get("revision") or 0))
+        except (TypeError, ValueError):
+            revision = 0
+        entries[query] = {
+            "revision": revision,
+            "scope_query": query,
+            "failure_evidence": " ".join(
+                str(raw_entry.get("failure_evidence") or "").split()
+            )[:1200],
+            "guidance": " ".join(
+                str(raw_entry.get("guidance") or "").split()
+            )[:1200],
+            "avoid_skills": _names(raw_entry, "avoid_skills", 12),
+            "previous_skills": _names(raw_entry, "previous_skills", 12),
+            "last_result_names": _names(raw_entry, "last_result_names", 25),
+        }
+
+    last_query = " ".join(str(raw.get("last_query") or "").split()).casefold()[:1000]
+    if last_query not in entries:
+        last_query = next(reversed(entries), "") if entries else ""
+    return {
+        "version": 1,
+        "last_query": last_query,
+        "entries": entries,
+    }
+
 
 def distilled_skills_dir() -> Path:
     """Return the directory where DISTILLED (user-authored) skills are stored.
@@ -614,13 +679,20 @@ def recall_skills(
     store: "DistilledSkillStore | None" = None,
     include_library: bool = True,
     limit: int = 5,
+    guidance: str = "",
+    avoid_skills: list[str] | tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     """Recall the most relevant saved/library skills for ``query``.
 
     Searches BOTH user-distilled skills (from :class:`DistilledSkillStore`)
     and the static skill library, ranks by relevance, and returns up to
-    ``limit`` skills (name + when_to_use + steps + source).  When the query
-    is empty, returns the most recent distilled skills first.
+    ``limit`` skills (name + when_to_use + steps + source). ``guidance`` is a
+    positive rerouting hint supplied after the main model audits a failed
+    result; ``avoid_skills`` removes exact skill names that the audit has
+    explicitly rejected.  Failure evidence itself is intentionally not scored,
+    because repeating failed terms would strengthen the same bad route.  When
+    both query and guidance are empty, returns the most recent distilled skills
+    first.
 
     Per spec §7.2, ``.lus`` skills are ranked on a cheap metadata-only scan
     (name/title, description, triggers); bodies are loaded only for the
@@ -640,8 +712,15 @@ def recall_skills(
 
     query = str(query or "").strip().lower()
     query_terms = [t for t in re.split(r"[\s,，。、/]+", query) if t]
+    guidance = str(guidance or "").strip().lower()
+    guidance_terms = [t for t in re.split(r"[\s,，。、/]+", guidance) if t]
+    avoided = {
+        str(name or "").strip().casefold()
+        for name in (avoid_skills or [])
+        if str(name or "").strip()
+    }
 
-    if not query:
+    if not query and not guidance:
         # No query: prefer freshly distilled skills, then library order.
         distilled = [s for s in candidates if s.get("source") == "distilled"]
         distilled.sort(key=lambda s: str(s.get("updated_at") or ""), reverse=True)
@@ -651,6 +730,11 @@ def recall_skills(
         scored: list[tuple[float, int, dict[str, Any]]] = []
         for idx, skill in enumerate(candidates):
             score = _relevance(skill, query_terms, query)
+            if guidance:
+                # The audit is the model's explicit correction, so it should
+                # influence the next result more strongly than unchanged task
+                # wording while still retaining the original task signal.
+                score += 1.5 * _relevance(skill, guidance_terms, guidance)
             if score > 0:
                 scored.append((score, idx, skill))
         # Highest score first; stable on original order for ties.
@@ -661,6 +745,12 @@ def recall_skills(
     for skill in ranked:
         if len(results) >= limit:
             break
+        identifiers = {
+            str(skill.get("name") or "").strip().casefold(),
+            str(skill.get("machine_name") or "").strip().casefold(),
+        }
+        if identifiers & avoided:
+            continue
         view = _materialize_recall_view(skill)
         if view is not None:
             results.append(view)
@@ -684,6 +774,23 @@ def _materialize_recall_view(skill: dict[str, Any]) -> dict[str, Any] | None:
         return None
     except Exception:
         return None
+    # Charter §14 S3 (recall-side dead-reference filter): a .lus whose
+    # ``tools_used`` names a verb no longer in the live tool surface points the
+    # model at a dead tool — exclude it from recall, never silently. Fail OPEN
+    # when the tool surface is unresolvable (mirrors the save-side known_tools
+    # contract; keeps the store standalone-testable). Scope is deliberately the
+    # canonical .lus ``tools_used`` field only — a v3-verb namespace identical
+    # to ``TOOL_NAMES``; the legacy SKILL.md source (v2 dotted primitives, a
+    # disjoint namespace) is out of scope here to avoid 误杀 (charter 宁窄勿宽).
+    known = _known_tool_names()
+    if known:  # fail OPEN when the tool surface is unavailable (None) OR empty
+        dead = sorted(v for v in meta.tools_used if v not in known)
+        if dead:
+            _LOG.warning(
+                "skill %s quarantined from recall: references dead tool(s) "
+                "%s not in the live tool surface (charter §14 S3)",
+                path.name, ", ".join(dead))
+            return None
     return _recall_view(_lus_record(meta, body, warnings, path))
 
 

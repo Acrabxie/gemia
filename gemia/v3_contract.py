@@ -3,10 +3,10 @@
 Phase 1 of docs/protocol-parity-plan.md: every SSE event kind, ask control
 type, recovery hint, and stable error code the two frontends may see is
 declared HERE first. ``scripts/export_contract.py`` renders this module to
-``static/v3/contract.json`` and vendors a copy into the CLI repo; drift tests
-on both ends (``tests/test_v3_contract.py`` and lumeri-cli
-``test/contract.mjs``) red when an emit site, handler table, or the exported
-JSON disagrees with this module.
+``static/v3/contract.json`` and can vendor a copy into the CLI repo.  Web must
+match the server exactly; a released CLI may remain one additive protocol
+version behind until its production UI lands, and reports that mismatch via
+the existing protocol_hello notice.
 
 Rules (from the parity plan):
 - New event kinds are added here BEFORE the code that emits them.
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 # Bumped when the protocol surface changes shape (not for additive kinds —
 # clients render unknown kinds as banners, so additions are non-breaking).
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 # Every SSE event kind any backend code path may emit. Emit sites live in
 # the files listed in tests/test_v3_contract.py, including session_manager.py
@@ -31,6 +31,7 @@ EVENT_KINDS: frozenset[str] = frozenset({
     "turn_guidance_applied",
     "turn_cancelled",
     "model_text_delta",
+    "model_stream_reset",
     "model_tool_call_start",
     "model_tool_call_ready",
     "tool_exec_start",
@@ -54,9 +55,26 @@ EVENT_KINDS: frozenset[str] = frozenset({
     # (emit_background_update), which is already in the tests' EMIT_FILES.
     "background_task_update",
     "timeline_op",
+    # Clip-level collaborative editing. Segment content is creative history;
+    # view state stays outside that history and carries a client instance id.
+    "segment_content",
+    "segment_reservation",
+    "segment_saved",
+    "segment_branch_ready",
+    "segment_view",
+    # Production protocol v2.  These events report durable project/run truth;
+    # they do not redefine turn_complete, which remains only an end-of-turn
+    # transport event.
+    "production_state_changed",
+    "project_revision_committed",
+    "budget_updated",
+    "delivery_ready",
+    "acceptance_updated",
     "budget_gate",
     "plan_gate",
     "plan_mode_changed",
+    # Receive-only compatibility for older saved/live sessions. AgentLoopV3
+    # no longer emits this event.
     "completion_check",
     "turn_wrapup",
     "turn_complete",
@@ -67,6 +85,11 @@ EVENT_KINDS: frozenset[str] = frozenset({
     # never in the replay buffer): {"kind": "protocol_hello", "protocol_version": N}.
     "protocol_hello",
 })
+
+# Declared for replay/client compatibility, but never emitted by the current
+# backend. Keep this separate so drift tests do not mistake compatibility for
+# active control flow.
+RECEIVE_ONLY_EVENT_KINDS: frozenset[str] = frozenset({"completion_check"})
 
 # Control types an ask_question payload may carry (gemia/tools/ask.py
 # AskControlType). The CLI answers all of them; web is display-only for now
@@ -90,7 +113,7 @@ RECOVERY: frozenset[str] = frozenset({
 })
 
 # Stable error codes: the errors.py class hierarchy plus protocol-relevant
-# gate/ask codes. Tool-local inline codes (E_BAD_ARG variants etc.) are
+# gate/ask/production codes. Other tool-local inline codes are
 # deliberately NOT frozen — clients treat error_code as an opaque display
 # chip, so freezing every string would make each new tool error a contract
 # bump for zero client benefit.
@@ -105,6 +128,14 @@ ERROR_CODES: frozenset[str] = frozenset({
     "E_BUDGET",
     "E_PLAN_MODE",
     "E_BUSY",
+    "E_BAD_ARG",
+    "E_NOT_FOUND",
+    "E_REVISION_CONFLICT",
+    "E_IDEMPOTENCY_CONFLICT",
+    "E_PRODUCTION_STATE",
+    "E_PROJECT_BUSY",
+    "E_REVIEW_INVALID",
+    "E_STATE_TRANSITION",
     "E_ASK",
     "E_ASK_INVALID_ANSWER",
     "E_ASK_INVALID_CHOICE",

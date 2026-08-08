@@ -109,6 +109,11 @@ def _apply_legacy_clip_op(project: dict[str, Any], operation: str, op: dict[str,
         _upsert_asset(project, copy.deepcopy(asset))
     if operation == "insert_clip":
         project["timeline"]["clips"].append(clip)
+        # Legacy emitters are still Agent creation paths.  A newly created
+        # Clip must be expandable immediately, while reads of old flat Clips
+        # remain lazy and zero-write.
+        from gemia.segment_document import persisted_segment
+        persisted_segment(project, clip, create=True)
         return
     clip_id = str(op.get("clip_id") or clip.get("id") or "")
     if not clip_id:
@@ -448,6 +453,11 @@ def _op_insert_clip(project: dict[str, Any], op: dict[str, Any]) -> None:
             )
     _stamp_provenance(op, clip)
     project["timeline"]["clips"].append(clip)
+    # Agent-created Clips always enter the timeline with a parseable internal
+    # structure. This is a creation-time write, so it does not violate the
+    # lazy read-only rule for pre-existing flat media.
+    from gemia.segment_document import persisted_segment
+    persisted_segment(project, clip, create=True)
 
 
 def _op_delete_clip(project: dict[str, Any], op: dict[str, Any]) -> None:
@@ -572,7 +582,70 @@ def _op_split_clip(project: dict[str, Any], op: dict[str, Any]) -> None:
     clip["transition_after"] = None
     _stamp_provenance(op, clip, back)
     clips = project["timeline"]["clips"]
+    # A split creates a new Clip identity and therefore a deep-copied internal
+    # SegmentDocument. Flat legacy clips remain lazy and still carry no write.
+    segment_ref = str(clip.get("segment_ref") or "")
+    segments = project.get("segments") if isinstance(project.get("segments"), dict) else {}
+    if not segment_ref or not isinstance(segments.get(segment_ref), dict):
+        # Splitting is a real creative edit: a previously flat legacy Clip is
+        # materialized now, then the two identities receive independent docs.
+        from gemia.segment_document import persisted_segment
+        source_doc = persisted_segment(project, clip, create=True)
+        segment_ref = str(source_doc.get("segment_id") or clip.get("segment_ref") or "")
+    if segment_ref and isinstance(segments.get(segment_ref), dict):
+        from gemia.segment_document import new_segment_id
+        copied_ref = new_segment_id(new_clip_id)
+        copied = copy.deepcopy(segments[segment_ref])
+        copied["segment_id"] = copied_ref
+        copied["clip_id"] = new_clip_id
+        copied["revision"] = 0
+        copied["history"] = []
+        copied["reservations"] = {}
+        copied["handback_required"] = False
+        segments[copied_ref] = copied
+        back["segment_ref"] = copied_ref
+        timeline_items = copied.get("timeline") or []
+        if timeline_items and isinstance(timeline_items[0], dict):
+            timeline_items[0]["duration"] = round(back["duration"], 6)
+        source_items = segments[segment_ref].get("timeline") or []
+        if source_items and isinstance(source_items[0], dict):
+            source_items[0]["duration"] = round(clip["duration"], 6)
     clips.insert(clips.index(clip) + 1, back)
+
+
+def _op_duplicate_clip(project: dict[str, Any], op: dict[str, Any]) -> None:
+    """Duplicate one clip as a new timeline identity with an isolated segment."""
+    clip = _require_clip(project, op)
+    new_clip_id = str(op.get("new_clip_id") or "") or _new_clip_id()
+    if _find_clip(project, new_clip_id) is not None:
+        raise TimelinePatchError("E_BAD_ARG", f"new_clip_id already exists: {new_clip_id}")
+    duplicate = copy.deepcopy(clip)
+    duplicate["id"] = new_clip_id
+    duplicate["start"] = round(_clip_end(clip), 6)
+    segment_ref = str(clip.get("segment_ref") or "")
+    segments = project.get("segments") if isinstance(project.get("segments"), dict) else {}
+    if not segment_ref or not isinstance(segments.get(segment_ref), dict):
+        from gemia.segment_document import persisted_segment
+        source_doc = persisted_segment(project, clip, create=True)
+        segment_ref = str(source_doc.get("segment_id") or clip.get("segment_ref") or "")
+    if segment_ref and isinstance(segments.get(segment_ref), dict):
+        from gemia.segment_document import new_segment_id
+        copied_ref = new_segment_id(new_clip_id)
+        copied = copy.deepcopy(segments[segment_ref])
+        copied["segment_id"] = copied_ref
+        copied["clip_id"] = new_clip_id
+        copied["revision"] = 0
+        copied["history"] = []
+        copied["reservations"] = {}
+        copied["handback_required"] = False
+        segments[copied_ref] = copied
+        duplicate["segment_ref"] = copied_ref
+    project["timeline"]["clips"].insert(project["timeline"]["clips"].index(clip) + 1, duplicate)
+
+
+def _op_segment_edit(project: dict[str, Any], op: dict[str, Any]) -> None:
+    from gemia.segment_document import apply_segment_edit
+    apply_segment_edit(project, op)
 
 
 def _op_set_clip_time(project: dict[str, Any], op: dict[str, Any]) -> None:
@@ -699,9 +772,10 @@ def _validated_effect_value(key: str, value: Any) -> Any:
         return value
     number = _number(value, f"effects.{key}")
     if key == "rotation":
-        if number not in (0.0, 90.0, 180.0, 270.0):
-            raise TimelinePatchError("E_BAD_ARG", "effects.rotation must be one of 0/90/180/270")
-        return int(number)
+        # Direct manipulation is continuous; keep a compact, stable degree
+        # value while accepting any finite angle the numeric inspector emits.
+        normalized = ((number + 180.0) % 360.0) - 180.0
+        return round(normalized, 6)
     if key in {"speed", "scale"} and number <= 0:
         raise TimelinePatchError("E_BAD_ARG", f"effects.{key} must be > 0")
     if key == "blur_radius" and number < 0:
@@ -880,6 +954,24 @@ def _op_set_shotlist(project: dict[str, Any], op: dict[str, Any]) -> None:
     if not isinstance(raw, dict):
         raise TimelinePatchError("E_BAD_ARG", "set_shotlist requires a 'shotlist' object")
     project["shotlist"] = normalize_shotlist(raw)
+
+
+def _op_set_project_title(project: dict[str, Any], op: dict[str, Any]) -> None:
+    """Set the human-facing project title without replacing the document.
+
+    Production migrations can recover a valid timeline whose legacy title is
+    still ``Untitled Project``.  Treating the rename as a normal patch keeps it
+    revisioned and undoable instead of rewriting ``state.json`` out of band.
+    """
+
+    title = str(op.get("title") or "").strip()
+    if not title:
+        raise TimelinePatchError("E_BAD_ARG", "set_project_title requires title")
+    if len(title) > 120:
+        raise TimelinePatchError(
+            "E_BAD_ARG", "set_project_title title must be at most 120 characters"
+        )
+    project["title"] = title
 
 
 def _op_update_shot(project: dict[str, Any], op: dict[str, Any]) -> None:
@@ -1322,6 +1414,7 @@ def _op_move_quantum(project: dict[str, Any], op: dict[str, Any]) -> None:
 
 
 _OP_HANDLERS: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {
+    "set_project_title": _op_set_project_title,
     "set_shotlist": _op_set_shotlist,
     "update_shot": _op_update_shot,
     "set_quanta": _op_set_quanta,
@@ -1334,6 +1427,8 @@ _OP_HANDLERS: dict[str, Callable[[dict[str, Any], dict[str, Any]], None]] = {
     "move_clip": _op_move_clip,
     "trim_clip": _op_trim_clip,
     "split_clip": _op_split_clip,
+    "duplicate_clip": _op_duplicate_clip,
+    "segment_edit": _op_segment_edit,
     "set_clip_time": _op_set_clip_time,
     "add_transition": _op_add_transition,
     "set_clip_effects": _op_set_clip_effects,

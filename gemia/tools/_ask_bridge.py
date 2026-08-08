@@ -8,8 +8,8 @@ to the frontend and then ``await``s the user's answer. An HTTP handler on a
 ``call_soon_threadsafe`` to resolve the awaiting future.
 
 ``AskBridge`` encapsulates exactly that plumbing so the agent loop and the routes
-stay thin, and so the wait/deliver/timeout logic is unit-testable without standing
-up the HTTP server.
+stay thin, and so required waits and optional timeouts are unit-testable without
+standing up the HTTP server.
 """
 from __future__ import annotations
 
@@ -50,12 +50,17 @@ class AskBridge:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     async def emit_and_wait(
-        self, question: dict[str, Any], *, timeout: Optional[float] = None
+        self,
+        question: dict[str, Any],
+        *,
+        timeout: Optional[float] = None,
+        required: bool = False,
     ) -> Optional[dict[str, Any]]:
         """Emit ``ask_question`` and await the answer on the current loop.
 
-        Returns the raw ``{control_key: value}`` answers dict, or ``None`` if no
-        answer arrives within ``timeout`` (the caller then applies defaults).
+        A required user decision has no timer: it stays pending until an answer
+        is delivered or the surrounding turn is cancelled. Optional callers may
+        still use ``timeout`` and receive ``None`` when it expires.
         """
         loop = asyncio.get_running_loop()
         self._loop = loop
@@ -66,16 +71,17 @@ class AskBridge:
 
         self._emit({"kind": "ask_question", "question": question})
 
-        requested = self.default_timeout if timeout is None else float(timeout)
-        wait = min(requested, self.max_timeout) if self.max_timeout > 0 else requested
         timer = None
-        if wait > 0:
-            def _on_timeout() -> None:
-                if not fut.done():
-                    fut.set_result(None)
-            timer = loop.call_later(wait, _on_timeout)
-        elif not fut.done():
-            fut.set_result(None)
+        if not required:
+            requested = self.default_timeout if timeout is None else float(timeout)
+            wait = min(requested, self.max_timeout) if self.max_timeout > 0 else requested
+            if wait > 0:
+                def _on_timeout() -> None:
+                    if not fut.done():
+                        fut.set_result(None)
+                timer = loop.call_later(wait, _on_timeout)
+            elif not fut.done():
+                fut.set_result(None)
 
         try:
             return await fut
@@ -92,11 +98,33 @@ class AskBridge:
         scheduled; ``False`` if it is unknown / already answered / loop not ready.
         """
         loop = self._loop
-        if loop is None or str(question_id) not in self._pending:
+        qid = str(question_id)
+        question = self._questions.get(qid)
+        if loop is None or qid not in self._pending or question is None:
+            return False
+
+        # Validate again at the bridge boundary so alternate callers cannot
+        # bypass the HTTP route and release a required decision with malformed,
+        # missing, or default-substituted answers.
+        try:
+            from gemia.tools.ask import (
+                AskAnswer,
+                AskQuestion,
+                validate_ask_answer_all,
+            )
+
+            parsed = AskQuestion.from_dict(question)
+            errors = validate_ask_answer_all(
+                parsed,
+                AskAnswer(question_id=qid, answers=dict(answers or {})),
+            )
+        except Exception:
+            return False
+        if errors:
             return False
 
         def _resolve() -> None:
-            fut = self._pending.get(str(question_id))
+            fut = self._pending.get(qid)
             if fut is not None and not fut.done():
                 fut.set_result(dict(answers or {}))
 

@@ -18,7 +18,7 @@ import re
 import sqlite3
 from typing import Any
 
-from gemia.media_library import library_path, media_root
+from gemia.media_library import LEGACY_PROJECT_SCOPE, ensure_library, library_path
 
 # BMP CJK ranges: CJK Unified + Ext-A, CJK Compat Ideographs, Hiragana/Katakana,
 # Hangul syllables. Ingest and query MUST use the same class or recall breaks.
@@ -76,7 +76,7 @@ def build_match_expr(query: str) -> str:
 
 
 def _connect(account_id: str) -> sqlite3.Connection:
-    media_root(account_id).mkdir(parents=True, exist_ok=True)
+    ensure_library(account_id)
     conn = sqlite3.connect(library_path(account_id))
     conn.row_factory = sqlite3.Row
     return conn
@@ -94,6 +94,9 @@ _CORE_SQL = """
 SELECT a.rowid AS rowid, a.annotation_id AS annotation_id, a.asset_id AS asset_id,
        a.scope AS scope, a.start_sec AS start_sec, a.end_sec AS end_sec,
        a.label AS label, a.category AS category, a.confidence AS confidence,
+       a.source AS source, a.note AS note, a.tags_json AS tags_json,
+       a.metadata_json AS metadata_json, a.created_at AS created_at,
+       a.updated_at AS updated_at,
        a.search_text AS search_text,
        m.name AS name, m.media_kind AS media_kind, m.duration AS duration,
        bm25(media_annotations_fts) AS rank
@@ -101,19 +104,28 @@ FROM media_annotations_fts f
 JOIN media_annotations a ON a.rowid = f.rowid
 JOIN media_assets m ON m.asset_id = a.asset_id AND m.deleted_at IS NULL
 WHERE media_annotations_fts MATCH :expr
+  AND m.project_id = :project_id
   AND (:kind = '' OR m.media_kind = :kind)
 ORDER BY rank
 LIMIT 400
 """
 
 
-def _run_match(conn: sqlite3.Connection, expr: str, kind_filter: str) -> list[sqlite3.Row]:
+def _run_match(
+    conn: sqlite3.Connection,
+    expr: str,
+    kind_filter: str,
+    project_id: str,
+) -> list[sqlite3.Row]:
     if not expr:
         return []
-    return conn.execute(_CORE_SQL, {"expr": expr, "kind": kind_filter}).fetchall()
+    return conn.execute(
+        _CORE_SQL,
+        {"expr": expr, "kind": kind_filter, "project_id": project_id},
+    ).fetchall()
 
 
-def _unindexed_count(conn: sqlite3.Connection, kind_filter: str) -> int:
+def _unindexed_count(conn: sqlite3.Connection, kind_filter: str, project_id: str) -> int:
     """Assets of the requested kind (not deleted) with no vision-index 'ok' state row.
 
     Matches design doc §4.4 / §7.1: index-worthiness is tracked in ``media_index_state``.
@@ -123,8 +135,8 @@ def _unindexed_count(conn: sqlite3.Connection, kind_filter: str) -> int:
     if not _table_exists(conn, "media_assets"):
         return 0
     has_state = _table_exists(conn, "media_index_state")
-    clauses = ["deleted_at IS NULL"]
-    params: list[Any] = []
+    clauses = ["deleted_at IS NULL", "project_id = ?"]
+    params: list[Any] = [project_id]
     if kind_filter:
         clauses.append("media_kind = ?")
         params.append(kind_filter)
@@ -143,6 +155,7 @@ def search_media_annotations(
     *,
     kind: str = "any",
     limit: int = 8,
+    project_id: str | None = None,
 ) -> dict[str, Any]:
     """Library-level semantic search returning assets WITH time ranges.
 
@@ -153,6 +166,7 @@ def search_media_annotations(
     """
     kind = str(kind or "any").strip().lower() or "any"
     kind_filter = "" if kind == "any" else kind
+    project_scope = str(project_id or LEGACY_PROJECT_SCOPE).strip()
     try:
         limit = max(1, min(20, int(limit)))
     except (TypeError, ValueError):
@@ -175,15 +189,15 @@ def search_media_annotations(
     try:
         if not _table_exists(conn, "media_annotations_fts"):
             return empty
-        rows = _run_match(conn, expr, kind_filter)
+        rows = _run_match(conn, expr, kind_filter, project_scope)
         # OR fallback: 0 rows AND the expression has >= 2 top-level terms.
         terms = expr.split()
         if not rows and len(terms) >= 2:
             or_expr = " OR ".join(terms)
-            rows = _run_match(conn, or_expr, kind_filter)
+            rows = _run_match(conn, or_expr, kind_filter, project_scope)
             if rows:
                 fuzzy = True
-        unindexed = _unindexed_count(conn, kind_filter)
+        unindexed = _unindexed_count(conn, kind_filter, project_scope)
     finally:
         conn.close()
 
@@ -231,6 +245,12 @@ def search_media_annotations(
                     "label": label,
                     "category": str(row["category"] or ""),
                     "confidence": row["confidence"],
+                    "source": str(row["source"] or "user"),
+                    "note": str(row["note"] or ""),
+                    "tags": _json_list(row["tags_json"]),
+                    "metadata": _json_dict(row["metadata_json"]),
+                    "created_at": str(row["created_at"] or ""),
+                    "updated_at": str(row["updated_at"] or ""),
                     "annotation_id": str(row["annotation_id"] or ""),
                     "_rank": rank,
                 }
@@ -248,7 +268,7 @@ def search_media_annotations(
     for score, entry in scored[:limit]:
         time_rows = sorted(entry["time_rows"], key=lambda r: r["_rank"])[:6]
         for tr in time_rows:
-            tr.pop("_rank", None)
+            tr["match_rank"] = round(float(tr.pop("_rank", 0.0)), 6)
         results.append(
             {
                 "library_asset_id": entry["library_asset_id"],
@@ -272,13 +292,48 @@ def search_media_annotations(
     }
 
 
-def asset_ids_matching(account_id: str, q: str, *, limit: int = 1000) -> list[str]:
+def _json_list(raw: Any) -> list[Any]:
+    if isinstance(raw, list):
+        return raw
+    if not raw:
+        return []
+    import json
+
+    try:
+        value = json.loads(str(raw))
+    except Exception:
+        return []
+    return value if isinstance(value, list) else []
+
+
+def _json_dict(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    import json
+
+    try:
+        value = json.loads(str(raw))
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def asset_ids_matching(
+    account_id: str,
+    q: str,
+    *,
+    limit: int = 1000,
+    project_id: str | None = None,
+) -> list[str]:
     """Distinct library asset ids whose annotations match ``q`` (day-2 N+1 kill for
     ``media_library.list_assets(q=)``). Read-only, never raises."""
     expr = build_match_expr(q)
     if not expr:
         return []
     conn = _connect(account_id)
+    project_scope = str(project_id or LEGACY_PROJECT_SCOPE).strip()
     try:
         if not _table_exists(conn, "media_annotations_fts"):
             return []
@@ -287,10 +342,13 @@ def asset_ids_matching(account_id: str, q: str, *, limit: int = 1000) -> list[st
             SELECT DISTINCT a.asset_id
             FROM media_annotations_fts f
             JOIN media_annotations a ON a.rowid = f.rowid
+            JOIN media_assets m ON m.asset_id = a.asset_id
             WHERE media_annotations_fts MATCH :expr
+              AND m.project_id = :project_id
+              AND m.deleted_at IS NULL
             LIMIT :limit
             """,
-            {"expr": expr, "limit": int(limit)},
+            {"expr": expr, "project_id": project_scope, "limit": int(limit)},
         ).fetchall()
         return [str(r["asset_id"]) for r in rows]
     finally:

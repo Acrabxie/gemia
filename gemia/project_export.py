@@ -16,6 +16,7 @@ Backward compatible: a project with no audio anywhere (no audio clips and
 no video clip carrying a real, unmuted audio stream) keeps the silent
 ``-an`` path and exports exactly as before.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -30,6 +31,15 @@ from typing import Any
 
 from gemia.compat import ffmpeg_path, ffprobe_path
 from gemia.project_model import IMAGE_DURATION, normalize_project
+from gemia.render_receipt import (
+    AUDIO_MASTER_LRA_LU,
+    AUDIO_MASTER_TARGET_LUFS,
+    AUDIO_MASTER_TRUE_PEAK_DBTP,
+    build_graph_identity,
+    build_render_receipt,
+    render_id_for,
+)
+
 try:
     from gemia.video.fonts import resolve_font_path as _resolve_font_path
 except Exception:  # pragma: no cover - fonts module optional
@@ -49,10 +59,10 @@ class ProjectExportError(RuntimeError):
 
 
 _QUALITY_PROFILES: dict[str, dict[str, str]] = {
-    "4k":    {"crf": "16", "preset": "slow"},
+    "4k": {"crf": "16", "preset": "slow"},
     "1080p": {"crf": "18", "preset": "slow"},
-    "720p":  {"crf": "20", "preset": "medium"},
-    "480p":  {"crf": "23", "preset": "medium"},
+    "720p": {"crf": "20", "preset": "medium"},
+    "480p": {"crf": "23", "preset": "medium"},
     "draft": {"crf": "28", "preset": "veryfast"},
 }
 
@@ -79,6 +89,9 @@ def export_project(
     quality: str = "1080p",
     label: str = "export",
     timeout_sec: int = 300,
+    max_long_edge: int | None = None,
+    verify_decode: bool = False,
+    reality_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Export the current project state as a full-quality H.264 MP4.
 
@@ -92,6 +105,11 @@ def export_project(
         )
 
     project = normalize_project(store.load(project_id))
+    # Segment edits are the creator-facing source of truth for the Clip's
+    # render reference.  Keep this adapter in-memory: the canonical snapshot
+    # remains SegmentDocument + Clip, while the existing renderer receives the
+    # geometry/visibility vocabulary it already understands.
+    _apply_segment_render_refs(project)
 
     # Pass 0 — comp_ref freshness (docs/timeline-canonical-plan.md §3.3): comp
     # clips are LIVE references, so a stale lumenframe doc hash triggers a
@@ -100,17 +118,23 @@ def export_project(
     comp_refreshed = _refresh_comp_assets(store, project_id, project)
     if comp_refreshed:
         project = normalize_project(store.load(project_id))
+        _apply_segment_render_refs(project)
 
     meta = store.load_meta(project_id)
     patch_seq = int(meta.get("patch_seq") or 0)
+    graph_identity = build_graph_identity(project)
 
-    timeline = project.get("timeline") if isinstance(project.get("timeline"), dict) else {}
+    timeline = (
+        project.get("timeline") if isinstance(project.get("timeline"), dict) else {}
+    )
     fps = _pos(timeline.get("fps"), 30.0)
     width = max(2, int(_pos(timeline.get("width"), 1920.0)))
     height = max(2, int(_pos(timeline.get("height"), 1080.0)))
     # enforce even dimensions for yuv420p
     width = width + (width % 2)
     height = height + (height % 2)
+    if max_long_edge is not None:
+        width, height = _fit_size(width, height, max_long_edge=max_long_edge)
 
     assets = _build_asset_map(project)
     video_clips = _enabled_video_clips(project, assets)
@@ -125,7 +149,13 @@ def export_project(
 
     output_dir = Path(output_root).expanduser().resolve() / "exports" / project_id
     output_dir.mkdir(parents=True, exist_ok=True)
-    export_id = f"{patch_seq:04d}-{_slug(label)}"
+    render_preset = f"{quality}-{width}x{height}"
+    export_id = render_id_for(
+        patch_seq=patch_seq,
+        graph_hash=str(graph_identity["graph_hash"]),
+        preset=render_preset,
+        label=label,
+    )
     export_path = output_dir / f"{export_id}.mp4"
 
     work_dir = store.renders_dir(project_id) / f"{export_id}.export-work"
@@ -150,9 +180,12 @@ def export_project(
 
     try:
         base_video, transition_records = _render_base_video(
-            video_clips, assets,
+            video_clips,
+            assets,
             work_dir=work_dir,
-            width=width, height=height, fps=fps,
+            width=width,
+            height=height,
+            fps=fps,
             quality=quality,
             timeout_sec=timeout_sec,
             min_duration=master_duration,
@@ -160,11 +193,13 @@ def export_project(
         # Transitions degraded at render time (plan §5.2) are silent drops too.
         for record in transition_records:
             if record.get("status") == "degraded":
-                dropped_fields.append({
-                    "clip_id": str(record.get("clip_id") or ""),
-                    "field": "transition_after",
-                    "reason": str(record.get("reason") or "not_rendered"),
-                })
+                dropped_fields.append(
+                    {
+                        "clip_id": str(record.get("clip_id") or ""),
+                        "field": "transition_after",
+                        "reason": str(record.get("reason") or "not_rendered"),
+                    }
+                )
 
         # Pass 3 input: gather every audio source first. When there is none
         # (no audio clips and no unmuted video clip with a real audio stream),
@@ -176,9 +211,13 @@ def export_project(
         composited = (work_dir / "composited.mp4") if audio_sources else export_path
         if overlay_clips:
             _apply_overlays(
-                base_video, overlay_clips, assets,
+                base_video,
+                overlay_clips,
+                assets,
                 output=composited,
-                width=width, height=height, fps=fps,
+                width=width,
+                height=height,
+                fps=fps,
                 quality=quality,
                 timeout_sec=timeout_sec,
             )
@@ -188,11 +227,20 @@ def export_project(
         else:
             # No overlays, no audio — copy the base video to final location.
             _run_ffmpeg(
-                [ffmpeg_path(), "-y", "-hide_banner", "-loglevel", "error",
-                 "-i", str(base_video),
-                 "-c", "copy",
-                 "-movflags", "+faststart",
-                 str(export_path)],
+                [
+                    ffmpeg_path(),
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    str(base_video),
+                    "-c",
+                    "copy",
+                    "-movflags",
+                    "+faststart",
+                    str(export_path),
+                ],
                 output=export_path,
                 timeout_sec=timeout_sec,
             )
@@ -204,10 +252,13 @@ def export_project(
                 if isinstance(t, dict) and t.get("duck_under")
             }
             _mux_audio_onto_video(
-                composited, audio_sources,
+                composited,
+                audio_sources,
                 output=export_path,
+                work_dir=work_dir,
                 timeout_sec=timeout_sec,
                 duck_map=duck_map,
+                master_duration=master_duration,
             )
     finally:
         _cleanup_dir(work_dir)
@@ -215,6 +266,62 @@ def export_project(
     probe = _ffprobe(export_path)
     duration = _probe_duration(probe)
     resolution = _probe_resolution(probe) or {"width": width, "height": height}
+    decode_check = (
+        _full_decode_check(export_path, timeout_sec=timeout_sec)
+        if verify_decode
+        else {"status": "not_run"}
+    )
+    audio_analysis = (
+        _measure_loudness(export_path, timeout_sec=timeout_sec)
+        if verify_decode
+        else {"status": "not_run"}
+    )
+    degradations = [
+        dict(record)
+        for record in transition_records
+        if str(record.get("status") or "") == "degraded"
+    ]
+    if verify_decode:
+        from gemia.reality_contract import (
+            MAX_MEDIA_BUDGET_USD,
+            normalize_reality_contract,
+            render_expectations,
+        )
+
+        contract = normalize_reality_contract(
+            reality_contract,
+            hard_cap_usd=MAX_MEDIA_BUDGET_USD,
+        )
+        expected = render_expectations(
+            contract,
+            timeline_duration=master_duration or duration,
+        )
+    else:
+        expected = {
+            "duration": master_duration or duration,
+            "fps": fps,
+            "width": width,
+            "height": height,
+            "has_audio": bool(audio_sources),
+        }
+    receipt = build_render_receipt(
+        project=project,
+        project_id=project_id,
+        patch_seq=patch_seq,
+        preset=render_preset,
+        render_id=export_id,
+        output_path=export_path,
+        probe=probe,
+        decode_check=decode_check,
+        dropped_fields=dropped_fields,
+        degradations=degradations,
+        expected=expected,
+        audio_analysis=audio_analysis,
+        graph_identity=graph_identity,
+    )
+    receipt_path = store.renders_dir(project_id) / f"{export_id}.receipt.json"
+    receipt["receipt_path"] = str(receipt_path)
+    _write_json(receipt_path, receipt)
 
     manifest = {
         "export_id": export_id,
@@ -224,6 +331,7 @@ def export_project(
         "duration": duration,
         "resolution": resolution,
         "quality": quality,
+        "render_preset": render_preset,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "video_clips_rendered": len(video_clips),
         "overlay_clips_rendered": len(overlay_clips),
@@ -240,6 +348,15 @@ def export_project(
         # Pass 0 honesty: every comp_ref asset that was re-rendered (or whose
         # source document went missing) on this export, with old/new hashes.
         "comp_refreshed": comp_refreshed,
+        "graph_hash": graph_identity["graph_hash"],
+        "source_manifest_hash": graph_identity["source_manifest_hash"],
+        "segment_manifest_hash": graph_identity.get("segment_manifest_hash"),
+        "segment_manifest": graph_identity.get("segment_manifest", []),
+        "render_semantics_version": graph_identity["render_semantics_version"],
+        "render_receipt": receipt,
+        "receipt_path": str(receipt_path),
+        "machine_status": receipt["machine_status"],
+        "machine_blockers": receipt["machine_blockers"],
     }
     manifest_path = store.renders_dir(project_id) / f"{export_id}.manifest.json"
     _write_json(manifest_path, manifest)
@@ -275,11 +392,11 @@ def _refresh_comp_assets(
     invariants and pass-3 audio positions (contract §3.3 shrink guard).
     """
     asset_map = {
-        str(a.get("id")): a
-        for a in project.get("assets") or []
-        if isinstance(a, dict)
+        str(a.get("id")): a for a in project.get("assets") or [] if isinstance(a, dict)
     }
-    timeline = project.get("timeline") if isinstance(project.get("timeline"), dict) else {}
+    timeline = (
+        project.get("timeline") if isinstance(project.get("timeline"), dict) else {}
+    )
     comp_clips: dict[str, list[str]] = {}
     for clip in timeline.get("clips") or []:
         if not isinstance(clip, dict) or not bool(clip.get("enabled", True)):
@@ -287,7 +404,9 @@ def _refresh_comp_assets(
         asset = asset_map.get(str(clip.get("asset_id") or ""))
         if asset is None or _comp_ref_of(asset) is None:
             continue
-        comp_clips.setdefault(str(asset.get("id")), []).append(str(clip.get("id") or ""))
+        comp_clips.setdefault(str(asset.get("id")), []).append(
+            str(clip.get("id") or "")
+        )
     if not comp_clips:
         return []
 
@@ -297,19 +416,22 @@ def _refresh_comp_assets(
         # The comp document is gone: the cached render still exports, but the
         # live reference has degraded to a snapshot. Record honestly, don't fail.
         for asset_id, clip_ids in comp_clips.items():
-            records.append({
-                "asset_id": asset_id,
-                "clip_ids": clip_ids,
-                "status": "skipped",
-                "reason": "doc_missing",
-            })
+            records.append(
+                {
+                    "asset_id": asset_id,
+                    "clip_ids": clip_ids,
+                    "status": "skipped",
+                    "reason": "doc_missing",
+                }
+            )
         return records
 
     current_hash = "sha256:" + hashlib.sha256(doc_file.read_bytes()).hexdigest()
     stale = {
         asset_id: asset_map[asset_id]
         for asset_id in comp_clips
-        if str((_comp_ref_of(asset_map[asset_id]) or {}).get("doc_hash")) != current_hash
+        if str((_comp_ref_of(asset_map[asset_id]) or {}).get("doc_hash"))
+        != current_hash
     }
     if not stale:
         return []
@@ -380,18 +502,26 @@ def _refresh_comp_assets(
         metadata["comp_ref"] = ref
         # _upsert_asset merges {**existing, **asset}: only re-point the path and
         # provenance; duration/media_kind/etc. survive from the existing asset.
-        ops.append({
-            "op": "upsert_asset",
-            "asset": {"id": asset_id, "source_path": str(new_path), "metadata": metadata},
-        })
-        records.append({
-            "asset_id": asset_id,
-            "clip_ids": clip_ids,
-            "old_hash": old_hash,
-            "new_hash": current_hash,
-            "source_path": str(new_path),
-            "status": "refreshed",
-        })
+        ops.append(
+            {
+                "op": "upsert_asset",
+                "asset": {
+                    "id": asset_id,
+                    "source_path": str(new_path),
+                    "metadata": metadata,
+                },
+            }
+        )
+        records.append(
+            {
+                "asset_id": asset_id,
+                "clip_ids": clip_ids,
+                "old_hash": old_hash,
+                "new_hash": current_hash,
+                "source_path": str(new_path),
+                "status": "refreshed",
+            }
+        )
 
     # One patch for the whole refresh = one undoable step; undo re-points
     # source_path at the OLD cache file, which still exists (append-only cache).
@@ -438,7 +568,8 @@ def _render_base_video(
     """
     profile = _QUALITY_PROFILES[quality]
     video_end = max(
-        _pos(c["clip"].get("start"), 0.0) + _clip_duration(c["clip"]) for c in video_clips
+        _pos(c["clip"].get("start"), 0.0) + _clip_duration(c["clip"])
+        for c in video_clips
     )
     timeline_duration = max(video_end, _pos(min_duration, 0.0))
     segments: list[dict[str, Any]] = _timeline_segments(video_clips, timeline_duration)
@@ -462,8 +593,11 @@ def _render_base_video(
                 f"-{_slug(str(window.get('b_id') or 'b'))}.mp4"
             )
             _render_xfade_window(
-                window, win_path,
-                width=width, height=height, fps=fps,
+                window,
+                win_path,
+                width=width,
+                height=height,
+                fps=fps,
                 profile=profile,
                 timeout_sec=timeout_sec,
             )
@@ -474,7 +608,11 @@ def _render_base_video(
         if item is None:
             gap = work_dir / f"{index:04d}-gap.mp4"
             _render_black_segment(
-                gap, duration=seg_dur, width=width, height=height, fps=fps,
+                gap,
+                duration=seg_dur,
+                width=width,
+                height=height,
+                fps=fps,
                 timeout_sec=timeout_sec,
             )
             segment_paths.append(gap)
@@ -498,13 +636,18 @@ def _render_base_video(
         seg_path = work_dir / f"{index:04d}-{_slug(str(clip.get('id') or 'clip'))}.mp4"
         media_kind = str(asset.get("media_kind") or "video")
         _render_video_segment(
-            source, seg_path,
-            source_in=source_in, duration=trim_dur,
-            width=width, height=height, fps=fps,
+            source,
+            seg_path,
+            source_in=source_in,
+            duration=trim_dur,
+            width=width,
+            height=height,
+            fps=fps,
             profile=profile,
             media_kind=media_kind,
             timeout_sec=timeout_sec,
             vf_extra=str(seg.get("vf_extra") or ""),
+            effects=(clip.get("effects") if isinstance(clip.get("effects"), dict) else {}),
         )
         segment_paths.append(seg_path)
 
@@ -532,37 +675,88 @@ def _render_video_segment(
     media_kind: str = "video",
     timeout_sec: int,
     vf_extra: str = "",
+    effects: dict[str, Any] | None = None,
 ) -> None:
+    effects = effects if isinstance(effects, dict) else {}
+    has_geometry = (
+        effects.get("x") is not None
+        or effects.get("y") is not None
+        or abs(_pos(effects.get("scale"), 1.0) - 1.0) > 1e-6
+        or abs(_pos(effects.get("rotation"), 0.0)) > 1e-6
+    )
     vf = _video_filter(width=width, height=height, fps=fps) + vf_extra
-    
+
     cmd = [
-        ffmpeg_path(), "-y", "-hide_banner", "-loglevel", "error",
+        ffmpeg_path(),
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
     ]
-    
+
     if media_kind == "image":
-        cmd.extend([
-            "-loop", "1",
-            "-framerate", f"{fps:.6f}",
-            "-t", f"{max(duration, 0.1):.6f}",
-            "-i", str(source),
-        ])
+        cmd.extend(
+            [
+                "-loop",
+                "1",
+                "-framerate",
+                f"{fps:.6f}",
+                "-t",
+                f"{max(duration, 0.1):.6f}",
+                "-i",
+                str(source),
+            ]
+        )
     else:
-        cmd.extend([
-            "-ss", f"{source_in:.6f}",
-            "-t", f"{max(duration, 0.1):.6f}",
-            "-i", str(source),
-        ])
-    
-    cmd.extend([
-        "-an",
-        "-vf", vf,
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        "-crf", profile["crf"],
-        "-preset", profile["preset"],
-        "-movflags", "+faststart",
-        str(output),
-    ])
+        cmd.extend(
+            [
+                "-ss",
+                f"{source_in:.6f}",
+                "-t",
+                f"{max(duration, 0.1):.6f}",
+                "-i",
+                str(source),
+            ]
+        )
+
+    filter_args: list[str]
+    if has_geometry:
+        source_resolution = _probe_resolution(_ffprobe(source)) or {
+            "width": width, "height": height,
+        }
+        filter_args = [
+            "-filter_complex",
+            _video_geometry_filter(
+                width=width,
+                height=height,
+                fps=fps,
+                effects=effects,
+                vf_extra=vf_extra,
+                source_width=int(source_resolution["width"]),
+                source_height=int(source_resolution["height"]),
+            ),
+            "-map",
+            "[v]",
+        ]
+    else:
+        filter_args = ["-vf", vf]
+    cmd.extend(
+        [
+            "-an",
+            *filter_args,
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-crf",
+            profile["crf"],
+            "-preset",
+            profile["preset"],
+            "-movflags",
+            "+faststart",
+            str(output),
+        ]
+    )
     _run_ffmpeg(cmd, output=output, timeout_sec=timeout_sec)
 
 
@@ -576,13 +770,22 @@ def _render_black_segment(
     timeout_sec: int,
 ) -> None:
     cmd = [
-        ffmpeg_path(), "-y", "-hide_banner", "-loglevel", "error",
-        "-f", "lavfi",
-        "-i", f"color=c=black:s={width}x{height}:r={fps}:d={max(duration, 0.1):.6f}",
+        ffmpeg_path(),
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        f"color=c=black:s={width}x{height}:r={fps}:d={max(duration, 0.1):.6f}",
         "-an",
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
         str(output),
     ]
     _run_ffmpeg(cmd, output=output, timeout_sec=timeout_sec)
@@ -592,15 +795,28 @@ def _concat_segments(segments: list[Path], output: Path, *, timeout_sec: int) ->
     output.parent.mkdir(parents=True, exist_ok=True)
     list_path = output.with_suffix(".concat.txt")
     list_path.write_text(
-        "".join(f"file '{str(p).replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'\n" for p in segments),
+        "".join(
+            f"file '{str(p).replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'\n"
+            for p in segments
+        ),
         encoding="utf-8",
     )
     cmd = [
-        ffmpeg_path(), "-y", "-hide_banner", "-loglevel", "error",
-        "-f", "concat", "-safe", "0",
-        "-i", str(list_path),
-        "-c", "copy",
-        "-movflags", "+faststart",
+        ffmpeg_path(),
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_path),
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
         str(output),
     ]
     _run_ffmpeg(cmd, output=output, timeout_sec=timeout_sec)
@@ -656,7 +872,9 @@ def _plan_transitions(
         a_start = _pos(clip.get("start"), 0.0)
         cut = a_start + _clip_duration(clip)
         record: dict[str, Any] = {
-            "clip_id": clip_id, "kind": kind, "duration_sec": round(d, 6),
+            "clip_id": clip_id,
+            "kind": kind,
+            "duration_sec": round(d, 6),
         }
 
         # Re-check adjacency: the next clip on the same track must butt-join.
@@ -749,10 +967,13 @@ def _plan_transitions(
                 "duration": round(d_eff, 6),
             },
         }
-        records.append({
-            **record, "status": "rendered",
-            "effective_duration_sec": round(d_eff, 6),
-        })
+        records.append(
+            {
+                **record,
+                "status": "rendered",
+                "effective_duration_sec": round(d_eff, 6),
+            }
+        )
 
     if not insertions:
         return segments, records
@@ -792,20 +1013,41 @@ def _render_xfade_window(
     d = _pos(window.get("duration"), 0.0)
     vf = _video_filter(width=width, height=height, fps=fps)
     cmd = [
-        ffmpeg_path(), "-y", "-hide_banner", "-loglevel", "error",
-        "-ss", f"{_pos(window.get('a_in'), 0.0):.6f}", "-t", f"{d:.6f}", "-i", str(a_source),
-        "-ss", f"{_pos(window.get('b_in'), 0.0):.6f}", "-t", f"{d:.6f}", "-i", str(b_source),
+        ffmpeg_path(),
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        f"{_pos(window.get('a_in'), 0.0):.6f}",
+        "-t",
+        f"{d:.6f}",
+        "-i",
+        str(a_source),
+        "-ss",
+        f"{_pos(window.get('b_in'), 0.0):.6f}",
+        "-t",
+        f"{d:.6f}",
+        "-i",
+        str(b_source),
         "-filter_complex",
         (
             f"[0:v]{vf}[va];[1:v]{vf}[vb];"
             f"[va][vb]xfade=transition=fade:duration={d:.6f}:offset=0[v]"
         ),
-        "-map", "[v]", "-an",
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        "-crf", profile["crf"],
-        "-preset", profile["preset"],
-        "-movflags", "+faststart",
+        "-map",
+        "[v]",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-crf",
+        profile["crf"],
+        "-preset",
+        profile["preset"],
+        "-movflags",
+        "+faststart",
         str(output),
     ]
     _run_ffmpeg(cmd, output=output, timeout_sec=timeout_sec)
@@ -832,7 +1074,9 @@ def _apply_overlays(
     # Always first input: base video
     cmd += ["-i", str(base)]
 
-    image_inputs: list[tuple[int, dict[str, Any], dict[str, Any]]] = []  # (input_index, clip, asset)
+    image_inputs: list[tuple[int, dict[str, Any], dict[str, Any]]] = (
+        []
+    )  # (input_index, clip, asset)
     lottie_inputs: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
     text_clips: list[dict[str, Any]] = []
     temp_dirs: list[tempfile.TemporaryDirectory[str]] = []
@@ -860,7 +1104,9 @@ def _apply_overlays(
                     continue
                 temp = tempfile.TemporaryDirectory(prefix="lumeri-lottie-")
                 temp_dirs.append(temp)
-                pattern = _render_lottie_sequence_for_clip(source, clip, temp.name, width=width, height=height, fps=fps)
+                pattern = _render_lottie_sequence_for_clip(
+                    source, clip, temp.name, width=width, height=height, fps=fps
+                )
                 cmd += ["-framerate", f"{fps:.6f}", "-i", pattern]
                 lottie_inputs.append((input_idx, clip, asset))
                 input_idx += 1
@@ -875,7 +1121,9 @@ def _apply_overlays(
         for i, (img_idx, clip, _asset) in enumerate(visual_inputs):
             start = _pos(clip.get("start"), 0.0)
             end = start + _clip_duration(clip)
-            effects = clip.get("effects") if isinstance(clip.get("effects"), dict) else {}
+            effects = (
+                clip.get("effects") if isinstance(clip.get("effects"), dict) else {}
+            )
             x = int(_pos(effects.get("x"), 0.0))
             y = int(_pos(effects.get("y"), 0.0))
             scale = _pos(effects.get("scale"), 1.0)
@@ -906,15 +1154,25 @@ def _apply_overlays(
         for j, clip in enumerate(text_clips):
             start = _pos(clip.get("start"), 0.0)
             end = start + _clip_duration(clip)
-            config = clip.get("text_config") if isinstance(clip.get("text_config"), dict) else {}
-            text = str(config.get("content") or "").replace("'", "'\\''").replace(":", "\\:")
+            config = (
+                clip.get("text_config")
+                if isinstance(clip.get("text_config"), dict)
+                else {}
+            )
+            text = (
+                str(config.get("content") or "")
+                .replace("'", "'\\''")
+                .replace(":", "\\:")
+            )
             font_size = int(max(_pos(config.get("font_size"), 64.0), 8.0))
             color_hex = str(config.get("color") or "#ffffff")
             if _HEX_COLOR_RE.match(color_hex):
                 ffcolor = f"0x{color_hex[1:]}"
             else:
                 ffcolor = "white"
-            effects = clip.get("effects") if isinstance(clip.get("effects"), dict) else {}
+            effects = (
+                clip.get("effects") if isinstance(clip.get("effects"), dict) else {}
+            )
             pos = config.get("position")
             if isinstance(pos, dict):
                 x = int(_pos(pos.get("x"), width // 2))
@@ -932,7 +1190,12 @@ def _apply_overlays(
                 except Exception:
                     _ff = None
                 if _ff:
-                    _ff = str(_ff).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+                    _ff = (
+                        str(_ff)
+                        .replace("\\", "\\\\")
+                        .replace(":", "\\:")
+                        .replace("'", "\\'")
+                    )
                     font_opt = f"fontfile='{_ff}':"
             dt_filter = (
                 f"{last_label}drawtext="
@@ -954,11 +1217,16 @@ def _apply_overlays(
 
         cmd += [
             "-an",
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            "-crf", profile["crf"],
-            "-preset", profile["preset"],
-            "-movflags", "+faststart",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-crf",
+            profile["crf"],
+            "-preset",
+            profile["preset"],
+            "-movflags",
+            "+faststart",
             str(output),
         ]
         _run_ffmpeg(cmd, output=output, timeout_sec=timeout_sec)
@@ -1053,7 +1321,9 @@ def _collect_audio_sources(
     return sources
 
 
-def _audio_source_from_clip(clip: dict[str, Any], source: Path) -> dict[str, Any] | None:
+def _audio_source_from_clip(
+    clip: dict[str, Any], source: Path
+) -> dict[str, Any] | None:
     source_in = _pos(clip.get("source_in"), 0.0)
     source_out = _pos(clip.get("source_out"), source_in + _clip_duration(clip))
     if source_out - source_in <= 0.001:
@@ -1084,7 +1354,7 @@ def _audio_source_chain(i: int, src: dict[str, Any]) -> str:
     atrim -> (volume gain) -> (afade in/out) -> aformat fltp/48k/stereo ->
     (adelay to the clip's timeline start). Mirrors gemia/tools/mix_audio.py.
     """
-    in_idx = i + 1  # input 0 is the silent video
+    in_idx = i
     dur = src["source_out"] - src["source_in"]
     chain = (
         f"[{in_idx}:a]atrim=start={src['source_in']:.6f}:end={src['source_out']:.6f},"
@@ -1128,8 +1398,10 @@ def _mux_audio_onto_video(
     audio_sources: list[dict[str, Any]],
     *,
     output: Path,
+    work_dir: Path,
     timeout_sec: int,
     duck_map: dict[str, str] | None = None,
+    master_duration: float = 0.0,
 ) -> None:
     """Mix all positioned audio sources and mux onto the (silent) video.
 
@@ -1138,45 +1410,228 @@ def _mux_audio_onto_video(
     ducking, sources are grouped into per-track submixes; a bed track's submix
     is sidechain-compressed by its trigger track's submix
     (``sidechaincompress``, mirroring gemia/tools/mix_audio.py duck mode), then
-    all track submixes are amix'd. Video is stream-copied; audio is AAC.
+    all track submixes are amix'd.  The resulting premaster is written as
+    lossless float PCM, measured, then normalized with the measured values.
+    Video is stream-copied; only the normalized audio is encoded as AAC.
     """
-    cmd: list[str] = [ffmpeg_path(), "-y", "-hide_banner", "-loglevel", "error", "-i", str(video)]
+    mix_cmd: list[str] = [ffmpeg_path(), "-y", "-hide_banner", "-loglevel", "error"]
     for src in audio_sources:
-        cmd += ["-i", str(src["path"])]
+        mix_cmd += ["-i", str(src["path"])]
 
-    filter_parts: list[str] = [_audio_source_chain(i, src) for i, src in enumerate(audio_sources)]
+    filter_parts: list[str] = [
+        _audio_source_chain(i, src) for i, src in enumerate(audio_sources)
+    ]
     active = _resolve_duck_map(duck_map, audio_sources)
+    source_end = max(
+        (
+            float(src.get("start") or 0.0)
+            + float(src.get("source_out") or 0.0)
+            - float(src.get("source_in") or 0.0)
+            for src in audio_sources
+        ),
+        default=0.0,
+    )
+    delivery_duration = float(master_duration or 0.0)
+    if delivery_duration <= 0.0:
+        raise ProjectExportError(
+            "audio_master_duration_invalid",
+            "Audio sources exist but the canonical master duration is not positive.",
+        )
+    if source_end > delivery_duration + 0.01:
+        raise ProjectExportError(
+            "audio_source_exceeds_master_duration",
+            "An audio source extends beyond the canonical master duration.",
+            detail=(
+                f"source_end={source_end:.6f}, "
+                f"master_duration={delivery_duration:.6f}"
+            ),
+        )
 
     if not active:
         # Flat path — byte-for-behaviour identical to M6 (no ducking configured).
         labels = [f"[a{i}]" for i in range(len(audio_sources))]
         if len(labels) == 1:
-            filter_parts.append(f"{labels[0]}anull[aout]")
+            filter_parts.append(f"{labels[0]}anull[premaster]")
         else:
             filter_parts.append(
                 "".join(labels)
-                + f"amix=inputs={len(labels)}:duration=longest:dropout_transition=0[aout]"
+                + f"amix=inputs={len(labels)}:duration=longest:dropout_transition=0[premaster]"
             )
     else:
-        _append_ducked_mix(filter_parts, audio_sources, active)
+        _append_ducked_mix(
+            filter_parts,
+            audio_sources,
+            active,
+            master_duration=delivery_duration,
+        )
 
-    cmd += [
-        "-filter_complex", ";".join(filter_parts),
-        "-map", "0:v", "-map", "[aout]",
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-movflags", "+faststart",
+    # A sidechain trigger or the last authored clip may end before picture.
+    # Keep the premaster aligned to the canonical master so AAC does not stop
+    # early and players do not lose an intentional music fade/title tail.
+    filter_parts.append(
+        f"[premaster]apad=whole_dur={delivery_duration:.6f},"
+        f"atrim=end={delivery_duration:.6f}[delivery_premaster]"
+    )
+
+    premaster_path = work_dir / "audio-premaster.wav"
+    mix_cmd += [
+        "-filter_complex",
+        ";".join(filter_parts),
+        "-map",
+        "[delivery_premaster]",
+        "-c:a",
+        "pcm_f32le",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        str(premaster_path),
+    ]
+    _run_ffmpeg(mix_cmd, output=premaster_path, timeout_sec=timeout_sec)
+
+    stats = _measure_loudnorm_pass(
+        premaster_path,
+        integrated_lufs=AUDIO_MASTER_TARGET_LUFS,
+        true_peak_dbtp=AUDIO_MASTER_TRUE_PEAK_DBTP,
+        loudness_range_lu=AUDIO_MASTER_LRA_LU,
+        timeout_sec=timeout_sec,
+    )
+
+    normalize_filter = _loudnorm_second_pass_filter(stats)
+    cmd: list[str] = [
+        ffmpeg_path(),
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(video),
+        "-i",
+        str(premaster_path),
+        "-map",
+        "0:v",
+        "-map",
+        "1:a:0",
+        "-c:v",
+        "copy",
+        "-af",
+        normalize_filter,
+        "-c:a",
+        "aac",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
         str(output),
     ]
     _run_ffmpeg(cmd, output=output, timeout_sec=timeout_sec)
+
+
+def _parse_loudnorm_payload(stderr: str) -> dict[str, float]:
+    matches = re.findall(r"\{\s*\"input_i\".*?\}", stderr or "", flags=re.DOTALL)
+    if not matches:
+        raise ValueError("loudnorm did not emit measurement JSON")
+    try:
+        payload = json.loads(matches[-1])
+        result = {
+            "input_i": float(payload["input_i"]),
+            "input_tp": float(payload["input_tp"]),
+            "input_lra": float(payload["input_lra"]),
+            "input_thresh": float(payload["input_thresh"]),
+            "target_offset": float(payload["target_offset"]),
+        }
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid loudnorm measurement: {exc}") from exc
+    if not all(math.isfinite(value) for value in result.values()):
+        raise ValueError("loudnorm measurement contains non-finite values")
+    return result
+
+
+def _measure_loudnorm_pass(
+    path: Path,
+    *,
+    integrated_lufs: float,
+    true_peak_dbtp: float,
+    loudness_range_lu: float,
+    timeout_sec: int,
+) -> dict[str, float]:
+    try:
+        proc = subprocess.run(
+            [
+                ffmpeg_path(),
+                "-hide_banner",
+                "-nostats",
+                "-i",
+                str(path),
+                "-map",
+                "0:a:0",
+                "-af",
+                (
+                    f"loudnorm=I={integrated_lufs:g}:TP={true_peak_dbtp:g}:"
+                    f"LRA={loudness_range_lu:g}:print_format=json"
+                ),
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=max(1, int(timeout_sec)),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ProjectExportError(
+            "audio_master_measurement_failed",
+            "Premaster loudness analysis timed out.",
+            detail=f"timeout={exc.timeout}",
+        ) from exc
+    except OSError as exc:
+        raise ProjectExportError(
+            "audio_master_measurement_failed",
+            "Premaster loudness analysis could not start.",
+            detail=f"{type(exc).__name__}: {exc}"[:1000],
+        ) from exc
+    if proc.returncode != 0:
+        raise ProjectExportError(
+            "audio_master_measurement_failed",
+            "Premaster loudness analysis failed.",
+            detail=(proc.stderr or proc.stdout or "").strip()[-2000:],
+        )
+    try:
+        return _parse_loudnorm_payload(proc.stderr or "")
+    except ValueError as exc:
+        raise ProjectExportError(
+            "audio_master_measurement_failed",
+            "Premaster loudness analysis returned unusable measurements.",
+            detail=str(exc),
+        ) from exc
+
+
+def _loudnorm_second_pass_filter(stats: dict[str, float]) -> str:
+    return (
+        f"loudnorm=I={AUDIO_MASTER_TARGET_LUFS:g}:"
+        f"TP={AUDIO_MASTER_TRUE_PEAK_DBTP:g}:LRA={AUDIO_MASTER_LRA_LU:g}:"
+        f"measured_I={stats['input_i']:.6f}:"
+        f"measured_TP={stats['input_tp']:.6f}:"
+        f"measured_LRA={stats['input_lra']:.6f}:"
+        f"measured_thresh={stats['input_thresh']:.6f}:"
+        f"offset={stats['target_offset']:.6f}:linear=true:print_format=none,"
+        "aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:"
+        "channel_layouts=stereo"
+    )
 
 
 def _append_ducked_mix(
     filter_parts: list[str],
     audio_sources: list[dict[str, Any]],
     active: dict[str, str],
+    *,
+    master_duration: float,
 ) -> None:
-    """Per-track submix -> sidechain beds under triggers -> amix to [aout]."""
+    """Per-track submix -> sidechain beds under triggers -> [premaster]."""
     # Group source indices by track (insertion order preserved).
     by_track: dict[str, list[int]] = {}
     for i, src in enumerate(audio_sources):
@@ -1193,13 +1648,36 @@ def _append_ducked_mix(
                 + f"amix=inputs={len(idxs)}:duration=longest:dropout_transition=0{raw}"
             )
 
-    # Split each trigger submix into a mix copy and a sidechain copy.
-    triggers = set(active.values())
+    # Split each trigger submix into its audible mix copy and one independent
+    # detector copy per bed. FFmpeg filter outputs are single-consumer, so a
+    # shared trigger must never reuse one [sc] label across multiple beds.
+    beds_by_trigger: dict[str, list[str]] = {}
+    for bed, trigger in active.items():
+        beds_by_trigger.setdefault(trigger, []).append(bed)
+    sidechain_for: dict[tuple[str, str], str] = {}
     premix: dict[str, str] = {}
     for tid in by_track:
-        if tid in triggers:
-            mix_l, sc_l = f"[mix_{_label(tid)}]", f"[sc_{_label(tid)}]"
-            filter_parts.append(f"[raw_{_label(tid)}]asplit=2{mix_l}{sc_l}")
+        trigger_beds = beds_by_trigger.get(tid, [])
+        if trigger_beds:
+            mix_l = f"[mix_{_label(tid)}]"
+            raw_sidechains = [
+                f"[sc_raw_{_label(tid)}_{index}]" for index in range(len(trigger_beds))
+            ]
+            filter_parts.append(
+                f"[raw_{_label(tid)}]asplit={1 + len(trigger_beds)}"
+                + mix_l
+                + "".join(raw_sidechains)
+            )
+            for index, bed in enumerate(trigger_beds):
+                sc_l = f"[sc_{_label(tid)}_{index}]"
+                # sidechaincompress follows the sidechain EOF on the production
+                # FFmpeg build. Extend each detector with silence so a shorter
+                # narration track cannot truncate a longer music-bed input.
+                filter_parts.append(
+                    f"{raw_sidechains[index]}apad=whole_dur={master_duration:.6f},"
+                    f"atrim=end={master_duration:.6f}{sc_l}"
+                )
+                sidechain_for[(bed, tid)] = sc_l
             premix[tid] = mix_l
         else:
             premix[tid] = f"[raw_{_label(tid)}]"
@@ -1209,19 +1687,19 @@ def _append_ducked_mix(
     for bed, trigger in active.items():
         duck_l = f"[duck_{_label(bed)}]"
         filter_parts.append(
-            f"{premix[bed]}[sc_{_label(trigger)}]"
-            "sidechaincompress=threshold=0.05:ratio=8:attack=20:release=400"
+            f"{premix[bed]}{sidechain_for[(bed, trigger)]}"
+            "sidechaincompress=threshold=0.02:ratio=12:attack=20:release=400"
             f"{duck_l}"
         )
         final[bed] = duck_l
 
     final_labels = [final[tid] for tid in by_track]
     if len(final_labels) == 1:
-        filter_parts.append(f"{final_labels[0]}anull[aout]")
+        filter_parts.append(f"{final_labels[0]}anull[premaster]")
     else:
         filter_parts.append(
             "".join(final_labels)
-            + f"amix=inputs={len(final_labels)}:duration=longest:dropout_transition=0[aout]"
+            + f"amix=inputs={len(final_labels)}:duration=longest:dropout_transition=0[premaster]"
         )
 
 
@@ -1236,20 +1714,61 @@ def _build_asset_map(project: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
+def _apply_segment_render_refs(project: dict[str, Any]) -> None:
+    """Project SegmentDocument fields into the existing render vocabulary.
+
+    SegmentDocument remains the authored structure.  This adapter only adds
+    ephemeral render hints to the in-memory project passed to export, so a
+    legacy Clip is unchanged on disk and the manifest still lists hidden Clips
+    and their revisions.  The first layer is the initial one-material render
+    target; additional layers remain structural until their renderer is
+    available, rather than being silently flattened into the review master.
+    """
+    try:
+        from gemia.segment_document import persisted_segment
+    except Exception:
+        return
+    timeline = project.get("timeline") if isinstance(project.get("timeline"), dict) else {}
+    for clip in timeline.get("clips") or []:
+        if not isinstance(clip, dict):
+            continue
+        doc = persisted_segment(project, clip, create=False)
+        layers = [item for item in doc.get("layers") or [] if isinstance(item, dict)]
+        if not layers:
+            continue
+        primary = layers[0]
+        states = [item for item in doc.get("states") or [] if isinstance(item, dict)]
+        visible_ids = set(str(item) for item in (states[0].get("visible_layer_ids") or [])) if states else {str(primary.get("id") or "")}
+        primary_id = str(primary.get("id") or "")
+        effects = dict(clip.get("effects") or {}) if isinstance(clip.get("effects"), dict) else {}
+        primary_hidden = primary.get("visible") is False or (visible_ids and primary_id not in visible_ids)
+        if str(primary.get("kind") or "") == "audio":
+            if primary_hidden:
+                effects["muted"] = True
+        elif primary_hidden:
+            clip["_segment_render_hidden"] = True
+        for key in ("x", "y", "scale", "rotation", "opacity"):
+            if key in primary:
+                effects[key] = primary[key]
+        clip["effects"] = effects
+
+
 def _enabled_video_clips(
     project: dict[str, Any], assets: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    timeline = project.get("timeline") if isinstance(project.get("timeline"), dict) else {}
-    
+    timeline = (
+        project.get("timeline") if isinstance(project.get("timeline"), dict) else {}
+    )
+
     # Collect video track ids
     video_track_ids = set()
     for track in timeline.get("tracks") or []:
         if isinstance(track, dict) and str(track.get("kind")) == "video":
             video_track_ids.add(str(track.get("id") or ""))
-    
+
     items: list[dict[str, Any]] = []
     for order, clip in enumerate(timeline.get("clips") or []):
-        if not isinstance(clip, dict) or not bool(clip.get("enabled", True)):
+        if not isinstance(clip, dict) or not bool(clip.get("enabled", True)) or bool(clip.get("_segment_render_hidden")):
             continue
         # Only process clips on video tracks
         clip_track_id = str(clip.get("track_id") or "")
@@ -1267,17 +1786,21 @@ def _enabled_video_clips(
         if asset_media_kind not in {"video", "image"}:
             continue
         items.append({"clip": clip, "asset": asset, "order": order})
-    items.sort(key=lambda it: (_pos(it["clip"].get("start"), 0.0), int(it.get("order") or 0)))
+    items.sort(
+        key=lambda it: (_pos(it["clip"].get("start"), 0.0), int(it.get("order") or 0))
+    )
     return items
 
 
 def _enabled_overlay_clips(
     project: dict[str, Any], assets: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    timeline = project.get("timeline") if isinstance(project.get("timeline"), dict) else {}
+    timeline = (
+        project.get("timeline") if isinstance(project.get("timeline"), dict) else {}
+    )
     result: list[dict[str, Any]] = []
     for clip in timeline.get("clips") or []:
-        if not isinstance(clip, dict) or not bool(clip.get("enabled", True)):
+        if not isinstance(clip, dict) or not bool(clip.get("enabled", True)) or bool(clip.get("_segment_render_hidden")):
             continue
         media_kind = str(clip.get("media_kind") or "")
         if media_kind not in {"image", "text", "lottie"}:
@@ -1291,10 +1814,12 @@ def _enabled_audio_clips(
     project: dict[str, Any], assets: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """Enabled audio-track clips (media_kind == 'audio') with a resolvable asset."""
-    timeline = project.get("timeline") if isinstance(project.get("timeline"), dict) else {}
+    timeline = (
+        project.get("timeline") if isinstance(project.get("timeline"), dict) else {}
+    )
     result: list[dict[str, Any]] = []
     for clip in timeline.get("clips") or []:
-        if not isinstance(clip, dict) or not bool(clip.get("enabled", True)):
+        if not isinstance(clip, dict) or not bool(clip.get("enabled", True)) or bool(clip.get("_segment_render_hidden")):
             continue
         if str(clip.get("media_kind") or "") != "audio":
             continue
@@ -1327,7 +1852,8 @@ def _timeline_segments(
             continue
         mid = start + (end - start) / 2.0
         active = [
-            it for it in items
+            it
+            for it in items
             if _pos(it["clip"].get("start"), 0.0) <= mid
             and mid < _pos(it["clip"].get("start"), 0.0) + _clip_duration(it["clip"])
         ]
@@ -1350,6 +1876,51 @@ def _video_filter(*, width: int, height: int, fps: float) -> str:
     )
 
 
+def _video_geometry_filter(
+    *, width: int, height: int, fps: float,
+    effects: dict[str, Any], vf_extra: str = "",
+    source_width: int | None = None, source_height: int | None = None,
+) -> str:
+    """Build the final-export geometry graph used by direct manipulation.
+
+    Stored x/y are the transformed visual's top-left position. Missing x/y
+    preserve the historic centered fit. The UI adapter exposes their centre as
+    absolute canvas coordinates without migrating existing project data.
+    """
+    scale = max(_pos(effects.get("scale"), 1.0), 0.01)
+    rotation = _pos(effects.get("rotation"), 0.0)
+    x_value = effects.get("x")
+    y_value = effects.get("y")
+    src_w = max(int(source_width or width), 1)
+    src_h = max(int(source_height or height), 1)
+    fit = min(width / src_w, height / src_h)
+    unrotated_width = src_w * fit * scale
+    unrotated_height = src_h * fit * scale
+    radians = math.radians(rotation)
+    rotated_width = abs(math.cos(radians)) * unrotated_width + abs(math.sin(radians)) * unrotated_height
+    rotated_height = abs(math.sin(radians)) * unrotated_width + abs(math.cos(radians)) * unrotated_height
+    # x/y store the unrotated box top-left for compatibility. FFmpeg's rotate
+    # expands the alpha box, so compensate to preserve the same visual centre.
+    x_expr = (
+        f"{_pos(x_value, 0.0) - (rotated_width - unrotated_width) / 2:.6f}"
+        if x_value is not None else "(W-w)/2"
+    )
+    y_expr = (
+        f"{_pos(y_value, 0.0) - (rotated_height - unrotated_height) / 2:.6f}"
+        if y_value is not None else "(H-h)/2"
+    )
+    return (
+        f"color=c=black:s={width}x{height}:r={fps:.6f}[bg];"
+        f"[0:v]setpts=PTS-STARTPTS,"
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"scale=iw*{scale:.6f}:ih*{scale:.6f},format=rgba,"
+        f"rotate={rotation:.6f}*PI/180:fillcolor=black@0:ow=rotw(iw):oh=roth(ih),"
+        f"setsar=1,fps={fps:.6f}[fg];"
+        f"[bg][fg]overlay=x='{x_expr}':y='{y_expr}':shortest=1"
+        f"{vf_extra},format=yuv420p[v]"
+    )
+
+
 def _run_ffmpeg(cmd: list[str], output: Path, *, timeout_sec: int) -> None:
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
     if proc.returncode != 0:
@@ -1359,14 +1930,26 @@ def _run_ffmpeg(cmd: list[str], output: Path, *, timeout_sec: int) -> None:
             detail=(proc.stderr or proc.stdout or "").strip()[-2000:],
         )
     if not output.exists() or output.stat().st_size <= 0:
-        raise ProjectExportError("output_missing", f"ffmpeg did not create output: {output}")
+        raise ProjectExportError(
+            "output_missing", f"ffmpeg did not create output: {output}"
+        )
 
 
 def _ffprobe(path: Path) -> dict[str, Any]:
     proc = subprocess.run(
-        [ffprobe_path(), "-v", "error", "-print_format", "json",
-         "-show_format", "-show_streams", str(path)],
-        capture_output=True, text=True, timeout=30,
+        [
+            ffprobe_path(),
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     if proc.returncode != 0:
         return {}
@@ -1374,6 +1957,93 @@ def _ffprobe(path: Path) -> dict[str, Any]:
         return dict(json.loads(proc.stdout or "{}"))
     except (json.JSONDecodeError, ValueError):
         return {}
+
+
+def _full_decode_check(path: Path, *, timeout_sec: int) -> dict[str, Any]:
+    """Decode every A/V frame; metadata-only probing is not acceptance."""
+    try:
+        proc = subprocess.run(
+            [
+                ffmpeg_path(),
+                "-v",
+                "error",
+                "-i",
+                str(path),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=max(1, int(timeout_sec)),
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "status": "failed",
+            "error": f"full decode timed out after {exc.timeout}s",
+        }
+    except OSError as exc:
+        return {"status": "failed", "error": f"{type(exc).__name__}: {exc}"[:1000]}
+    if proc.returncode != 0:
+        return {
+            "status": "failed",
+            "error": (proc.stderr or proc.stdout or "full decode failed").strip()[
+                -2000:
+            ],
+        }
+    return {"status": "passed"}
+
+
+def _measure_loudness(path: Path, *, timeout_sec: int) -> dict[str, Any]:
+    """Measure integrated loudness and true peak on the encoded master."""
+    try:
+        proc = subprocess.run(
+            [
+                ffmpeg_path(),
+                "-hide_banner",
+                "-nostats",
+                "-i",
+                str(path),
+                "-map",
+                "0:a:0",
+                "-af",
+                "loudnorm=I=-16:TP=-1:LRA=11:print_format=json",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=max(1, int(timeout_sec)),
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "status": "failed",
+            "error": f"loudness analysis timed out after {exc.timeout}s",
+        }
+    except OSError as exc:
+        return {"status": "failed", "error": f"{type(exc).__name__}: {exc}"[:1000]}
+    stderr = proc.stderr or ""
+    if proc.returncode != 0:
+        return {"status": "failed", "error": stderr.strip()[-2000:]}
+    matches = re.findall(r"\{\s*\"input_i\".*?\}", stderr, flags=re.DOTALL)
+    if not matches:
+        return {"status": "failed", "error": "loudnorm did not emit measurement JSON"}
+    try:
+        payload = json.loads(matches[-1])
+        integrated = float(payload["input_i"])
+        true_peak = float(payload["input_tp"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return {"status": "failed", "error": f"invalid loudness measurement: {exc}"}
+    return {
+        "status": "passed",
+        "integrated_loudness_lufs": round(integrated, 3),
+        "true_peak_dbtp": round(true_peak, 3),
+    }
 
 
 def _probe_duration(probe: dict[str, Any]) -> float:
@@ -1426,6 +2096,19 @@ def _slug(value: str) -> str:
     return slug[:48] or "export"
 
 
+def _fit_size(width: int, height: int, *, max_long_edge: int) -> tuple[int, int]:
+    edge = max(160, int(max_long_edge))
+    longest = max(int(width), int(height))
+    if longest <= edge:
+        return int(width), int(height)
+    scale = edge / float(longest)
+    fitted_width = max(2, int(round(width * scale)))
+    fitted_height = max(2, int(round(height * scale)))
+    fitted_width += fitted_width % 2
+    fitted_height += fitted_height % 2
+    return fitted_width, fitted_height
+
+
 def _reset_dir(path: Path) -> None:
     if path.exists():
         _cleanup_dir(path)
@@ -1453,5 +2136,7 @@ def _cleanup_dir(path: Path) -> None:
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     tmp.replace(path)

@@ -85,6 +85,30 @@ def test_replace_false_previews_without_persisting(tmp_path):
     assert (ctx.project.load().get("shotlist") or {}).get("scenes") in (None, [])  # nothing written
 
 
+def test_fit_media_preview_uses_internal_fitter_without_persisting(monkeypatch, tmp_path):
+    ctx = _ctx(tmp_path)
+    called = {"count": 0}
+
+    def fake_fit(_ctx, shotlist):
+        called["count"] += 1
+        fitted = normalize_shotlist(shotlist)
+        fitted["scenes"][0]["shots"][0]["notes"] = "fit-ran"
+        return fitted, {"coverage": {"filled": 0, "total": 7}, "assignments": []}
+
+    monkeypatch.setattr(
+        "gemia.tools._shotlist_media_fit.fit_media_for_context", fake_fit
+    )
+    out = _call(
+        "draft_shotlist",
+        {"theme": "A focus timer", "fit_media": True, "replace": False},
+        ctx,
+    )
+    assert called["count"] == 1
+    assert out["evidence_fit"]["coverage"] == {"filled": 0, "total": 7}
+    assert out["shotlist"]["scenes"][0]["shots"][0]["notes"] == "fit-ran"
+    assert ctx.project.load()["shotlist"]["scenes"] == []
+
+
 def test_dispatch_is_real_not_stub():
     assert "draft_shotlist" in DISPATCHER
     assert "stub" not in getattr(DISPATCHER["draft_shotlist"], "__qualname__", "").lower()

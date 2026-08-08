@@ -30,6 +30,54 @@ def estimate_message_tokens(messages: list[dict[str, Any]]) -> int:
     return max(1, (len(raw) + 3) // 4)
 
 
+def sanitize_tool_protocol_pairs(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop incomplete historical tool-call pairs without rewriting evidence."""
+    call_positions: dict[str, int] = {}
+    paired: set[str] = set()
+    for index, message in enumerate(messages):
+        calls = message.get("tool_calls") if message.get("role") == "assistant" else None
+        if isinstance(calls, list):
+            for call in calls:
+                call_id = str(call.get("id") or "")
+                if call_id:
+                    call_positions[call_id] = index
+        elif message.get("role") == "tool":
+            call_id = str(message.get("tool_call_id") or "")
+            call_position = call_positions.get(call_id)
+            if call_id and call_position is not None and call_position < index:
+                paired.add(call_id)
+
+    sanitized: list[dict[str, Any]] = []
+    emitted_calls: set[str] = set()
+    for message in messages:
+        role = message.get("role")
+        if role == "assistant" and isinstance(message.get("tool_calls"), list):
+            kept_calls = [
+                call
+                for call in message["tool_calls"]
+                if str(call.get("id") or "") in paired
+            ]
+            content = message.get("content")
+            if not kept_calls and not content:
+                continue
+            row = dict(message)
+            if kept_calls:
+                row["tool_calls"] = kept_calls
+                emitted_calls.update(str(call.get("id") or "") for call in kept_calls)
+            else:
+                row.pop("tool_calls", None)
+            sanitized.append(row)
+            continue
+        if role == "tool":
+            call_id = str(message.get("tool_call_id") or "")
+            if call_id not in emitted_calls:
+                continue
+        sanitized.append(dict(message))
+    return sanitized
+
+
 def settled_tool_blocks(messages: list[dict[str, Any]]) -> list[SettledBlock]:
     """Find complete assistant-call + result spans without splitting protocol pairs."""
     blocks: list[SettledBlock] = []
@@ -166,5 +214,6 @@ __all__ = [
     "SettledBlock",
     "compact_settled_tool_blocks",
     "estimate_message_tokens",
+    "sanitize_tool_protocol_pairs",
     "settled_tool_blocks",
 ]

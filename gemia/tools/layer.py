@@ -7,8 +7,8 @@ and survives across session boundaries.
 Design contract:
 - Each verb compiles to a LayerPatch and applies it atomically via
   ``apply_layer_patch``.
-- ``get_lumenframe`` returns a compact summary of the current doc state
-  (layer tree, selection).
+- ``get_lumenframe`` returns the compact tree plus bounded structured details
+  for appearance, effects, masks, timing, and type-specific properties.
 - ``lumen_patch`` is the low-level verb that accepts a raw ops list;
   convenience verbs (add_layer, set_transform, etc.) are built on top.
 - **Persistence**: if ctx.project (ProjectHandle) is available, doc is stored
@@ -19,13 +19,14 @@ Design contract:
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import os
 import tempfile
 from datetime import datetime, timezone
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 from gemia.tools._context import ToolContext
 
@@ -36,12 +37,12 @@ _LUMENFRAME_PATH_CACHE: dict[tuple[str, str], Path | None] = {}
 
 try:
     from lumenframe import (
-        empty_doc,
         apply_layer_patch,
         describe_ops,
-        new_layer,
+        empty_doc,
         find_layer,
         find_parent,
+        new_layer,
         normalize_doc,
     )
     from lumenframe.compile import compile_to_layer_stack
@@ -59,6 +60,258 @@ except ImportError:
 
 # Session-local doc state cache (keyed by session_id) — fallback for non-project sessions
 _DOC_CACHE: dict[str, dict[str, Any]] = {}
+_DOC_HISTORY_CACHE: dict[str, dict[str, Any]] = {}
+
+# ``get_lumenframe`` is model-facing, so its structured detail view must stay
+# useful without reflecting an arbitrarily large document back into the prompt.
+_LAYER_DETAILS_LIMIT = 128
+_LAYER_EFFECTS_LIMIT = 32
+_LAYER_DETAIL_SEQUENCE_LIMIT = 32
+_LAYER_DETAIL_MAPPING_LIMIT = 32
+_LAYER_DETAIL_DEPTH_LIMIT = 4
+_LAYER_DETAIL_STRING_LIMIT = 512
+
+
+def lumenframe_revision(doc: dict[str, Any]) -> str:
+    """Return the stable optimistic-concurrency token for one LumenDoc."""
+    payload = json.dumps(doc, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _history_file_path(ctx: ToolContext) -> Path | None:
+    file_path = _lumenframe_file_path(ctx)
+    return file_path.with_name("lumenframe-history.json") if file_path is not None else None
+
+
+def _history_entry(
+    doc: dict[str, Any], *, label: str, client_op_id: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "revision": lumenframe_revision(doc),
+        "at": datetime.now(timezone.utc).isoformat(),
+        "label": str(label or "lumenframe edit"),
+        "client_op_id": str(client_op_id or "") or None,
+        "doc": copy.deepcopy(doc),
+    }
+
+
+def _load_lumenframe_history(ctx: ToolContext, current: dict[str, Any]) -> dict[str, Any]:
+    """Load and reconcile the bounded, durable full-snapshot edit journal."""
+    path = _history_file_path(ctx)
+    raw: dict[str, Any] | None = None
+    if path is not None and path.exists():
+        try:
+            candidate = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(candidate, dict):
+                raw = candidate
+        except Exception:
+            raw = None
+    elif path is None:
+        candidate = _DOC_HISTORY_CACHE.get(ctx.session_id)
+        if isinstance(candidate, dict):
+            raw = copy.deepcopy(candidate)
+
+    entries = list(raw.get("entries") or []) if isinstance(raw, dict) else []
+    entries = [
+        entry for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("doc"), dict)
+    ]
+    client_ops = list(raw.get("client_ops") or []) if isinstance(raw, dict) else []
+    client_ops = [
+        record for record in client_ops
+        if isinstance(record, dict) and str(record.get("id") or "")
+    ][-100:]
+    try:
+        cursor = int(raw.get("cursor")) if isinstance(raw, dict) else -1
+    except (TypeError, ValueError):
+        cursor = -1
+    cursor = min(max(cursor, -1), len(entries) - 1)
+
+    current_revision = lumenframe_revision(current)
+    if cursor < 0 or str(entries[cursor].get("revision") or "") != current_revision:
+        # Preserve compatibility with documents written before this journal (or
+        # by an older agent verb): the actual project document becomes a new tip.
+        entries = entries[: cursor + 1]
+        entries.append(_history_entry(current, label="reconcile persisted document"))
+        cursor = len(entries) - 1
+    return {
+        "version": 1,
+        "cursor": cursor,
+        "entries": entries,
+        "client_ops": client_ops,
+    }
+
+
+def _write_lumenframe_history(ctx: ToolContext, history: dict[str, Any]) -> bool:
+    path = _history_file_path(ctx)
+    if path is None:
+        _DOC_HISTORY_CACHE[ctx.session_id] = copy.deepcopy(history)
+        return True
+    return _write_lumenframe_atomic(path, history)
+
+
+def lumenframe_history_status(
+    ctx: ToolContext, doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    current = doc if isinstance(doc, dict) else _lumendoc(ctx)
+    history = _load_lumenframe_history(ctx, current)
+    cursor = int(history["cursor"])
+    return {
+        "revision": lumenframe_revision(current),
+        "can_undo": cursor > 0,
+        "can_redo": cursor + 1 < len(history["entries"]),
+        "history_length": len(history["entries"]),
+        "history_cursor": cursor,
+    }
+
+
+def lumenframe_client_op_seen(
+    ctx: ToolContext,
+    client_op_id: str | None,
+    doc: dict[str, Any] | None = None,
+) -> bool:
+    if not client_op_id:
+        return False
+    current = doc if isinstance(doc, dict) else _lumendoc(ctx)
+    history = _load_lumenframe_history(ctx, current)
+    return any(
+        str(record.get("id") or "") == str(client_op_id)
+        for record in history.get("client_ops") or []
+    )
+
+
+def _commit_lumendoc(
+    ctx: ToolContext,
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    label: str,
+    client_op_id: str | None = None,
+) -> bool:
+    history = _load_lumenframe_history(ctx, before)
+    cursor = int(history["cursor"])
+    entries = history["entries"][: cursor + 1]
+    entries.append(_history_entry(after, label=label, client_op_id=client_op_id))
+    if len(entries) > 100:
+        entries = entries[-100:]
+    client_ops = list(history.get("client_ops") or [])
+    if client_op_id:
+        client_ops.append({
+            "id": str(client_op_id),
+            "kind": "edit",
+            "result_revision": lumenframe_revision(after),
+        })
+    updated_history = {
+        "version": 1,
+        "cursor": len(entries) - 1,
+        "entries": entries,
+        "client_ops": client_ops[-100:],
+    }
+
+    if not _save_lumendoc(ctx, after):
+        return False
+    if not _write_lumenframe_history(ctx, updated_history):
+        # Best-effort rollback keeps the canonical doc at the prior revision.
+        _save_lumendoc(ctx, before)
+        return False
+    return True
+
+
+def restore_lumendoc_history(
+    ctx: ToolContext,
+    *,
+    direction: str,
+    steps: int = 1,
+    client_op_id: str | None = None,
+    base_revision: str | None = None,
+) -> dict[str, Any]:
+    current = _lumendoc(ctx)
+    history = _load_lumenframe_history(ctx, current)
+    if lumenframe_client_op_seen(ctx, client_op_id, current):
+        return {
+            "doc": copy.deepcopy(current),
+            "duplicate": True,
+            **lumenframe_history_status(ctx, current),
+        }
+    current_revision = lumenframe_revision(current)
+    if base_revision is not None and str(base_revision) != current_revision:
+        raise LumenframeRevisionConflict(current_revision)
+    cursor = int(history["cursor"])
+    amount = max(1, min(int(steps), 50))
+    if direction == "undo":
+        target = max(0, cursor - amount)
+    elif direction == "redo":
+        target = min(len(history["entries"]) - 1, cursor + amount)
+    else:
+        raise ValueError("direction must be 'undo' or 'redo'")
+    doc = copy.deepcopy(history["entries"][target]["doc"])
+    if not _save_lumendoc(ctx, doc):
+        raise OSError("failed to persist lumenframe history restore")
+    history["cursor"] = target
+    if client_op_id:
+        client_ops = list(history.get("client_ops") or [])
+        client_ops.append({
+            "id": str(client_op_id),
+            "kind": direction,
+            "result_revision": lumenframe_revision(doc),
+        })
+        history["client_ops"] = client_ops[-100:]
+    if not _write_lumenframe_history(ctx, history):
+        _save_lumendoc(ctx, current)
+        raise OSError("failed to persist lumenframe history cursor")
+    return {"doc": doc, **lumenframe_history_status(ctx, doc)}
+
+
+class LumenframeRevisionConflict(ValueError):  # noqa: N818 - public API name
+    """A direct edit was based on a stale LumenFrame snapshot."""
+
+    code = "E_REVISION_CONFLICT"
+
+    def __init__(self, current_revision: str) -> None:
+        self.current_revision = current_revision
+        super().__init__("lumenframe document changed; refresh and retry")
+
+
+def get_lumendoc_snapshot(ctx: ToolContext) -> dict[str, Any]:
+    """Return a private copy of the canonical LumenFrame document."""
+    return copy.deepcopy(_lumendoc(ctx))
+
+
+def apply_lumendoc_ops(
+    ctx: ToolContext,
+    ops: list[dict[str, Any]],
+    *,
+    label: str = "lumenframe edit",
+    client_op_id: str | None = None,
+    base_revision: str | None = None,
+) -> dict[str, Any]:
+    """Apply one atomic LayerPatch with revision and durable history semantics."""
+    if apply_layer_patch is None:
+        raise RuntimeError("lumenframe module not available")
+    if not isinstance(ops, list) or not ops:
+        raise ValueError("lumenframe edit requires a non-empty ops list")
+
+    before = _lumendoc(ctx)
+    if lumenframe_client_op_seen(ctx, client_op_id, before):
+        return {
+            "doc": copy.deepcopy(before),
+            "duplicate": True,
+            **lumenframe_history_status(ctx, before),
+        }
+    current_revision = lumenframe_revision(before)
+    if base_revision is not None and str(base_revision) != current_revision:
+        raise LumenframeRevisionConflict(current_revision)
+
+    after = apply_layer_patch(before, {"version": 1, "ops": copy.deepcopy(ops)})
+    if not _commit_lumendoc(
+        ctx, before, after, label=label, client_op_id=client_op_id,
+    ):
+        raise OSError("failed to persist lumenframe document and history")
+    return {
+        "doc": after,
+        "duplicate": False,
+        **lumenframe_history_status(ctx, after),
+    }
 
 
 def _lumenframe_file_path(ctx: ToolContext) -> Path | None:
@@ -216,7 +469,7 @@ def _write_lumenframe_atomic(file_path: Path, doc: dict[str, Any]) -> bool:
         return False
 
 
-def _save_lumendoc(ctx: ToolContext, doc: dict[str, Any]) -> None:
+def _save_lumendoc(ctx: ToolContext, doc: dict[str, Any]) -> bool:
     """Store the document, persisting to project file or memory cache.
 
     - If ctx.project: write to <project_dir>/lumenframe.json atomically
@@ -224,7 +477,7 @@ def _save_lumendoc(ctx: ToolContext, doc: dict[str, Any]) -> None:
 
     **Data safety:**
     - Uses atomic temp-file-then-rename pattern to prevent corruption.
-    - Logs warnings on write failure but does not raise (graceful fallback to memory cache).
+    - A project-backed write never falls through to memory on disk failure.
 
     This keeps lumenframe editing fully orthogonal to the main project state
     and timeline patch history.
@@ -233,14 +486,21 @@ def _save_lumendoc(ctx: ToolContext, doc: dict[str, Any]) -> None:
     """
     if ctx.project is not None:
         file_path = _lumenframe_file_path(ctx)
-        if file_path is not None:
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            if _write_lumenframe_atomic(file_path, doc):
-                # File write succeeded
-                return
+        if file_path is None:
+            _DOC_CACHE[ctx.session_id] = copy.deepcopy(doc)
+            return False
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        persisted = _write_lumenframe_atomic(file_path, doc)
+        if not persisted:
+            # Keep the attempted state available for diagnostics/legacy
+            # embedded callers, but the False return remains authoritative:
+            # project-backed callers must never report this as committed.
+            _DOC_CACHE[ctx.session_id] = copy.deepcopy(doc)
+        return persisted
 
-    # Fallback: in-session memory cache
+    # Project-less embedded/tests use a session-local in-memory document.
     _DOC_CACHE[ctx.session_id] = copy.deepcopy(doc)
+    return True
 
 
 def _compact_tree_summary(layer: dict[str, Any], depth: int = 0, max_depth: int = 4) -> str:
@@ -268,6 +528,153 @@ def _compact_tree_summary(layer: dict[str, Any], depth: int = 0, max_depth: int 
     return "\n".join(p for p in parts if p)
 
 
+def _bounded_detail_value(
+    value: Any,
+    *,
+    depth: int = 0,
+    omit_keys: frozenset[str] = frozenset(),
+) -> Any:
+    """Return a JSON-safe, size-bounded copy for model-facing metadata."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        if len(value) <= _LAYER_DETAIL_STRING_LIMIT:
+            return value
+        return value[:_LAYER_DETAIL_STRING_LIMIT] + "…"
+    if depth >= _LAYER_DETAIL_DEPTH_LIMIT:
+        return "<truncated>"
+    if isinstance(value, dict):
+        items = [
+            (str(key), item)
+            for key, item in value.items()
+            if str(key) not in omit_keys
+        ]
+        result = {
+            key: _bounded_detail_value(
+                item,
+                depth=depth + 1,
+                omit_keys=omit_keys,
+            )
+            for key, item in items[:_LAYER_DETAIL_MAPPING_LIMIT]
+        }
+        if len(items) > _LAYER_DETAIL_MAPPING_LIMIT:
+            result["_truncated_fields"] = len(items) - _LAYER_DETAIL_MAPPING_LIMIT
+        return result
+    if isinstance(value, (list, tuple)):
+        result = [
+            _bounded_detail_value(
+                item,
+                depth=depth + 1,
+                omit_keys=omit_keys,
+            )
+            for item in value[:_LAYER_DETAIL_SEQUENCE_LIMIT]
+        ]
+        if len(value) > _LAYER_DETAIL_SEQUENCE_LIMIT:
+            result.append({
+                "_truncated_items": len(value) - _LAYER_DETAIL_SEQUENCE_LIMIT,
+            })
+        return result
+    return _bounded_detail_value(str(value), depth=depth)
+
+
+def _mask_detail(mask: Any) -> dict[str, Any] | None:
+    """Summarise a mask without echoing inline pixel alpha/data payloads."""
+    if not isinstance(mask, dict):
+        return None
+    summary: dict[str, Any] = {
+        "kind": str(mask.get("kind") or "shape"),
+        "invert": bool(mask.get("invert", False)),
+        "feather": float(mask.get("feather") or 0.0),
+    }
+    for key in (
+        "source_layer_id", "asset_id", "channel", "mode", "threshold",
+        "softness", "width", "height",
+    ):
+        if key in mask:
+            summary[key] = _bounded_detail_value(mask[key])
+    if isinstance(mask.get("shape"), dict):
+        summary["shape"] = _bounded_detail_value(
+            mask["shape"],
+            omit_keys=frozenset({"alpha", "data"}),
+        )
+    if "alpha" in mask or "data" in mask:
+        summary["has_inline_data"] = True
+    return summary
+
+
+def _type_props_detail(layer: dict[str, Any]) -> dict[str, Any] | None:
+    layer_type = str(layer.get("type") or "")
+    props = layer.get("props")
+    if not isinstance(props, dict):
+        return None
+    if layer_type == "gradient":
+        keys = ("mode", "stops", "angle", "center", "radius")
+    elif layer_type == "shape":
+        keys = (
+            "kind", "fill", "stroke", "rect", "points", "cx", "cy",
+            "rx", "ry", "radius", "opacity_baked",
+        )
+    else:
+        return None
+    return {
+        key: _bounded_detail_value(props[key])
+        for key in keys
+        if key in props
+    }
+
+
+def _layer_detail(layer: dict[str, Any]) -> dict[str, Any]:
+    start = float(layer.get("start") or 0.0)
+    duration = float(layer.get("duration") or 0.0)
+    transform = layer.get("transform") if isinstance(layer.get("transform"), dict) else {}
+    effects = [effect for effect in layer.get("effects") or [] if isinstance(effect, dict)]
+    detail: dict[str, Any] = {
+        "id": str(layer.get("id") or ""),
+        "type": str(layer.get("type") or "unknown"),
+        "name": str(layer.get("name") or ""),
+        "timing": {"start": start, "duration": duration, "end": start + duration},
+        "opacity": float(layer.get("opacity", 1.0)),
+        "blend_mode": str(layer.get("blend_mode") or "normal"),
+        "clip_to_below": bool(layer.get("clip_to_below", False)),
+        "transform": {
+            key: _bounded_detail_value(transform[key])
+            for key in (
+                "x", "y", "scale_x", "scale_y", "rotation", "anchor_x", "anchor_y",
+            )
+            if key in transform
+        },
+        "effects": [
+            {
+                "id": str(effect.get("id") or ""),
+                "type": str(effect.get("type") or "unknown"),
+                "enabled": bool(effect.get("enabled", True)),
+                "params": _bounded_detail_value(effect.get("params") or {}),
+            }
+            for effect in effects[:_LAYER_EFFECTS_LIMIT]
+        ],
+        "mask": _mask_detail(layer.get("mask")),
+    }
+    if len(effects) > _LAYER_EFFECTS_LIMIT:
+        detail["effects_truncated"] = len(effects) - _LAYER_EFFECTS_LIMIT
+    props = _type_props_detail(layer)
+    if props is not None:
+        detail["props"] = props
+    return detail
+
+
+def _collect_layer_details(root: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    """Flatten the editable tree in display order, with an explicit hard cap."""
+    children = [child for child in root.get("children") or [] if isinstance(child, dict)]
+    pending = list(reversed(children))
+    details: list[dict[str, Any]] = []
+    while pending and len(details) < _LAYER_DETAILS_LIMIT:
+        layer = pending.pop()
+        details.append(_layer_detail(layer))
+        nested = [child for child in layer.get("children") or [] if isinstance(child, dict)]
+        pending.extend(reversed(nested))
+    return details, bool(pending)
+
+
 async def dispatch_get(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     """Inspect the session's lumenframe document state.
 
@@ -276,12 +683,13 @@ async def dispatch_get(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]
     if apply_layer_patch is None:
         raise RuntimeError("lumenframe module not available")
 
-    doc = _lumendoc(ctx)
+    doc = get_lumendoc_snapshot(ctx)
     root = doc.get("root", {})
     canvas = doc.get("canvas", {})
     selection = doc.get("selection", [])
 
     root_tree = _compact_tree_summary(root) if root else "(empty composition)"
+    layer_details, layer_details_truncated = _collect_layer_details(root)
 
     return {
         "applied": True,
@@ -291,6 +699,8 @@ async def dispatch_get(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]
             "fps": canvas.get("fps"),
         },
         "root_layers": root_tree,
+        "layer_details": layer_details,
+        "layer_details_truncated": layer_details_truncated,
         "selection_ids": selection,
         "doc_id": doc.get("id"),
     }
@@ -320,12 +730,18 @@ async def dispatch_patch(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
     if not isinstance(ops, list):
         raise ValueError(f"lumen_patch: ops must be a list, got {type(ops).__name__}")
 
-    doc = _lumendoc(ctx)
-
     try:
-        patch = {"version": 1, "ops": ops}
-        new_doc = apply_layer_patch(doc, patch)
-        _save_lumendoc(ctx, new_doc)
+        result = apply_lumendoc_ops(
+            ctx,
+            ops,
+            label=str(args.get("label") or "agent lumenframe edit"),
+            client_op_id=str(args.get("client_op_id") or "") or None,
+            base_revision=(
+                str(args["base_revision"])
+                if args.get("base_revision") is not None else None
+            ),
+        )
+        new_doc = result["doc"]
 
         root = new_doc.get("root", {})
         root_tree = _compact_tree_summary(root) if root else "(empty)"
@@ -335,16 +751,23 @@ async def dispatch_patch(args: dict[str, Any], ctx: ToolContext) -> dict[str, An
             "ops_count": len(ops),
             "root_layers": root_tree,
             "selection_ids": new_doc.get("selection", []),
+            "revision": result["revision"],
+            "can_undo": result["can_undo"],
+            "can_redo": result["can_redo"],
+            "duplicate": result["duplicate"],
         }
     except Exception as e:
         # Apply failed; doc unchanged. Return structured error.
-        error_code = getattr(e, "code", "E_UNKNOWN")
+        error_code = getattr(e, "code", "E_PERSIST" if isinstance(e, OSError) else "E_UNKNOWN")
         error_msg = str(getattr(e, "message", str(e)))
         return {
             "applied": False,
             "error_code": error_code,
             "error_message": error_msg,
-            "recovery": "fix_args" if error_code.startswith("E_ARG") else "none",
+            "recovery": (
+                "fix_args" if error_code.startswith("E_ARG")
+                else ("transient_retry" if error_code == "E_PERSIST" else "none")
+            ),
         }
 
 
@@ -625,7 +1048,7 @@ async def dispatch_render(args: dict[str, Any], ctx: ToolContext) -> dict[str, A
             "error_message": "lumenframe compile module not available",
         }
 
-    doc = _lumendoc(ctx)
+    doc = get_lumendoc_snapshot(ctx)
     fmt = str(args.get("format", "video")).lower()
     frame_index = int(args.get("frame_index", 0))
 
@@ -820,7 +1243,8 @@ async def dispatch_set_work_area(args: dict[str, Any], ctx: ToolContext) -> dict
     """Set or clear the canvas work area used by range preview/export defaults."""
     if normalize_doc is None:
         raise RuntimeError("lumenframe module not available")
-    doc = _lumendoc(ctx)
+    before = get_lumendoc_snapshot(ctx)
+    doc = copy.deepcopy(before)
     canvas = doc.setdefault("canvas", {})
     clear = bool(args.get("clear", False))
     if clear:
@@ -843,7 +1267,15 @@ async def dispatch_set_work_area(args: dict[str, Any], ctx: ToolContext) -> dict
             "error_message": str(exc),
             "recovery": "fix_args",
         }
-    _save_lumendoc(ctx, normalized)
+    if not _commit_lumendoc(
+        ctx, before, normalized, label="agent lumenframe work area edit",
+    ):
+        return {
+            "applied": False,
+            "error_code": "E_PERSIST",
+            "error_message": "failed to persist lumenframe work area",
+            "recovery": "transient_retry",
+        }
     return {
         "applied": True,
         "work_area": normalized.get("canvas", {}).get("work_area"),
@@ -880,7 +1312,6 @@ async def dispatch_set_expression(args: dict[str, Any], ctx: ToolContext) -> dic
             "summary": str
         }
     """
-    from lumenframe import find_layer, apply_layer_patch
     from gemia.expressions import validate_expression
 
     if apply_layer_patch is None:
@@ -923,20 +1354,16 @@ async def dispatch_set_expression(args: dict[str, Any], ctx: ToolContext) -> dic
 
     # Apply the set_expression op
     try:
-        doc = _lumendoc(ctx)
-        patch = {
-            "version": 1,
-            "ops": [
-                {
-                    "op": "set_expression",
-                    "layer_id": layer_id,
-                    "property": property_name,
-                    "expression": expression_str,
-                }
-            ],
-        }
-        new_doc = apply_layer_patch(doc, patch)
-        _save_lumendoc(ctx, new_doc)
+        apply_lumendoc_ops(
+            ctx,
+            [{
+                "op": "set_expression",
+                "layer_id": layer_id,
+                "property": property_name,
+                "expression": expression_str,
+            }],
+            label="agent lumenframe expression edit",
+        )
 
         return {
             "layer_id": layer_id,
@@ -951,7 +1378,7 @@ async def dispatch_set_expression(args: dict[str, Any], ctx: ToolContext) -> dic
             "property": property_name,
             "expression": expression_str,
             "valid": False,
-            "error_code": "E_APPLY",
+            "error_code": "E_PERSIST" if isinstance(e, OSError) else "E_APPLY",
             "error_message": f"Failed to apply expression: {str(e)}",
         }
 
@@ -967,6 +1394,7 @@ def clear_lumenframe_session(session_id: str) -> None:
     """
     if session_id in _DOC_CACHE:
         del _DOC_CACHE[session_id]
+    _DOC_HISTORY_CACHE.pop(session_id, None)
     # The path cache is keyed by (session_id, project_id) tuples — purge those
     # too, or every closed session leaks its entries.
     for key in [k for k in _LUMENFRAME_PATH_CACHE if k[0] == session_id]:
@@ -1022,5 +1450,12 @@ __all__ = [
     "dispatch_merge_compositions",
     "dispatch_set_work_area",
     "dispatch_set_expression",
+    "lumenframe_revision",
+    "lumenframe_history_status",
+    "lumenframe_client_op_seen",
+    "get_lumendoc_snapshot",
+    "apply_lumendoc_ops",
+    "restore_lumendoc_history",
+    "LumenframeRevisionConflict",
     "clear_lumenframe_session",
 ]

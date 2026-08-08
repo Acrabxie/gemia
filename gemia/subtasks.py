@@ -1,52 +1,49 @@
-"""Multi-agent capability v1 — bounded sub-task fan-out (``spawn_subtasks``).
+"""Multi-agent capability — bounded parallel sub-task fan-out (``spawn_subtasks``).
 
-Implements Phase 1 of docs/multi-agent-plan.md: one host verb, ``spawn_subtasks``,
-fans out 1-4 bounded child agents that work IN PARALLEL on independent goals and
-return structured results. Each child is a lightweight ``SubtaskLoop`` — NOT a
-second ``AgentLoopV3`` — that reuses the parent's streaming/dispatch primitives
-but runs a host-fixed tool profile, cannot ask the user, cannot spawn further
-children, and draws cost/time from the parent session's ``BudgetGuard`` via a
-reserved slice (unspent returns on settlement).
+``spawn_subtasks`` fans out up to four direct child agents that work IN PARALLEL
+on independent goals and return structured results. Children share the parent's
+full tool list and budget. A child may ask the root agent for short internal
+guidance, but cannot ask the user or create another child.
 
-Architecture (§3): children are ``asyncio`` tasks on the session's single event
-loop — no threads, ever — so ``AssetRegistry`` thread-confinement, the loop-hop
-edit discipline, and ``AskBridge`` future resolution all stay intact. A child
-shares the parent's ``GeminiClientV3`` (stateless per call), ``AssetRegistry``,
+Architecture: children are ``asyncio`` tasks on the session's single event loop
+— no threads, ever — so ``AssetRegistry`` thread-confinement, the loop-hop edit
+discipline, and ``AskBridge`` future resolution all stay intact.  A child shares
+the parent's ``GeminiClientV3`` (stateless per call), ``AssetRegistry``,
 ``JobRegistry``, and ``ProjectHandle`` via a per-child ``ToolContext`` whose
 ``extra`` has ``ask_bridge`` stripped (elicit is structurally impossible) and
 whose ``output_dir`` is a per-child subdir.
 
-Protocol (§6): a child opens with exactly one ``subagent_start`` and closes with
-exactly one ``subagent_result``. Child TOOL activity rides the EXISTING
+Protocol: a child opens with exactly one ``subagent_start`` and closes with
+exactly one ``subagent_result``.  Child TOOL activity rides the EXISTING
 ``tool_exec_*`` kinds carrying an optional ``agent_id`` field (absent = the
-root/parent loop). There is no ``subagent_progress`` kind and children never emit
-``model_text_delta`` — child final text folds into the structured-result summary.
+root/parent loop).
 
-Budget (§5): the parent reserves a 20% floor for itself, splits the rest across
-N children (``max_cost_usd`` can only clamp a child DOWN), gives each child its
-own capped ``BudgetGuard``, and settles every reservation in a mandatory
-``try/finally`` (unspent returns). The parent loop special-cases ``spawn_subtasks``
-to commit ``actual_seconds=0.0`` so the batch wall-clock does not double-count on
-top of the children's settled seconds.
+Model routing: each subtask may specify a ``model`` override.  When a task
+requires full video understanding (visual content analysis, scene recognition,
+frame-level reasoning), route it to a multimodal model such as Gemini.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import time
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from contextlib import suppress
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from gemia.budget_guard import BudgetGuard, BudgetReservation
+from gemia.budget_guard import BudgetGuard, is_paid_media_tool
 from gemia.errors import (
-    GemiaError,
     RECOVERY_FIX_ARGS,
     RECOVERY_SWITCH_TOOL,
     RECOVERY_TRANSIENT_RETRY,
     ToolError,
 )
 from gemia.plan_mode import is_plan_safe, plan_gate_message
-from gemia.tools import DISPATCHER, TOOL_SCHEMAS
+from gemia.production_budget import PAID_MEDIA_CONTEXT_KEY
 from gemia.tool_outcome import classify_tool_exception, classify_tool_result
+from gemia.tool_router import PRIVATE_SYSTEM_TOOLS
+from gemia.tools import DISPATCHER, TOOL_SCHEMAS
 from gemia.tools._context import ProgressUpdate, ToolContext
 from gemia.turn_ledger import MUTATION_TOOLS, tool_target_key
 
@@ -54,59 +51,84 @@ if TYPE_CHECKING:  # avoid an import cycle: agent_loop_v3 imports tools which...
     from gemia.agent_loop_v3 import AgentLoopV3
 
 
-# ── tool profiles (fixed frozensets, plan_mode-style — §4.2) ─────────────────
-# Derived by reading dispatcher behavior (same doctrine as plan_mode.py), names
-# cross-checked against gemia/tools/__init__.py DISPATCHER. P1 ships annotate +
-# probe only; P2/P3 profiles are listed in the doc, not registered here.
+# ── legacy tool profiles (kept for backward compat) ─────────────────────────
+# New callers should omit tool_profile (defaults to "full" = parent's tool list).
 
 PROFILE_ANNOTATE = frozenset({
     "probe_media", "analyze_media", "extract_frame", "search_library",
-    "get_media_annotations", "annotate_media", "write_media_annotation",
+    "get_media_annotations", "annotate_media", "write_media_annotation", "prepare_roughcut",
 })
 PROFILE_PROBE = frozenset({
     "probe_media", "analyze_media", "search_library",
     "get_media_annotations", "get_timeline", "get_lumenframe", "get_safe_areas",
 })
 
-# Globally forbidden in every profile, regardless of what a profile lists. A
-# schema subset alone is not a security boundary (a model can hallucinate a tool
-# name), so the child dispatch path checks membership fail-closed against BOTH
-# the active profile and this set.
-FORBIDDEN_IN_ANY_PROFILE = frozenset({
-    "spawn_subtasks", "elicit", "remember", "log_note", "save_skill",
-    "run_shell", "build", "export", "project_export",
-    # Machine-scope file ops: child agents must never touch host files. (The
-    # session-scope file_* verbs — including file_delete, formerly listed
-    # here — were removed from the schema in favour of these equivalents.)
-    "read_file", "list_dir", "write_file",
-    "copy_in", "move_file", "organize_files",
-})
+# User interaction and fan-out remain root-only operations. Project-scoped reads,
+# writes, file edits, and creative edits are deliberately available to children.
+FORBIDDEN_IN_CHILDREN = frozenset({"elicit", "spawn_subtasks"})
 
-# tool_profile enum → frozenset. Kept in one place so the schema enum, the
-# dispatcher, and the coverage test cannot drift.
-PROFILES: dict[str, frozenset[str]] = {
+_REMOTE_HOST_TOOLS = frozenset({
+    "run_shell", "build", "check_job", "wait_for_job", "kill_job",
+    "read_file", "list_dir", "write_file", "copy_in", "move_file",
+    "organize_files", "file_delete", "fetch", "web_search", "web_open",
+    "stock_media",
+}) | PRIVATE_SYSTEM_TOOLS
+
+PROFILES: dict[str, frozenset[str] | None] = {
     "annotate": PROFILE_ANNOTATE,
     "probe": PROFILE_PROBE,
+    "full": None,
 }
 
+# Backward compat alias
+FORBIDDEN_IN_ANY_PROFILE = FORBIDDEN_IN_CHILDREN
 
-# ── rails (§8) ───────────────────────────────────────────────────────────────
 
-MAX_CHILDREN = 4                 # schema maxItems + host assert
-CHILD_DEPTH = 1                  # children cannot spawn (depth 1)
-DEFAULT_MAX_STEPS = 10           # child model-call cap
-HARD_MAX_STEPS = 16
-DEFAULT_DEADLINE_SEC = 240.0     # per-batch shared wall-clock deadline
-HARD_DEADLINE_SEC = 480.0
-PARENT_BUDGET_FLOOR = 0.20       # parent keeps 20% of remaining on each axis
+# ── rails ────────────────────────────────────────────────────────────────────
+
+MAX_CHILDREN = 4                 # per spawn_subtasks call
+CHILD_DEPTH = 1                  # direct children cannot fan out again
+DEFAULT_MAX_STEPS = None          # omitted means unlimited child model calls
+HARD_MAX_STEPS = None             # compatibility marker; no host hard cap
+DEFAULT_DEADLINE_SEC = None       # omitted means wait for the batch to finish
+HARD_DEADLINE_SEC = None          # compatibility marker; no host hard cap
 _DOOM_LOOP_THRESHOLD = 3         # per-child, byte-identical (name,args) streak
 _REPEATED_FAILURE_NUDGE_THRESHOLD = 5
 _TRANSIENT_RETRY_NUDGE_THRESHOLD = 8
 _PROGRESS_COALESCE_SEC = 1.0     # ≥1 s between child tool_exec_progress emits
-_SUMMARY_CAP = 1200              # per-child summary char cap (§4.3)
-_RESULT_CAP = 16_000             # whole tool_result byte cap (§4.3)
+_SUMMARY_CAP = 1200              # per-child summary char cap
+_RESULT_CAP = 16_000             # whole tool_result byte cap
 
 _VALID_STATUSES = {"ok", "error", "timeout", "cancelled", "needs_user"}
+
+ASK_ROOT_AGENT = "ask_root_agent"
+_ROOT_ASK_MAX_CHARS = 2_000
+_ROOT_ANSWER_MAX_CHARS = 4_000
+_ROOT_ASK_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": ASK_ROOT_AGENT,
+        "description": (
+            "Ask the root Lumeri agent for concise internal guidance about the "
+            "root task or current project state. This does not ask the user. "
+            "Use only when the child is genuinely blocked or needs a decision."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The specific question the root agent should answer.",
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Optional short context that helps the root answer.",
+                },
+            },
+            "required": ["question"],
+        },
+    },
+}
 
 
 class SubtaskError(ToolError):
@@ -122,7 +144,10 @@ class SubtaskError(ToolError):
         super().__init__(message, code=code, recovery=recovery)
 
 
-def _profile_tools(profile_name: str) -> frozenset[str]:
+def _profile_tools(profile_name: str | None) -> frozenset[str] | None:
+    """Return the tool set for a profile.  ``None`` means "full" (all parent tools)."""
+    if profile_name is None or profile_name == "full":
+        return None
     tools = PROFILES.get(profile_name)
     if tools is None:
         raise SubtaskError(
@@ -133,49 +158,88 @@ def _profile_tools(profile_name: str) -> frozenset[str]:
     return tools
 
 
-def _child_tool_schemas(profile_tools: frozenset[str]) -> list[dict[str, Any]]:
-    """The subset of TOOL_SCHEMAS whose names are in the profile — the child model
-    physically cannot see out-of-profile verbs."""
-    return [t for t in TOOL_SCHEMAS if t["function"]["name"] in profile_tools]
+def _child_tool_schemas(
+    profile_tools: frozenset[str] | None,
+    *,
+    parent: AgentLoopV3 | None = None,
+) -> list[dict[str, Any]]:
+    """Return the child-visible tool surface.
+
+    A full child receives the parent's complete local capability surface,
+    including project-scoped file read/write/edit tools and creative mutation
+    tools.  Only parent-only interaction and remote-session host protections
+    are removed.  Restricted legacy profiles remain available for callers that
+    explicitly request them.
+    """
+    names = (
+        set(parent.capabilities.names)
+        if parent is not None and parent.capabilities is not None
+        else {str(t["function"]["name"]) for t in TOOL_SCHEMAS}
+    )
+    names.difference_update(FORBIDDEN_IN_CHILDREN)
+    if parent is not None and bool(getattr(parent, "_remote", False)):
+        names.difference_update(_REMOTE_HOST_TOOLS)
+    if profile_tools is not None:
+        names.intersection_update(profile_tools)
+    if parent is not None and parent.capabilities is not None:
+        schemas = parent.capabilities.schemas(names)
+    else:
+        schemas = [t for t in TOOL_SCHEMAS if t["function"]["name"] in names]
+    # This is deliberately child-only plumbing. It is not part of the root
+    # product tool catalog, so the root cannot accidentally ask itself.
+    schemas.append(_ROOT_ASK_SCHEMA)
+    return schemas
 
 
 # ── the child loop ───────────────────────────────────────────────────────────
 
 
 class SubtaskLoop:
-    """A restricted AgentLoopV3-lite. Reuses only streaming + dispatch primitives.
+    """AgentLoopV3-lite for child sub-agents.
 
-    One instance per child within a single ``spawn_subtasks`` call. Never mutates
-    the parent; reads ``plan_mode`` and the client from it. Its transcript, its
-    ``BudgetGuard`` (capped at the reserved slice), and its ``ToolContext`` are
-    all its own.
+    Children share the parent's full local tool surface and project-scoped
+    read/write/edit tools, plus the child-only ``ask_root_agent`` consultation
+    tool; ``spawn_subtasks`` remains root-only.  They share the parent's budget
+    by default.  An optional ``client`` override
+    enables model routing — e.g. sending video-understanding tasks to a
+    multimodal model like Gemini.
     """
 
     def __init__(
         self,
         *,
         agent_id: str,
-        parent: "AgentLoopV3",
+        parent: Any,
         call_id: str,
         goal: str,
-        profile_name: str,
-        guard: BudgetGuard,
+        profile_name: str | None = None,
+        guard: BudgetGuard | None = None,
+        client: Any = None,
         asset_ids: list[str] | None = None,
-        max_steps: int = DEFAULT_MAX_STEPS,
-        depth: int = CHILD_DEPTH,
+        max_steps: int | None = DEFAULT_MAX_STEPS,
+        depth: int | None = CHILD_DEPTH,
     ) -> None:
-        # Depth-1 invariant: a child is always depth 1 and has no spawn path;
-        # asserting here makes an accidental nested-spawn wiring fail loudly.
-        assert depth == CHILD_DEPTH, f"subtask depth must be {CHILD_DEPTH}, got {depth}"
         self.agent_id = agent_id
         self.parent = parent
         self.call_id = call_id
         self.goal = goal
-        self.profile_name = profile_name
-        self.profile_tools = _profile_tools(profile_name)
-        self.guard = guard
+        self.profile_name = profile_name or "full"
+        self.profile_tools = _profile_tools(self.profile_name)
+        self.guard = guard or parent.budget
+        self.budget = self.guard
+        self.client = client or parent.client
         self.asset_ids = list(asset_ids or [])
-        self.max_steps = max(1, min(int(max_steps), HARD_MAX_STEPS))
+        self.max_steps = (
+            None if max_steps is None else max(1, int(max_steps))
+        )
+        self.depth = int(depth) if depth is not None else int(getattr(parent, "depth", 0)) + 1
+        self.output_dir = Path(parent.output_dir) / "subtasks" / agent_id
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.session_id = parent.session_id
+        self.registry = parent.registry
+        self.project = parent.project
+        self.capabilities = getattr(parent, "capabilities", None)
+        self._active_subagents = parent._active_subagents
 
         self._messages: list[dict[str, Any]] = []
         self._final_text_parts: list[str] = []
@@ -194,19 +258,33 @@ class SubtaskLoop:
         # (single-loop confinement makes that race-free), but with its own
         # output_dir, its own agent-scoped emit_progress, and ask_bridge REMOVED
         # so elicit is structurally impossible even if a profile bug let it in.
-        child_output = self.parent.output_dir / "subtasks" / agent_id
-        child_output.mkdir(parents=True, exist_ok=True)
-        parent_extra = getattr(self.parent, "_tool_ctx").extra
+        parent_ctx = getattr(self.parent, "_tool_ctx", None) or getattr(self.parent, "_ctx", None)
+        if parent_ctx is None:
+            raise SubtaskError("parent agent has no live tool context", recovery=RECOVERY_SWITCH_TOOL)
+        parent_extra = parent_ctx.extra
         child_extra = {k: v for k, v in dict(parent_extra).items() if k != "ask_bridge"}
+        # Make nested spawn calls resolve back to this child rather than the
+        # root loop. This preserves per-level event ownership and project
+        # context while still sharing the single event loop.
+        child_extra["agent_loop"] = self
         self._ctx = ToolContext(
-            session_id=self.parent.session_id,
-            output_dir=child_output,
-            registry=self.parent.registry,
+            session_id=self.session_id,
+            output_dir=self.output_dir,
+            registry=self.registry,
             emit_progress=lambda _u: None,
             extra=child_extra,
-            jobs=getattr(self.parent, "_tool_ctx").jobs,
-            project=self.parent.project,
+            jobs=parent_ctx.jobs,
+            project=self.project,
         )
+
+    @property
+    def plan_mode(self) -> bool:
+        """Read the root session's live plan-mode flag through any nesting."""
+        return bool(self.parent.plan_mode)
+
+    @property
+    def _remote(self) -> bool:
+        return bool(getattr(self.parent, "_remote", False))
 
     # ── child SSE emits (agent_id attached) ──────────────────────────────
 
@@ -251,22 +329,39 @@ class SubtaskLoop:
     # ── transcript helpers (mirrors AgentLoopV3 shapes) ──────────────────
 
     def _system_prompt(self) -> str:
-        tool_list = ", ".join(sorted(self.profile_tools))
+        if self.profile_tools is not None:
+            tool_list = ", ".join(sorted((*self.profile_tools, ASK_ROOT_AGENT)))
+            tools_note = (
+                f"Available tools: {tool_list}. {ASK_ROOT_AGENT} is an internal, "
+                "read-only consultation with the root agent."
+            )
+        else:
+            tools_note = (
+                "You have the SAME full tool set as the parent agent, including "
+                "project-scoped file reads, writes, edits, and creative edits. "
+                "You cannot spawn more sub-agents; use ask_root_agent when you "
+                "need concise internal guidance."
+            )
         scope = (
             f"\nScoped assets: {', '.join(self.asset_ids)}." if self.asset_ids else ""
         )
         return (
-            "You are a bounded Lumeri sub-agent working on ONE independent goal in "
-            "parallel with sibling sub-agents. You run a restricted tool set and "
-            "CANNOT ask the user, spawn further sub-agents, or edit the shared "
-            "project document.\n"
-            f"Available tools: {tool_list}.\n"
+            "You are a Lumeri sub-agent working on ONE independent goal in "
+            "parallel with sibling sub-agents. You CANNOT ask the user or spawn "
+            "another sub-agent.\n"
+            f"{tools_note}\n"
             f"Your goal:\n{self.goal}{scope}\n\n"
             "Work efficiently: call tools to accomplish the goal, then STOP with a "
             "short final text summary of what you found/did and any asset_ids you "
             "produced. Your final text is the ONLY thing the parent sees, so make "
             "it self-contained. If you need a human decision you cannot make, stop "
-            "and say so plainly (the parent will decide whether to ask the user)."
+            "and say so plainly. If you need guidance about the root task or a "
+            "decision, use ask_root_agent with one concise, specific question; "
+            "the root agent can answer internally. Do not use it for routine "
+            "progress updates.\n\n"
+            "If your task requires understanding VIDEO CONTENT (visual analysis, "
+            "scene detection, object recognition, reading on-screen text), prefer "
+            "tools like analyze_media that leverage multimodal models."
         )
 
     def _append_tool_result(self, tool_call_id: str, payload: Any) -> None:
@@ -342,6 +437,11 @@ class SubtaskLoop:
         those fold into ``status``/``summary``. asyncio.CancelledError DOES
         propagate (the parent's finally settles + records the terminal status).
         """
+        self.parent._active_subagents[f"{self.call_id}:{self.agent_id}"] = {
+            "agent_id": self.agent_id,
+            "goal": self.goal,
+            "tool_profile": self.profile_name,
+        }
         self._emit({
             "kind": "subagent_start",
             "goal": self.goal,
@@ -353,16 +453,16 @@ class SubtaskLoop:
         self._messages.append({"role": "user", "content": self.goal})
 
         status = "ok"
-        child_schemas = _child_tool_schemas(self.profile_tools)
+        child_schemas = _child_tool_schemas(self.profile_tools, parent=self.parent)
 
-        while self.steps < self.max_steps:
+        while self.max_steps is None or self.steps < self.max_steps:
             self.steps += 1
             accum_text: list[str] = []
             tool_calls: list[dict[str, Any]] = []
             by_index: dict[int, dict[str, Any]] = {}
 
             try:
-                async for delta in self.parent.client.stream_turn(
+                async for delta in self.client.stream_turn(
                     self._messages, tools=child_schemas
                 ):
                     kind = delta.get("kind")
@@ -436,11 +536,13 @@ class SubtaskLoop:
             if status == "error":
                 break
         else:
-            # Ran out of steps.
-            self._final_text_parts.append(
-                f"[reached the {self.max_steps}-step cap before finishing]"
-            )
-            status = "error"
+            # An explicitly requested per-child limit is still honored, but
+            # there is no host-imposed default or hard maximum.
+            if self.max_steps is not None:
+                self._final_text_parts.append(
+                    f"[reached the requested {self.max_steps}-step limit before finishing]"
+                )
+                status = "error"
 
         summary = "\n".join(p for p in self._final_text_parts if p).strip()
         summary = summary[:_SUMMARY_CAP]
@@ -462,16 +564,21 @@ class SubtaskLoop:
         if self._emitted_result:
             return
         self._emitted_result = True
-        self._emit({
-            "kind": "subagent_result",
-            "status": result["status"],
-            "summary": result["summary"],
-            "asset_ids": result["asset_ids"],
-            "steps": result["steps"],
-            "spent_usd": result["spent_usd"],
-            "spent_seconds": result["spent_seconds"],
-            "elapsed_seconds": round(float(elapsed_seconds), 2),
-        })
+        try:
+            self._emit({
+                "kind": "subagent_result",
+                "status": result["status"],
+                "summary": result["summary"],
+                "asset_ids": result["asset_ids"],
+                "steps": result["steps"],
+                "spent_usd": result["spent_usd"],
+                "spent_seconds": result["spent_seconds"],
+                "elapsed_seconds": round(float(elapsed_seconds), 2),
+            })
+        finally:
+            self.parent._active_subagents.pop(
+                f"{self.call_id}:{self.agent_id}", None
+            )
 
     async def _dispatch_child_call(self, tc: dict[str, Any]) -> None:
         """Dispatch one child tool call with the full per-child rail stack:
@@ -496,10 +603,34 @@ class SubtaskLoop:
             self._record_unresolved(name, "E_BAD_ARG")
             return
 
-        # Fail-closed profile enforcement: the schema subset is NOT a boundary
-        # (a model can hallucinate a tool name), so gate every dispatch against
-        # BOTH the active profile and the global forbidden set.
-        if name not in self.profile_tools or name in FORBIDDEN_IN_ANY_PROFILE:
+        # Parent interaction remains unavailable to children except for the
+        # dedicated internal consultation tool. Fan-out stays root-only.
+        if name in FORBIDDEN_IN_CHILDREN:
+            self._append_tool_result(tool_call_id, {
+                "error": f"'{name}' is forbidden in sub-agents",
+                "error_code": "E_SUBTASK_PROFILE",
+                "recovery": RECOVERY_SWITCH_TOOL,
+            })
+            self._maybe_nudge(name, "E_SUBTASK_PROFILE")
+            self._record_unresolved(name, "E_SUBTASK_PROFILE", parsed_args)
+            return
+
+        if self._remote and name in _REMOTE_HOST_TOOLS:
+            self._append_tool_result(tool_call_id, {
+                "error": f"tool '{name}' is disabled in this shared demo",
+                "error_code": "E_REMOTE_BLOCKED",
+                "recovery": RECOVERY_FIX_ARGS,
+            })
+            self._record_unresolved(name, "E_REMOTE_BLOCKED", parsed_args)
+            return
+
+        # Legacy profile enforcement: when a restricted profile is active, only
+        # allow tools explicitly listed in that profile.
+        if (
+            name != ASK_ROOT_AGENT
+            and self.profile_tools is not None
+            and name not in self.profile_tools
+        ):
             self._append_tool_result(tool_call_id, {
                 "error": (
                     f"'{name}' is not available in the '{self.profile_name}' "
@@ -516,7 +647,9 @@ class SubtaskLoop:
         # dispatch so a mid-batch toggle clamps children within one dispatch.
         # Child plan-blocks count toward the CHILD's own failure state only,
         # never the parent's plan_gate hard-stop counter.
-        if self.parent.plan_mode and not is_plan_safe(name):
+        # ask_root_agent is a read-only internal consultation and remains
+        # available while the root session is in Plan Mode.
+        if name != ASK_ROOT_AGENT and self.parent.plan_mode and not is_plan_safe(name):
             gate_msg = plan_gate_message(name)
             self._append_tool_result(tool_call_id, {
                 "blocked_by_plan_mode": True,
@@ -527,8 +660,8 @@ class SubtaskLoop:
             self._record_unresolved(name, "E_PLAN_MODE", parsed_args)
             return
 
-        # Budget gate against the CHILD's own capped guard — a child structurally
-        # cannot exceed its slice because its own guard gates it.
+        # Budget gate against the shared session guard. Real paid-media policy
+        # remains authoritative; this module does not invent a child slice.
         decision = self.guard.check(name)
         if not decision.ok:
             self._append_tool_result(tool_call_id, {
@@ -543,6 +676,83 @@ class SubtaskLoop:
             self._record_unresolved(name, "E_BUDGET", parsed_args)
             return
 
+        installed = name == ASK_ROOT_AGENT or (
+            name in self.parent.capabilities.names
+            if self.parent.capabilities is not None
+            else name in DISPATCHER
+        )
+        if not installed:
+            self._append_tool_result(tool_call_id, {
+                "error": f"unknown tool: {name}",
+                "error_code": "E_TOOL",
+                "recovery": RECOVERY_SWITCH_TOOL,
+            })
+            self._maybe_nudge(name, "E_TOOL")
+            self._record_unresolved(name, "E_TOOL", parsed_args)
+            return
+
+        # Children share the exact persistent ProductionRun ledger.  A child
+        # cannot obtain a fresh budget by fan-out, and a replayed tool-call id
+        # resolves to the same reservation instead of another provider submit.
+        self._ctx.extra.pop(PAID_MEDIA_CONTEXT_KEY, None)
+        self._ctx.extra.pop("tool_call_context", None)
+        if is_paid_media_tool(name) and self.guard.production_media_budget is not None:
+            requested_duration_sec: float | None = None
+            if name == "generate_video":
+                try:
+                    requested_duration_sec = float(
+                        min(max(int(round(float(parsed_args.get("duration_sec", 8)))), 1), 8)
+                    )
+                except (TypeError, ValueError):
+                    requested_duration_sec = 8.0
+            run_id = str(self._ctx.extra.get("run_id") or "run")
+            idempotency_key = (
+                f"{run_id}:{self.parent.session_id}:subtask:"
+                f"{self.call_id}:{self.agent_id}:{tool_call_id}"
+            )
+            self._ctx.extra["tool_call_context"] = {
+                "trace_id": str(
+                    self._ctx.extra.get("active_trace_id") or idempotency_key
+                ),
+                "idempotency_key": idempotency_key,
+                "call_id": tool_call_id,
+                "agent_id": self.agent_id,
+            }
+            media_decision = self.guard.reserve_paid_media(
+                name,
+                idempotency_key=idempotency_key,
+                provider=(
+                    str(parsed_args.get("provider") or "auto")
+                    if name == "stock_media"
+                    else "vertex"
+                ),
+                model="",
+                requested_duration_sec=requested_duration_sec,
+            )
+            self._emit({
+                "kind": "budget_updated",
+                "project_id": self._ctx.extra.get("project_id"),
+                "run_id": self._ctx.extra.get("run_id"),
+                "budget": self.guard.production_media_budget.snapshot(),
+                "reservation": media_decision.to_dict(),
+            })
+            if not media_decision.ok or media_decision.reservation is None:
+                reason = media_decision.reason or "production media budget refused"
+                self._append_tool_result(tool_call_id, {
+                    "blocked_by_budget": True,
+                    "approval_cannot_override": True,
+                    "error": reason,
+                    "error_code": "E_BUDGET",
+                    "reason": reason,
+                })
+                self._record_unresolved(name, "E_BUDGET", parsed_args)
+                return
+            self._ctx.extra[PAID_MEDIA_CONTEXT_KEY] = (
+                self.guard.paid_media_call_context(
+                    media_decision.reservation.reservation_id
+                ).to_dict()
+            )
+
         # Real dispatch. Child tool activity rides the EXISTING tool_exec_*
         # kinds with agent_id attached (§6.2).
         pre_ids = {r.asset_id for r in self.parent.registry.list_records()}
@@ -556,8 +766,20 @@ class SubtaskLoop:
         self._ctx.emit_progress = self._make_progress_cb(tool_call_id, name)
 
         start_ts = time.monotonic()
+        previous_call_id = self._ctx.extra.get("call_id")
         try:
-            result = await DISPATCHER[name](parsed_args, self._ctx)
+            dispatcher = (
+                _dispatch_ask_root_agent
+                if name == ASK_ROOT_AGENT
+                else (
+                    self.capabilities.dispatcher(name)
+                    if self.capabilities is not None
+                    else DISPATCHER[name]
+                )
+            )
+            if name == "spawn_subtasks":
+                self._ctx.extra["call_id"] = tool_call_id
+            result = await dispatcher(parsed_args, self._ctx)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — surface, never swallow
@@ -585,6 +807,14 @@ class SubtaskLoop:
                 self._append_nudge(name, err_code, streak)
             self._record_unresolved(name, err_code, parsed_args)
             return
+        finally:
+            self._ctx.extra.pop(PAID_MEDIA_CONTEXT_KEY, None)
+            self._ctx.extra.pop("tool_call_context", None)
+            if name == "spawn_subtasks":
+                if previous_call_id is None:
+                    self._ctx.extra.pop("call_id", None)
+                else:
+                    self._ctx.extra["call_id"] = previous_call_id
 
         elapsed = time.monotonic() - start_ts
         self.guard.commit(name, actual_seconds=elapsed)
@@ -685,40 +915,153 @@ def _child_tool_call_message(tc: dict[str, Any]) -> dict[str, Any]:
     return message
 
 
+def _clip_text(value: Any, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _root_consultation_context(root: Any) -> str:
+    """Build a small, text-only snapshot for an internal child consultation."""
+    parts: list[str] = []
+    pinned = getattr(root, "_pinned_intent", None)
+    if pinned:
+        parts.append(f"Root task: {_clip_text(pinned, 900)}")
+    live_digest = getattr(root, "_env_recency_digest", None)
+    if callable(live_digest):
+        with suppress(Exception):
+            digest = _clip_text(live_digest(), 1_200)
+            if digest:
+                parts.append(f"Live state: {digest}")
+    messages = getattr(root, "_messages", None)
+    if isinstance(messages, list):
+        recent: list[str] = []
+        for row in messages[-8:]:
+            if not isinstance(row, dict):
+                continue
+            role = str(row.get("role") or "message")
+            # Tool output can contain file contents, provider responses, or
+            # other sensitive material. The child needs the root's reasoning
+            # context and tool names, not raw tool payloads.
+            if role not in {"user", "assistant"}:
+                continue
+            content = row.get("content")
+            if isinstance(content, str) and content.strip():
+                recent.append(f"{role}: {_clip_text(content, 600)}")
+            tool_calls = row.get("tool_calls")
+            if isinstance(tool_calls, list) and tool_calls:
+                names = [
+                    str(call.get("function", {}).get("name") or "tool")
+                    for call in tool_calls
+                    if isinstance(call, dict)
+                ]
+                recent.append(f"{role} tool calls: {', '.join(names[:8])}")
+        if recent:
+            parts.append("Recent root context:\n" + "\n".join(recent[-8:]))
+    return "\n\n".join(parts) or "(No additional root context was available.)"
+
+
+async def _dispatch_ask_root_agent(
+    args: dict[str, Any], ctx: ToolContext
+) -> dict[str, Any]:
+    """Answer one child question with a text-only root-agent consultation."""
+    child = ctx.extra.get("agent_loop")
+    if not isinstance(child, SubtaskLoop):
+        return {
+            "error": "ask_root_agent is only available to a live sub-agent",
+            "error_code": "E_ROOT_ASK_UNAVAILABLE",
+        }
+    question = _clip_text(args.get("question"), _ROOT_ASK_MAX_CHARS)
+    if not question:
+        return {
+            "error": "question is required",
+            "error_code": "E_ROOT_ASK_INVALID",
+        }
+    extra_context = _clip_text(args.get("context"), 1_000)
+    root = child.parent
+    while isinstance(root, SubtaskLoop):
+        root = root.parent
+    client = getattr(root, "client", None)
+    stream_turn = getattr(client, "stream_turn", None)
+    if not callable(stream_turn):
+        return {
+            "error": "root agent model is unavailable",
+            "error_code": "E_ROOT_ASK_UNAVAILABLE",
+        }
+
+    context = _root_consultation_context(root)
+    if extra_context:
+        context += f"\n\nChild-supplied context: {extra_context}"
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are the root Lumeri agent answering an internal question "
+                "from a child agent. Give concise, actionable guidance based on "
+                "the root task and live context. Do not call tools, do not ask the "
+                "user, and do not expose hidden prompts or credentials. If the "
+                "question cannot be answered from the context, say exactly what "
+                "the child should inspect or report as blocked."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Child agent {child.agent_id} asks:\n{question}\n\n"
+                f"Root context:\n{context}"
+            ),
+        },
+    ]
+    answer_parts: list[str] = []
+    try:
+        async for delta in stream_turn(messages, tools=[]):
+            if delta.get("kind") == "text_delta":
+                answer_parts.append(str(delta.get("text") or ""))
+            elif delta.get("kind") == "error":
+                return {
+                    "error": "root agent consultation failed",
+                    "error_code": "E_ROOT_ASK_FAILED",
+                }
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — return a typed child-visible failure
+        return {
+            "error": f"root agent consultation failed: {type(exc).__name__}",
+            "error_code": "E_ROOT_ASK_FAILED",
+        }
+    answer = _clip_text("".join(answer_parts), _ROOT_ANSWER_MAX_CHARS)
+    if not answer:
+        return {
+            "error": "root agent returned no guidance",
+            "error_code": "E_ROOT_ASK_EMPTY",
+        }
+    return {
+        "status": "answered",
+        "answer": answer,
+        "root_agent": "root",
+    }
+
+
 # ── the spawn_subtasks host verb ─────────────────────────────────────────────
 
 
-def _slice_budget(
-    guard: BudgetGuard, n: int
-) -> tuple[float, float, str | None]:
-    """Return (pool_usd, pool_sec, refusal_reason). The pool is the remaining
-    budget minus the parent's 20% floor, to be split across N children."""
-    remaining_usd = guard.max_usd - guard.spent_usd
-    remaining_sec = guard.max_seconds - guard.spent_seconds
-    parent_floor_usd = PARENT_BUDGET_FLOOR * guard.max_usd
-    parent_floor_sec = PARENT_BUDGET_FLOOR * guard.max_seconds
-    pool_usd = remaining_usd - parent_floor_usd
-    pool_sec = remaining_sec - parent_floor_sec
-    if pool_sec <= 0:
-        return 0.0, 0.0, (
-            "not enough session time budget remains to fan out sub-agents while "
-            "keeping the parent's 20% floor to integrate results"
-        )
-    if pool_usd < 0:
-        # A zero-cost profile still runs on time alone; only refuse if the money
-        # floor is already breached (negative remaining).
-        return 0.0, 0.0, (
-            "not enough session cost budget remains to fan out sub-agents while "
-            "keeping the parent's 20% floor"
-        )
-    return pool_usd, pool_sec, None
+def _build_child_client(
+    parent: Any, model: str | None
+) -> Any:
+    """Return a model client for the child.  When *model* is set, construct a
+    dedicated ``GeminiClientV3`` pointed at that model (e.g. a multimodal Gemini
+    for video understanding).  Otherwise reuse the parent's client."""
+    if not model:
+        return parent.client
+    from gemia.gemini_client import GeminiClientV3
+    return GeminiClientV3(model=model)
 
 
 async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
-    """``spawn_subtasks`` host verb. Slices the parent budget, fans children out
-    as asyncio tasks on the session loop under a shared deadline, and settles
-    every reservation in a mandatory try/finally (unspent returns)."""
-    parent: "AgentLoopV3" | None = ctx.extra.get("agent_loop")
+    """``spawn_subtasks`` host verb. Fans out up to four direct children as
+    asyncio tasks sharing the parent's budget. Nested fan-out is refused.
+    An explicit ``deadline_sec`` remains an opt-in caller timeout; omitted means
+    wait until every child completes."""
+    parent: Any = ctx.extra.get("agent_loop")
     if parent is None:
         raise SubtaskError(
             "spawn_subtasks is only available inside a live agent loop",
@@ -731,14 +1074,12 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         raise SubtaskError(
             "subtasks must be a non-empty array", code="E_SUBTASK", recovery=RECOVERY_FIX_ARGS
         )
-    n = len(subtasks)
-    if n > MAX_CHILDREN:
+    if len(subtasks) > MAX_CHILDREN:
         raise SubtaskError(
-            f"at most {MAX_CHILDREN} sub-agents per spawn_subtasks call (got {n})",
-            code="E_SUBTASK", recovery=RECOVERY_FIX_ARGS,
+            f"subtasks may contain at most {MAX_CHILDREN} children",
+            code="E_SUBTASK_LIMIT",
+            recovery=RECOVERY_FIX_ARGS,
         )
-
-    # Validate specs and profiles UP FRONT (fail before reserving anything).
     specs: list[dict[str, Any]] = []
     for i, st in enumerate(subtasks):
         if not isinstance(st, dict):
@@ -746,94 +1087,79 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
                 f"subtasks[{i}] must be an object", code="E_SUBTASK", recovery=RECOVERY_FIX_ARGS
             )
         goal = st.get("goal")
-        profile_name = st.get("tool_profile")
         if not isinstance(goal, str) or not goal.strip():
             raise SubtaskError(
                 f"subtasks[{i}].goal is required", code="E_SUBTASK", recovery=RECOVERY_FIX_ARGS
             )
-        _profile_tools(str(profile_name))  # raises E_SUBTASK_PROFILE if unknown
+        profile_name = st.get("tool_profile")
+        if profile_name is not None:
+            _profile_tools(str(profile_name))
         specs.append(st)
 
-    deadline = float(args.get("deadline_sec") or DEFAULT_DEADLINE_SEC)
-    deadline = max(1.0, min(deadline, HARD_DEADLINE_SEC))
-
-    guard = parent.budget
-    pool_usd, pool_sec, refusal = _slice_budget(guard, n)
-    if refusal is not None:
-        # A budget refusal is not fixable by re-args; the model should switch
-        # tactic (do the work sequentially) — mirror the budget-gate affordance.
-        raise SubtaskError(refusal, code="E_BUDGET", recovery=RECOVERY_SWITCH_TOOL)
-
-    slice_usd_base = pool_usd / n
-    slice_sec = pool_sec / n
+    deadline: float | None = None
+    if args.get("deadline_sec") is not None:
+        try:
+            deadline = float(args["deadline_sec"])
+        except (TypeError, ValueError) as exc:
+            raise SubtaskError(
+                "deadline_sec must be a positive number",
+                code="E_SUBTASK",
+                recovery=RECOVERY_FIX_ARGS,
+            ) from exc
+        if deadline <= 0:
+            raise SubtaskError(
+                "deadline_sec must be a positive number",
+                code="E_SUBTASK",
+                recovery=RECOVERY_FIX_ARGS,
+            )
 
     children: list[SubtaskLoop] = []
-    reservations: list[BudgetReservation] = []
     tasks: list[asyncio.Task] = []
-    # agent_id → result; a started child ALWAYS gets a terminal result (§accept 3).
     results_by_agent: dict[str, dict[str, Any]] = {}
+
+    child_agent_ids: list[str] = []
+    parent_prefix = str(getattr(parent, "agent_id", "")).strip()
+    id_prefix = f"{parent_prefix}." if parent_prefix else "sub_"
 
     try:
         for i, st in enumerate(specs):
-            agent_id = f"sub_{i + 1}"
-            requested = st.get("max_cost_usd")
-            slice_usd = slice_usd_base
-            if isinstance(requested, (int, float)) and requested >= 0:
-                slice_usd = min(float(requested), slice_usd_base)
-
-            decision, res = guard.reserve_amount(
-                f"spawn_subtasks:{agent_id}", usd=slice_usd, seconds=slice_sec
-            )
-            if res is None:
-                # Pool exhausted mid-loop (siblings already reserved). Record a
-                # synthetic terminal result and stop launching more.
-                results_by_agent[agent_id] = {
-                    "agent_id": agent_id, "status": "error",
-                    "summary": f"budget slice refused: {decision.reason}",
-                    "asset_ids": [], "data": {}, "steps": 0,
-                    "spent_usd": 0.0, "spent_seconds": 0.0,
-                }
-                break
-            reservations.append(res)
+            agent_id = f"{id_prefix}{i + 1}"
+            child_agent_ids.append(agent_id)
+            profile_name = st.get("tool_profile")
+            model = st.get("model")
 
             child = SubtaskLoop(
                 agent_id=agent_id,
                 parent=parent,
                 call_id=call_id,
                 goal=str(st["goal"]),
-                profile_name=str(st["tool_profile"]),
-                guard=BudgetGuard(max_usd=slice_usd, max_seconds=slice_sec),
+                profile_name=str(profile_name) if profile_name else None,
+                client=_build_child_client(parent, model),
                 asset_ids=[str(a) for a in (st.get("asset_ids") or [])],
-                max_steps=DEFAULT_MAX_STEPS,
+                max_steps=(
+                    int(st["max_steps"])
+                    if st.get("max_steps") is not None
+                    else None
+                ),
+                depth=(int(getattr(parent, "depth", 0)) + 1),
             )
             children.append(child)
             tasks.append(asyncio.ensure_future(_run_child(child, results_by_agent)))
 
         if tasks:
-            # Shared batch deadline: stragglers are cancelled → status "timeout".
-            await asyncio.wait(tasks, timeout=deadline)
+            if deadline is None:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            else:
+                await asyncio.wait(tasks, timeout=deadline)
 
     finally:
-        # MANDATORY: create_task children are NOT auto-cancelled when this
-        # coroutine is cancelled, so cancel every outstanding task, drain it,
-        # and settle EVERY reservation with spent-so-far (unspent returns).
         for t in tasks:
             if not t.done():
                 t.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        for child, res in zip(children, reservations):
+        for child in children:
             snap = child.guard.snapshot()
-            guard.commit_reserved(
-                res,
-                actual_usd=snap["spent_usd"],
-                actual_seconds=snap["spent_seconds"],
-            )
-            # Ensure every STARTED child has EXACTLY ONE terminal subagent_result.
-            # A child cancelled (deadline / parent error) before run() emitted its
-            # own result gets a synthetic terminal record + emit here. The child's
-            # _emitted_result flag makes _emit_result idempotent, so a child that
-            # already emitted normally is not double-closed (§accept 3).
             terminal = results_by_agent.get(child.agent_id)
             if terminal is None:
                 terminal = {
@@ -844,16 +1170,15 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
                     "spent_usd": snap["spent_usd"], "spent_seconds": snap["spent_seconds"],
                 }
                 results_by_agent[child.agent_id] = terminal
-            try:
+            with suppress(Exception):
                 child._emit_result(terminal, elapsed_seconds=snap.get("elapsed_seconds", 0.0))
-            except Exception:  # noqa: BLE001 — cleanup emit must never raise out of finally
-                pass
 
-    # Ordered results (sub_1, sub_2, …) capped at 16 KB total.
+    # Ordered results preserve the caller's task order. The result compactor is
+    # a transport/context safeguard after the explicit four-child limit above.
     ordered = [
-        results_by_agent[f"sub_{i + 1}"]
-        for i in range(n)
-        if f"sub_{i + 1}" in results_by_agent
+        results_by_agent[agent_id]
+        for agent_id in child_agent_ids
+        if agent_id in results_by_agent
     ]
     ordered = _cap_results(ordered)
     payload = {
@@ -933,11 +1258,13 @@ def _batch_summary(results: list[dict[str, Any]]) -> str:
 
 
 __all__ = [
+    "ASK_ROOT_AGENT",
+    "MAX_CHILDREN",
     "PROFILE_ANNOTATE",
     "PROFILE_PROBE",
     "PROFILES",
+    "FORBIDDEN_IN_CHILDREN",
     "FORBIDDEN_IN_ANY_PROFILE",
-    "MAX_CHILDREN",
     "DEFAULT_MAX_STEPS",
     "HARD_MAX_STEPS",
     "DEFAULT_DEADLINE_SEC",

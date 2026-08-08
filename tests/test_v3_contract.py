@@ -57,8 +57,17 @@ def test_every_emitted_kind_is_declared() -> None:
 
 
 def test_every_declared_kind_is_emitted_somewhere() -> None:
-    stale = v3_contract.EVENT_KINDS - _emitted_kinds()
+    stale = (
+        v3_contract.EVENT_KINDS
+        - v3_contract.RECEIVE_ONLY_EVENT_KINDS
+        - _emitted_kinds()
+    )
     assert not stale, f"declared but never emitted (stale contract?): {sorted(stale)}"
+
+
+def test_receive_only_kinds_are_declared_but_not_emitted() -> None:
+    assert v3_contract.RECEIVE_ONLY_EVENT_KINDS <= v3_contract.EVENT_KINDS
+    assert not (v3_contract.RECEIVE_ONLY_EVENT_KINDS & _emitted_kinds())
 
 
 def test_timeline_op_spread_cannot_override_kind() -> None:
@@ -97,14 +106,31 @@ def test_cli_vendored_contract_matches_when_present() -> None:
     import pwd
 
     real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
-    cli_copy = real_home / "Code" / "lumeri-cli" / "src" / "contract.json"
+    cli_repo = Path(
+        os.environ.get("LUMERI_CLI_REPO")
+        or (real_home / "Code" / "lumeri-cli")
+    )
+    cli_copy = cli_repo / "src" / "contract.json"
     if not cli_copy.exists():
         import pytest
 
         pytest.skip("lumeri-cli repo not present on this machine")
-    assert json.loads(cli_copy.read_text(encoding="utf-8")) == v3_contract.as_dict(), (
-        "CLI vendored contract.json is stale — run scripts/export_contract.py"
-    )
+    cli_contract = json.loads(cli_copy.read_text(encoding="utf-8"))
+    server_contract = v3_contract.as_dict()
+    if cli_contract == server_contract:
+        return
+
+    # Protocol v2 is a Web-first additive production surface.  The v1 CLI is
+    # intentionally still supported by the unchanged /sessions fields and its
+    # existing unknown-event notice; it must not be handed a v2 contract until
+    # it has real project/review UI.  Permit exactly one additive version lag,
+    # while still failing if the CLI claims a newer version or contains values
+    # the server no longer supports.
+    assert cli_contract.get("protocol_version") == server_contract["protocol_version"] - 1
+    assert set(cli_contract.get("event_kinds") or []) < set(server_contract["event_kinds"])
+    assert set(cli_contract.get("error_codes") or []) <= set(server_contract["error_codes"])
+    assert cli_contract.get("ask_controls") == server_contract["ask_controls"]
+    assert cli_contract.get("recovery") == server_contract["recovery"]
 
 
 def test_recovery_vocab_matches_errors_module() -> None:

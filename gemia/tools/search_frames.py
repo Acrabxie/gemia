@@ -74,12 +74,16 @@ def _candidate_paths(ctx: ToolContext, extra_paths: list[str], kind: str) -> lis
             _add(record.path)
 
     account_id = _account_id(ctx)
-    if account_id:
+    project_id = str(ctx.extra.get("project_id") or "").strip()
+    if account_id and project_id:
         try:
             from gemia.media_library import list_assets
 
             for asset in list_assets(
-                account_id, kind=None if kind == "any" else kind, limit=_MAX_CANDIDATES
+                account_id,
+                kind=None if kind == "any" else kind,
+                limit=_MAX_CANDIDATES,
+                project_id=project_id,
             ):
                 _add(asset.get("source_path") or asset.get("storage_path") or asset.get("original_path"))
         except Exception:

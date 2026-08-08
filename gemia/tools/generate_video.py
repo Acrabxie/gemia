@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import time
@@ -21,6 +22,11 @@ from typing import Any
 from gemia.ai.google_genai_client import GoogleGenAIClient, VertexAPIError
 from gemia.budget_guard import tool_cost_usd
 from gemia.model_strength import is_model_unavailable_error, media_model_failover_chain, strongest_media_model
+from gemia.production_budget import (
+    ProductionMediaBudget,
+    claim_paid_media_call,
+    paid_media_call_from_extra,
+)
 from gemia.tools._context import ToolContext, ProgressUpdate
 
 
@@ -57,36 +63,65 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
 
     client = _client_from_ctx(ctx)
     new_id = ctx.registry.allocate_id("video")
+    pending_paid = paid_media_call_from_extra(
+        ctx.extra if isinstance(ctx.extra, dict) else None
+    )
+    if pending_paid is not None:
+        reserved_duration = pending_paid.requested_duration_sec
+        if reserved_duration is None or abs(reserved_duration - duration_sec) > 1e-9:
+            raise ValueError(
+                "generate_video duration does not match its paid-media reservation: "
+                f"reserved={reserved_duration!r}, requested={duration_sec!r}"
+            )
+    paid = claim_paid_media_call(ctx.extra if isinstance(ctx.extra, dict) else None)
+    paid_call, paid_ledger = paid if paid is not None else (None, None)
     ctx.emit_progress(ProgressUpdate(percent=2, message="submitting Veo job", eta_sec=120))
     submit: dict[str, Any] | None = None
     chain = media_model_failover_chain("video", "vertex", (_model(),))
-    for index, model in enumerate(chain):
-        try:
-            submit = await client.predict_long_running(
-                model=model,
-                instances=[instance],
-                parameters={
-                    "aspectRatio": aspect_ratio,
-                    "durationSeconds": duration_sec,
-                    "sampleCount": 1,
-                    "personGeneration": "allow_adult",
-                    "addWatermark": True,
-                },
-                verb="generate_video",
-                estimated_cost_usd=tool_cost_usd("generate_video"),
+    if paid_call is not None:
+        chain = chain[:1]
+    try:
+        for index, model in enumerate(chain):
+            try:
+                submit = await client.predict_long_running(
+                    model=model,
+                    instances=[instance],
+                    parameters={
+                        "aspectRatio": aspect_ratio,
+                        "durationSeconds": duration_sec,
+                        "sampleCount": 1,
+                        "personGeneration": "allow_adult",
+                        "addWatermark": True,
+                    },
+                    verb="generate_video",
+                    estimated_cost_usd=(
+                        paid_call.estimated_usd
+                        if paid_call is not None
+                        else tool_cost_usd("generate_video")
+                    ),
+                    request_id=paid_call.request_id if paid_call is not None else None,
+                )
+                break
+            except VertexAPIError as exc:
+                if index + 1 >= len(chain) or not is_model_unavailable_error(exc):
+                    raise
+        assert submit is not None
+        operation_name = str(submit.get("name") or "").strip()
+        if not operation_name:
+            raise VertexAPIError(
+                f"Vertex Veo submission returned no operation name (model={model})",
+                status=200,
+                body_tail=json.dumps(_scrub_bytes(submit), ensure_ascii=False)[:1200],
             )
-            break
-        except VertexAPIError as exc:
-            if index + 1 >= len(chain) or not is_model_unavailable_error(exc):
-                raise
-    assert submit is not None
-    operation_name = str(submit.get("name") or "").strip()
-    if not operation_name:
-        raise VertexAPIError(
-            f"Vertex Veo submission returned no operation name (model={model})",
-            status=200,
-            body_tail=json.dumps(_scrub_bytes(submit), ensure_ascii=False)[:1200],
-        )
+        if paid_call is not None and paid_ledger is not None:
+            paid_ledger.attach_provider_operation(paid_call.reservation_id, operation_name)
+    except BaseException as exc:
+        if paid_call is not None and paid_ledger is not None:
+            paid_ledger.mark_uncertain(
+                paid_call.reservation_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        raise
 
     # Register in JobRegistry and return immediately (no blocking poll).
     # The model uses check_job(job_id) or wait_for_job(job_id) to get the result.
@@ -99,7 +134,27 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         pending_asset_id=new_id,
         estimated_eta_sec=120.0,
         summary=job_summary,
+        request_id=paid_call.request_id if paid_call is not None else submit.get("_lumeri_request_id"),
+        reservation_id=paid_call.reservation_id if paid_call is not None else None,
+        estimated_cost_usd=(
+            paid_call.estimated_usd
+            if paid_call is not None
+            else tool_cost_usd("generate_video")
+        ),
+        budget_ledger_path=paid_call.ledger_path if paid_call is not None else None,
+        budget_run_id=paid_call.run_id if paid_call is not None else None,
+        prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        source_lineage=tuple(lineage),
     )
+    # Persist/watch the LRO immediately after it enters JobRegistry.  This is
+    # deliberately before constructing or emitting the tool result: a crash in
+    # that window must leave a recoverable operation_name + budget identity.
+    on_background_job = ctx.extra.get("on_background_job") if isinstance(ctx.extra, dict) else None
+    if callable(on_background_job):
+        try:
+            on_background_job(job_record.job_id)
+        except Exception:
+            pass  # host persistence plumbing must not duplicate provider work
     # Stash lineage in extra for use when the job completes.
     if isinstance(ctx.extra, dict):
         ctx.extra[f"_veo_lineage_{job_record.job_id}"] = lineage
@@ -116,7 +171,12 @@ async def dispatch(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
             "duration_sec": duration_sec,
             "aspect_ratio": aspect_ratio,
             "location": client.location,
-            "request_id": submit.get("_lumeri_request_id"),
+            "request_id": (
+                paid_call.request_id
+                if paid_call is not None
+                else submit.get("_lumeri_request_id")
+            ),
+            "reservation_id": paid_call.reservation_id if paid_call is not None else None,
             "reference_asset_id": reference_asset_id or None,
         },
         "note": "Use check_job(job_id) to poll or wait_for_job(job_id) to block.",
@@ -161,6 +221,9 @@ async def resolve_veo_job(job_id: str, ctx: ToolContext) -> dict[str, Any]:
     if response.get("done") is True:
         error = response.get("error")
         if error:
+            budget = _production_budget_for_job(record)
+            if budget is not None and record.reservation_id:
+                budget.mark_uncertain(record.reservation_id, error=str(error))
             ctx.jobs.update_from_poll(job_id, "failed", error=str(error))
             return {
                 "job_id": job_id,
@@ -169,6 +232,18 @@ async def resolve_veo_job(job_id: str, ctx: ToolContext) -> dict[str, Any]:
                 "summary": record.summary,
             }
 
+        # The provider completed the paid operation.  Settle before local
+        # decoding/writing so a local disk failure cannot make a charged call
+        # look free or retryable.
+        budget = _production_budget_for_job(record)
+        if budget is not None and record.reservation_id:
+            budget.settle(
+                record.reservation_id,
+                actual_usd=record.estimated_cost_usd,
+                result_asset_id=record.pending_asset_id,
+                provider_operation_id=record.operation_name,
+            )
+
         # Decode video bytes, write to disk, register asset.
         video_bytes, mime_type = _extract_video_payload(response, model=model)
         ext = _extension_for_mime(mime_type)
@@ -176,9 +251,11 @@ async def resolve_veo_job(job_id: str, ctx: ToolContext) -> dict[str, Any]:
         out_path.write_bytes(video_bytes)
         ctx.jobs.update_from_poll(job_id, "done", final_path=out_path)
 
-        lineage = []
+        lineage = list(record.source_lineage)
         if isinstance(ctx.extra, dict):
-            lineage = ctx.extra.pop(f"_veo_lineage_{job_id}", [])
+            transient_lineage = ctx.extra.pop(f"_veo_lineage_{job_id}", [])
+            if not lineage:
+                lineage = list(transient_lineage)
 
         out_record = ctx.registry.register_output(
             record.pending_asset_id,
@@ -186,7 +263,40 @@ async def resolve_veo_job(job_id: str, ctx: ToolContext) -> dict[str, Any]:
             path=out_path,
             summary=record.summary,
             lineage=lineage,
+            source={
+                "kind": "generated_video",
+                "provider": "google_vertex_ai",
+                "model": model,
+                "request_id": record.request_id,
+                "reservation_id": record.reservation_id,
+                "provider_operation_id": record.operation_name,
+                "prompt_sha256": record.prompt_sha256,
+                "reference_asset_ids": list(lineage),
+                "receipt": {
+                    "provider_request_id": record.request_id,
+                    "provider_operation_id": record.operation_name,
+                    "budget_reservation_id": record.reservation_id,
+                    "estimated_cost_usd": record.estimated_cost_usd,
+                    "charge_status": (
+                        "settled" if record.reservation_id else "provider_audited"
+                    ),
+                    "materialization_status": "materialized",
+                },
+            },
+            license={
+                "rights_basis": "generated_under_configured_provider_account",
+                "provider": "google_vertex_ai",
+                "usage_restrictions": "subject_to_provider_terms_and_input_content_rights",
+                "attribution_required": False,
+            },
         )
+        if budget is not None and record.reservation_id:
+            budget.mark_asset_materialized(
+                record.reservation_id,
+                result_asset_id=out_record.asset_id,
+                asset_path=out_record.path,
+                asset_sha256=out_record.sha256,
+            )
         return {
             "job_id": job_id,
             "status": "done",
@@ -196,6 +306,8 @@ async def resolve_veo_job(job_id: str, ctx: ToolContext) -> dict[str, Any]:
                 "mime_type": mime_type,
                 "size_bytes": len(video_bytes),
                 "operation_name": record.operation_name,
+                "request_id": record.request_id,
+                "reservation_id": record.reservation_id,
             },
         }
 
@@ -207,6 +319,19 @@ async def resolve_veo_job(job_id: str, ctx: ToolContext) -> dict[str, Any]:
         "pending_asset_id": record.pending_asset_id,
         "summary": record.summary,
     }
+
+
+def _production_budget_for_job(record: Any) -> ProductionMediaBudget | None:
+    path = str(getattr(record, "budget_ledger_path", "") or "").strip()
+    if not path:
+        return None
+    budget = ProductionMediaBudget.open(path)
+    expected_run = str(getattr(record, "budget_run_id", "") or "").strip()
+    if expected_run and budget.run_id != expected_run:
+        raise RuntimeError(
+            f"Veo job budget run mismatch: {budget.run_id!r} != {expected_run!r}"
+        )
+    return budget
 
 
 async def _poll_until_done(

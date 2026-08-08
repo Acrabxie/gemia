@@ -50,16 +50,15 @@ EFFECT_FIELD_TABLE: dict[str, dict[str, str]] = {
     "gain_db":  {"*": RENDERED},
     "fade_in":  {"*": RENDERED},
     "fade_out": {"*": RENDERED},
-    # Placement — rendered only on the pass-2 overlay path (image/lottie; x/y
-    # also for text). Video-track PIP is a Phase 3 candidate.
-    "x":       {"image": RENDERED, "lottie": RENDERED, "text": RENDERED, "*": WARN_AT_WRITE},
-    "y":       {"image": RENDERED, "lottie": RENDERED, "text": RENDERED, "*": WARN_AT_WRITE},
-    "scale":   {"image": RENDERED, "lottie": RENDERED, "*": WARN_AT_WRITE},
+    # Placement. Base-video segments and pass-2 visual overlays both render
+    # x/y/scale; text keeps its existing x/y-only path.
+    "x":       {"video": RENDERED, "image": RENDERED, "lottie": RENDERED, "text": RENDERED, "*": WARN_AT_WRITE},
+    "y":       {"video": RENDERED, "image": RENDERED, "lottie": RENDERED, "text": RENDERED, "*": WARN_AT_WRITE},
+    "scale":   {"video": RENDERED, "image": RENDERED, "lottie": RENDERED, "*": WARN_AT_WRITE},
     "opacity": {"image": RENDERED, "lottie": RENDERED, "*": WARN_AT_WRITE},
-    # Never read by export today. rotation/mirrored/blur_radius flip to
-    # RENDERED in Phase 3 (per-segment -vf); each flip lands in the same
-    # commit as its renderer support (plan rule 1).
-    "rotation":    {"*": WARN_AT_WRITE},
+    # Continuous rotation renders on base-video segments. Other media kinds
+    # stay honest until their overlay filters gain the same geometry path.
+    "rotation":    {"video": RENDERED, "*": WARN_AT_WRITE},
     "mirrored":    {"*": WARN_AT_WRITE},
     "blur_radius": {"*": WARN_AT_WRITE},
     # WARN_AT_WRITE indefinitely: implementing speed changes the

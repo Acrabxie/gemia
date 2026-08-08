@@ -7,6 +7,7 @@ media-plan.md §8.1 acceptance items T1/T2/T3.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -224,7 +225,58 @@ def test_source_enum_landmine(monkeypatch, tmp_path: Path) -> None:
     # 'gemini_vision' and 'heuristic' are now first-class, not coerced to 'user'
     assert MA._source("gemini_vision") == "gemini_vision"
     assert MA._source("heuristic") == "heuristic"
-    assert MA._source("bogus") == "user"
+    with pytest.raises(MA.MediaAnnotationError, match="invalid annotation source: bogus"):
+        MA._source("bogus")
+
+
+def test_upsert_prevalidates_and_rolls_back_as_one_transaction(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _patch_account_roots(monkeypatch, tmp_path)
+    acct = "google_atomic_reindex"
+    asset = import_media(acct, _make_image(tmp_path / "atomic.png"))
+    aid = asset["asset_id"]
+    previous = MA.create_annotation(
+        acct,
+        aid,
+        {
+            "scope": "asset",
+            "label": "last known good caption",
+            "source": "gemini_vision",
+        },
+    )
+
+    # Every row is normalized before the replacement DELETE can run.
+    with pytest.raises(MA.MediaAnnotationError, match="invalid annotation source"):
+        MA.upsert_annotations(
+            acct,
+            aid,
+            [
+                {"scope": "asset", "label": "valid new caption", "source": "gemini_vision"},
+                {"scope": "asset", "label": "bad source", "source": "unknown_model"},
+            ],
+            replace_source="gemini_vision",
+        )
+    assert [row["annotation_id"] for row in MA.list_annotations(acct, aid)] == [
+        previous["annotation_id"]
+    ]
+
+    # A database failure after DELETE and one INSERT must roll the whole replacement
+    # back, including restoring the old row.
+    monkeypatch.setattr(MA, "_annotation_id", lambda: "ann_deadbeefdeadbeef")
+    with pytest.raises(sqlite3.IntegrityError):
+        MA.upsert_annotations(
+            acct,
+            aid,
+            [
+                {"scope": "asset", "label": "first", "source": "gemini_vision"},
+                {"scope": "asset", "label": "second", "source": "gemini_vision"},
+            ],
+            replace_source="gemini_vision",
+        )
+    remaining = MA.list_annotations(acct, aid)
+    assert [row["annotation_id"] for row in remaining] == [previous["annotation_id"]]
+    assert remaining[0]["label"] == "last known good caption"
 
 
 # --------------------------------------------------------------------- tool wiring

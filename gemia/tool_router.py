@@ -7,7 +7,8 @@ select a learnable schema subset.
 
 Design invariants:
 
-* conversational turns expose no tools;
+* conversational turns expose the small general pack instead of a hard
+  zero-tool gate;
 * actionable turns start with at most two workflow packs;
 * the active set only grows within a turn;
 * one consecutive no-progress stop widens to an adjacent pack, the second
@@ -28,7 +29,6 @@ from typing import Any, Iterable, Literal, Mapping
 
 from gemia.tools._schema import TOOL_SCHEMAS
 
-
 MASTER_TOOL_NAMES: tuple[str, ...] = tuple(
     str(schema["function"]["name"]) for schema in TOOL_SCHEMAS
 )
@@ -38,21 +38,60 @@ _SCHEMA_BY_NAME: dict[str, dict[str, Any]] = {
 }
 
 
-CONTROL_TOOLS = frozenset({"elicit"})
+# System-level capabilities are part of every trusted-local root-agent route.
+# They describe the agent/runtime control plane rather than one canvas
+# workflow, so hiding them behind request keywords makes installed capabilities
+# look unavailable. Remote and Plan policy gates still apply after routing.
+# This set is also the single authority for registry ``surface=internal``.
+SYSTEM_TOOLS = frozenset({
+    "elicit",
+    "spawn_subtasks",
+    "recall_skills",
+    "save_skill",
+    "remember",
+    "log_note",
+    "publish_cloud_guide",
+    "list_cloud_guides",
+    "load_cloud_guide",
+})
+
+# Public/remote demo sessions must not read or mutate the owner's persistent
+# memory, Skills, or Cloud Guide data. Role-specific tools (elicit for root,
+# ask_root_agent for children) and bounded fan-out remain governed separately.
+PRIVATE_SYSTEM_TOOLS = SYSTEM_TOOLS - {"elicit", "spawn_subtasks"}
+
+# Backward-compatible name for callers that still treat the system plane as
+# router controls rather than a first-class capability layer.
+CONTROL_TOOLS = SYSTEM_TOOLS
+
+# Local execution is a baseline Agent capability, not a workflow-specific
+# creative verb. Keeping it active from the first model call prevents a
+# routing miss from turning an executable request into user-facing shell
+# instructions. Remote sessions and Plan mode still remove/block run_shell
+# in AgentLoopV3 at their dedicated security gates.
+TRUSTED_LOCAL_HOST_BASELINE = frozenset({"run_shell"})
+BASELINE_TOOLS = SYSTEM_TOOLS | TRUSTED_LOCAL_HOST_BASELINE
 
 
 # These are workflow-oriented packs, not security boundaries.  Dispatch must
 # still fail closed against ToolRouter.active_tool_names when the module is
 # integrated into AgentLoopV3.
 TOOL_PACKS: dict[str, frozenset[str]] = {
+    "production_design": frozenset({
+        "get_design_state", "patch_design_state",
+    }),
+    "design_program": frozenset({
+        "read_file", "write_file", "list_dir", "build",
+        "check_job", "wait_for_job", "kill_job",
+    }),
     "general": frozenset({
         "probe_media", "analyze_media", "extract_frame", "search_library",
-        "copy_in", "list_dir",
+        "copy_in", "list_dir", "web_search",
     }),
     "media_inspect": frozenset({
         "probe_media", "analyze_media", "extract_frame", "get_safe_areas",
         "inspect_lottie", "search_library", "search_media", "search_frames",
-        "get_media_annotations",
+        "stock_media", "get_media_annotations",
     }),
     "image": frozenset({
         "generate_image", "edit_image", "composite", "color_grade",
@@ -70,6 +109,7 @@ TOOL_PACKS: dict[str, frozenset[str]] = {
         "add_overlay", "arrange_timeline", "subtitle", "animate_captions",
         "transform_geometry", "smart_reframe", "export", "probe_media",
         "analyze_media", "extract_frame", "timeline_insert_clip", "grade",
+        "prepare_roughcut",
     }),
     "audio": frozenset({
         "generate_audio", "narrate", "mix_audio", "edit_audio",
@@ -79,7 +119,7 @@ TOOL_PACKS: dict[str, frozenset[str]] = {
     "storyboard": frozenset({
         "draft_shotlist", "set_shotlist", "update_shot", "get_shotlist",
         "refine_shot", "assemble_shotlist", "search_library", "search_media",
-        "search_frames", "generate_image", "generate_video", "check_job",
+        "search_frames", "stock_media", "generate_image", "generate_video", "check_job",
         "wait_for_job", "inspect_timeline", "project_export",
     }),
     "quanta": frozenset({
@@ -94,12 +134,14 @@ TOOL_PACKS: dict[str, frozenset[str]] = {
         "timeline_set_clip_time", "timeline_add_transition",
         "timeline_set_clip_effects", "timeline_add_track", "timeline_set_track",
         "timeline_undo", "inspect_timeline", "render_preview", "project_export",
+        "verify_delivery",
         "edit_grammar", "rhythm_edit", "lumen_comp_to_timeline",
     }),
+    "segment": frozenset({"get_segment", "segment_edit"}),
     "lumen_core": frozenset({
         "get_lumenframe", "lumen_patch",
         "lumen_render", "lumen_seek", "lumen_render_range",
-        "vector_motion", "camera", "lumen_comp_to_timeline",
+        "vector_motion", "point_library", "camera", "lumen_comp_to_timeline",
     }),
     "lumen_time": frozenset({
         "get_lumenframe", "lumen_patch",
@@ -115,19 +157,21 @@ TOOL_PACKS: dict[str, frozenset[str]] = {
         "analyze_media", "extract_frame", "search_library", "search_media",
         "search_frames", "get_lumenframe", "lumen_patch",
         "lumen_render", "lumen_seek",
-        "vector_motion", "kinetic_type",
+        "vector_motion", "point_library", "kinetic_type",
     }),
     "files": frozenset({
         "read_file", "write_file", "copy_in", "list_dir",
-        "move_file", "organize_files",
+        "move_file", "organize_files", "file_delete",
     }),
     "web": frozenset({"web_search", "web_open", "fetch"}),
     "annotations": frozenset({
         "annotate_media", "get_media_annotations", "write_media_annotation",
         "search_media", "search_library", "probe_media", "analyze_media",
+        "prepare_roughcut",
     }),
     "memory_skills": frozenset({
-        "save_skill", "recall_skills", "remember", "log_note",
+        "point_library", "install_point_library", "list_point_libraries",
+        "rollback_point_library", "publish_point_library",
     }),
     "jobs": frozenset({"check_job", "wait_for_job", "kill_job"}),
     "interchange": frozenset({
@@ -135,19 +179,22 @@ TOOL_PACKS: dict[str, frozenset[str]] = {
         "project_import_otio",
     }),
     "multiagent": frozenset({
-        "spawn_subtasks", "probe_media", "analyze_media", "search_library",
+        "probe_media", "analyze_media", "search_library",
         "get_timeline",
     }),
 }
 
 
 WORKFLOW_ORDER: tuple[str, ...] = (
+    "production_design",
+    "design_program",
     "storyboard",
     "quanta",
     "motion_graphics",
     "video_generation",
     "video_edit",
     "timeline",
+    "segment",
     "lumen_core",
     "lumen_time",
     "lumen_mask",
@@ -165,6 +212,15 @@ WORKFLOW_ORDER: tuple[str, ...] = (
 
 
 WORKFLOW_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "production_design": (
+        "creative ir", "reality contract", "production contract", "设计状态",
+        "创作意图", "交付规格", "返修范围",
+    ),
+    "design_program": (
+        "design program", "project://design", "project://edit", "project://source",
+        "workspace", "html", "写代码", "代码文件", "设计程序", "设计算法",
+        "算法驱动", "本地重算",
+    ),
     "storyboard": (
         "分镜", "镜头", "脚本", "大纲", "多镜头", "宣传片", "storyboard",
         "shotlist", "script", "rough cut", "成片",
@@ -198,8 +254,16 @@ WORKFLOW_KEYWORDS: dict[str, tuple[str, ...]] = {
         "timeline", "clip", "track", "split", "trim", "transition",
         "title overlay", "insert a title", "add a title", "cut off",
     ),
+    "segment": (
+        "片段细化", "片段结构", "状态树", "图层树", "展开片段", "segment document",
+        "segment workspace", "segment edit", "refine clip",
+    ),
     "lumen_core": (
         "图层", "合成树", "lumenframe", "layer", "composition",
+        "渐变", "半透明", "不透明度", "混合模式", "滤色", "正片叠底",
+        "高斯模糊", "调整层", "剪贴到下层", "剪贴图层",
+        "gradient", "opacity", "blend mode", "gaussian blur",
+        "adjustment layer", "clip to below", "clipping layer",
     ),
     "lumen_time": (
         "变速", "倒放", "重映射", "工作区", "速度坡", "retime", "reverse",
@@ -224,24 +288,31 @@ WORKFLOW_KEYWORDS: dict[str, tuple[str, ...]] = {
     ),
     "annotations": (
         "标注", "标签", "素材库", "找素材", "搜素材", "annotation",
-        "media library", "search media",
+        "media library", "search media", "粗剪", "转写", "口头禅", "废话",
+        "选条", "挑条", "rough cut", "transcribe", "filler", "take selection",
     ),
     "files": (
         "文件", "目录", "文件夹", "路径", "复制", "移动", "整理", "file",
         "folder", "directory", "path", "copy", "move", "organize",
     ),
     "web": (
-        "网页", "网站", "互联网", "在线搜索", "搜一下网上", "url", "website",
-        "web search", "internet", "latest", "最新资料",
+        "网页", "网站", "互联网", "在线搜索", "搜一下网上", "搜索引擎",
+        "联网", "查一下", "url", "website", "web search", "search engine",
+        "look up", "internet", "latest", "最新资料",
     ),
     "interchange": ("otio", "opentimelineio", "final cut", "工程交换"),
-    "memory_skills": ("记住", "长期记忆", "保存技能", "remember", "save skill"),
+    "memory_skills": (
+        "记住", "长期记忆", "保存技能", "上传技能", "发布技能", "云端技能",
+        "creator workflow", "remember", "save skill", "skill cloud",
+    ),
     "multiagent": ("并行分析", "多个代理", "多代理", "parallel agents", "subtasks"),
     "general": (),
 }
 
 
 ADJACENT_PACKS: dict[str, tuple[str, ...]] = {
+    "production_design": ("design_program", "storyboard", "motion_graphics"),
+    "design_program": ("timeline", "motion_graphics", "audio"),
     "general": ("media_inspect", "files"),
     "media_inspect": ("files", "video_edit"),
     "motion_graphics": ("lumen_time", "lumen_mask", "video_edit"),
@@ -249,7 +320,8 @@ ADJACENT_PACKS: dict[str, tuple[str, ...]] = {
     "video_edit": ("timeline", "audio"),
     "storyboard": ("timeline", "audio"),
     "quanta": ("storyboard", "timeline"),
-    "timeline": ("video_edit", "lumen_core"),
+    "timeline": ("video_edit", "segment", "lumen_core"),
+    "segment": ("timeline", "lumen_core"),
     "lumen_core": ("lumen_time", "lumen_mask"),
     "lumen_time": ("lumen_mask", "timeline"),
     "lumen_mask": ("lumen_core", "image"),
@@ -261,6 +333,48 @@ ADJACENT_PACKS: dict[str, tuple[str, ...]] = {
     "interchange": ("timeline",),
     "memory_skills": ("general",),
     "multiagent": ("media_inspect",),
+}
+
+
+# A real production spans turns. Prompt keywords select the initial creative
+# surface, while the durable ProductionRun stage supplies the capabilities
+# needed to continue unfinished work after a new message or process restart.
+# These packs only expand visibility; dispatcher/plan/budget gates remain the
+# security and money boundaries.
+PRODUCTION_STAGE_PACKS: dict[str, tuple[str, ...]] = {
+    "created": ("production_design", "general", "media_inspect"),
+    "preflight": ("production_design", "general", "media_inspect"),
+    "sourcing": ("production_design", "storyboard", "media_inspect"),
+    "rough_cut": ("production_design", "design_program", "storyboard", "timeline"),
+    "sound_pass": ("production_design", "design_program", "audio", "timeline"),
+    # A visual pass must be able to replace rough-cut placeholders with the
+    # locally rendered MG/2.5D assets it creates.  Keeping the timeline pack
+    # active here makes that revision auditable instead of forcing operators
+    # to mutate the project outside the formal host gate.
+    "visual_pass": (
+        "production_design",
+        "design_program",
+        "motion_graphics",
+        "video_edit",
+        "timeline",
+    ),
+    "rendering": ("production_design", "timeline", "media_inspect"),
+    "verifying": ("production_design", "timeline", "media_inspect"),
+    "ready_for_review": ("production_design", "timeline", "media_inspect"),
+    "revising": (
+        "production_design",
+        "design_program",
+        "timeline",
+        "video_edit",
+        "audio",
+        "motion_graphics",
+        "lumen_core",
+        "media_inspect",
+    ),
+    "blocked": ("production_design", "general", "media_inspect"),
+    "accepted": ("production_design", "media_inspect"),
+    "failed": ("production_design", "general", "media_inspect"),
+    "cancelled": (),
 }
 
 
@@ -346,6 +460,79 @@ def _integration_topic_without_media_artifact(text: str) -> bool:
     )
 
 
+# "找到 logo" is a retrieval request, not a commission to animate one.  Topic
+# nouns (logo, 宣传片, 动画…) used to route pure find/search turns into
+# production packs, whose ledgers then demanded a final asset the user never
+# asked for this turn.  When the commanded action is retrieval and no
+# production verb appears, route to the inspect/files surface instead.
+_RETRIEVAL_ACTION_RE = re.compile(
+    r"(?:找到|找出|找一下|找找|寻找|查找|搜索|搜一下|搜搜|检索|"
+    r"帮我找|给我找|替我找|把.{0,24}找|看看有没有|有没有|在哪里|在哪儿|在哪|哪里有|"
+    r"\b(?:find|locate|search\s+for|look\s+for|where\s+is)\b)",
+    re.I,
+)
+
+_PRODUCTION_ACTION_RE = re.compile(
+    r"(?:生成|制作|创建|设计|渲染|导出|合成|拼接|添加|加上|叠加|插入|"
+    r"调色|变速|转场|抠图|修图|字幕|配乐|做成|做一|做个|做张|做段|"
+    r"画一|画个|画张|画幅|画出|剪辑|剪掉|剪成|裁剪|裁掉|"
+    r"\b(?:generate|make|create|produce|render|export|edit|trim|cut|"
+    r"add|overlay|insert|animate|design|draw|compose)\b)",
+    re.I,
+)
+
+_PRODUCTION_PACKS = (
+    "storyboard", "quanta", "motion_graphics", "video_generation",
+    "video_edit", "timeline", "image", "audio",
+    "lumen_core", "lumen_time", "lumen_mask", "interchange",
+)
+
+_MEDIA_REGISTRATION_RE = re.compile(
+    r"(?:(?:登记|注册|导入|上传).{0,24}"
+    r"(?:素材|媒体|视频|音频|图片|图像|文件|素材库|时间轴|时间线)|"
+    r"(?:素材|媒体|视频|音频|图片|图像|文件).{0,24}"
+    r"(?:登记|注册|导入|上传|放到|放进|加入|插入).{0,12}"
+    r"(?:素材库|时间轴|时间线)?|"
+    r"\b(?:register|import|upload|add)\b.{0,32}"
+    r"\b(?:asset|media|video|audio|image|file|library|timeline)\b)",
+    re.I,
+)
+
+_TIMELINE_DESTINATION_RE = re.compile(
+    r"(?:时间轴|时间线|timeline|放到轨道|放进轨道|加入轨道|插入轨道)",
+    re.I,
+)
+
+_NEGATED_VIDEO_GENERATION_RE = re.compile(
+    r"(?:(?:不要|不需要|无需|别|禁止)(?:再|只|直接)?"
+    r"(?:生成|制作|创建|做|输出)(?:任何|外部|新的|额外的)?"
+    r"(?:(?:图片|图像|照片)\s*(?:或|和|、)\s*)?(?:视频|短片|成片)|"
+    r"\b(?:do\s+not|don't|without|no\s+need\s+to|avoid)\s+"
+    r"(?:generat(?:e|ing)|mak(?:e|ing)|creat(?:e|ing)|produc(?:e|ing)|output)"
+    r"(?:\s+(?:any|external|new|extra))?\s+"
+    r"(?:(?:images?|photos?)\s+(?:or|and)\s+)?(?:videos?|clips?)\b)",
+    re.I,
+)
+
+_NEGATED_IMAGE_GENERATION_RE = re.compile(
+    r"(?:(?:不要|不需要|无需|别|禁止)(?:再|只|直接)?"
+    r"(?:生成|制作|创建|做|输出)(?:任何|外部|新的|额外的)?"
+    r"(?:(?:视频|短片)\s*(?:或|和|、)\s*)?(?:图片|图像|照片)|"
+    r"\b(?:do\s+not|don't|without|no\s+need\s+to|avoid)\s+"
+    r"(?:generat(?:e|ing)|mak(?:e|ing)|creat(?:e|ing)|produc(?:e|ing)|output)"
+    r"(?:\s+(?:any|external|new|extra))?\s+"
+    r"(?:(?:videos?|clips?)\s+(?:or|and)\s+)?(?:images?|photos?)\b)",
+    re.I,
+)
+
+
+def _retrieval_without_production(text: str) -> bool:
+    """True when the turn commands finding something, not making something."""
+    return bool(_RETRIEVAL_ACTION_RE.search(text)) and not bool(
+        _PRODUCTION_ACTION_RE.search(text)
+    )
+
+
 def classify_request(
     request: str,
     *,
@@ -383,6 +570,31 @@ def classify_request(
     elif integration_topic and media_artifact_action:
         scores["image"] += 4
 
+    # A pure retrieval turn ("找到 logo", "find the intro clip") must not be
+    # routed into a production pack just because the target noun matches a
+    # production keyword; the ledger would then require producing media the
+    # user only asked to locate.
+    if _retrieval_without_production(text):
+        for name in _PRODUCTION_PACKS:
+            scores[name] = 0
+        scores["media_inspect"] += 3
+        scores["files"] += 2
+    if re.search(
+        r"(?:搜索引擎|在线搜索|联网|web\s+search|search\s+engine)",
+        text,
+        re.I,
+    ):
+        scores["web"] += 4
+
+    # Registration is a file-import operation even when the request also says
+    # "素材库", which otherwise looks like annotation/search work. If the
+    # requested destination is the timeline, expose both halves of the
+    # required copy_in -> timeline_insert_clip chain on the first model call.
+    if _MEDIA_REGISTRATION_RE.search(text):
+        scores["files"] += 5
+        if _TIMELINE_DESTINATION_RE.search(text):
+            scores["timeline"] += 5
+
     # Head-noun generation phrasing may contain modifiers between the verb and
     # "video" ("生成一个有音乐的视频", "make a 7-second video").
     if re.search(
@@ -406,6 +618,14 @@ def classify_request(
         re.I,
     ):
         scores["audio"] += 2
+
+    # A creator may explicitly rule out generated media while asking for an
+    # editable LumenFrame composition.  Those negative phrases must not win
+    # the two-pack limit merely because they contain the words image/video.
+    if _NEGATED_VIDEO_GENERATION_RE.search(text):
+        scores["video_generation"] = 0
+    if _NEGATED_IMAGE_GENERATION_RE.search(text):
+        scores["image"] = 0
     if re.search(
         r"(?:(?:给|为).{0,10}视频.{0,12}(?:加|添加|加入|配上|混入).{0,8}"
         r"(?:音乐|配乐|旁白|口播|音频)|"
@@ -478,7 +698,7 @@ def schemas_for_tool_names(names: Iterable[str]) -> list[dict[str, Any]]:
 
 def catalog_coverage() -> tuple[frozenset[str], frozenset[str]]:
     """Return ``(missing, unknown)`` catalog members for exact drift tests."""
-    packed = frozenset().union(*TOOL_PACKS.values()) | CONTROL_TOOLS
+    packed = frozenset().union(*TOOL_PACKS.values()) | SYSTEM_TOOLS
     return MASTER_TOOL_SET - packed, packed - MASTER_TOOL_SET
 
 
@@ -495,6 +715,13 @@ def _has_pending_jobs(state: Mapping[str, Any] | None) -> bool:
     if isinstance(pending, (list, tuple, set, frozenset)):
         return bool(pending)
     return bool(pending)
+
+
+def _production_state(state: Mapping[str, Any] | None) -> str:
+    if not isinstance(state, Mapping):
+        return ""
+    value = state.get("production_state") or state.get("production_phase")
+    return str(value or "").strip().lower()
 
 
 class ToolRouter:
@@ -527,11 +754,14 @@ class ToolRouter:
         if not self.enabled:
             self._activate_all()
             return
+        self._active_names.update(BASELINE_TOOLS)
         if self.decision.kind == "conversation":
+            self.activate_pack("general")
             return
 
-        self._active_names.update(CONTROL_TOOLS)
         for workflow in self.decision.workflows:
+            self.activate_pack(workflow)
+        for workflow in PRODUCTION_STAGE_PACKS.get(_production_state(state), ()):
             self.activate_pack(workflow)
         if _has_pending_jobs(state):
             self.activate_pack("jobs")
@@ -580,7 +810,11 @@ class ToolRouter:
 
     def observe_state(self, state: Mapping[str, Any] | None) -> None:
         """Expand support tools implied by live state; never remove tools."""
-        if self.enabled and self.decision.kind == "actionable" and _has_pending_jobs(state):
+        if not self.enabled or self.decision.kind != "actionable":
+            return
+        for workflow in PRODUCTION_STAGE_PACKS.get(_production_state(state), ()):
+            self.activate_pack(workflow)
+        if _has_pending_jobs(state):
             self.activate_pack("jobs")
 
     def note_progress(self) -> None:
@@ -627,12 +861,17 @@ class ToolRouter:
 
 __all__ = [
     "ADJACENT_PACKS",
+    "BASELINE_TOOLS",
     "CONTROL_TOOLS",
     "MASTER_TOOL_NAMES",
     "MASTER_TOOL_SET",
+    "PRIVATE_SYSTEM_TOOLS",
+    "PRODUCTION_STAGE_PACKS",
     "RouteDecision",
     "RouteExpansion",
     "TOOL_PACKS",
+    "SYSTEM_TOOLS",
+    "TRUSTED_LOCAL_HOST_BASELINE",
     "ToolRouter",
     "WORKFLOW_KEYWORDS",
     "WORKFLOW_ORDER",

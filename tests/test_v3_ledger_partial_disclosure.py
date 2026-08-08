@@ -1,17 +1,11 @@
-"""FM3 (host side) gate — a recoverable library failure degrades to an honest
-partial answer (charter §10 failure-mode-3, P10).
+"""A recoverable library failure reaches an honest model-authored answer.
 
 The lived bug: an editing turn hard-errored with "host acceptance ledger
 remains incomplete" and DISCARDED the model's honest partial explanation ("I
 removed the title but couldn't remove the original shape"), leaving the user an
-opaque halt. The host turn-ledger's contract is that when a turn stops
-incomplete AFTER doing work and the model's response carries prose, that prose
-is DELIVERED (rendered softly, not as a red interrupt) alongside the incomplete
-status — the library only *feeds* typed/recoverable errors. This test locks
-that contract: it drives a real ``AgentLoopV3`` where a mutating tool fails
-recoverably and the model then explains honestly, and asserts the explanation
-reaches the user. Companion (library side): ``test_library_ledger_contract.py``.
-See ``gemia/docs/point-library-charter.md`` §10 (failure mode 3).
+opaque halt. The tool result is evidence for the model; the host does not add a
+second completion verdict. This test drives a real ``AgentLoopV3`` where a
+mutating tool fails recoverably and the model then explains honestly.
 """
 from __future__ import annotations
 
@@ -76,16 +70,11 @@ def test_recoverable_library_failure_degrades_to_partial(tmp_path: Path, monkeyp
         emit_event=events.append,
     )
 
-    # An actionable edit request → ledger_enforced; the failed mutation leaves
-    # the ledger incomplete, so the turn stops as incomplete_goal.
+    # The first tool call creates an observational activity record.
     asyncio.run(loop.run_turn("删除标题图层并重新导出"))
 
-    # The turn honestly stops incomplete (it did NOT fake a green completion).
-    assert any(
-        e.get("kind") == "turn_error" and e.get("reason") == "incomplete_goal"
-        for e in events
-    ), "an unfinished edit turn must stop as incomplete_goal, not fake completion"
-    assert not [e for e in events if e.get("kind") == "turn_complete"]
+    assert not [e for e in events if e.get("reason") == "incomplete_goal"]
+    assert [e for e in events if e.get("kind") == "turn_complete"]
 
     # …AND the model's honest partial explanation was DELIVERED, not discarded.
     delivered = "".join(
@@ -96,5 +85,5 @@ def test_recoverable_library_failure_degrades_to_partial(tmp_path: Path, monkeyp
         f"an opaque halt. delivered text deltas = {delivered!r}"
     )
 
-    # A graceful wrap-up summary also accompanies the stop (never a bare halt).
-    assert any(e.get("kind") == "turn_wrapup" for e in events)
+    # No host-authored verdict is appended after the model's own explanation.
+    assert not [e for e in events if e.get("kind") == "turn_wrapup"]

@@ -1,6 +1,6 @@
 # Lumeri 前端设计规范
 
-**版本** v1.0 · 2026-07-13（三视角评审修订 + 实拍审计 + Antigravity 复核后定稿；用户已过目）
+**版本** v1.2 · 2026-08-05（新增视频空间/时间微调交互内核；用户拍板）
 **适用范围** Lumeri 全部产品前端：web v3（`static/v3/`）、CLI（`lumeri-cli`）、桌面壳（Electron）。管产品界面本身，不管成片画面（成片归 `lumeri-design-manuals/DESIGN.md`）。
 **文档地位** 本规范是前端视觉与交互的唯一权威口径。与 `lumeri-design-manuals/针对性/05-界面UI.md`（胶囊版 token，已过时）冲突处以本规范为准；`lumeri-cli/docs/tui-design-spec.md` 降为本规范第 16 章的 CLI 实现细则；`06-AI交互准则.md` 保留 agent 行为契约与出片侧管辖，其**前端呈现**条文以本规范第 9 章为准。
 **语气约定** "必须/禁止" = 硬规则，违反即缺陷；"应" = 默认做法，偏离需在代码注释里写明理由；"可" = 自由裁量。正文各表与附录 A 冲突时，**以附录 A 为 canonical**。
@@ -17,6 +17,7 @@
 6. **层级靠弱化次要，不靠强化主要。** 工具顺序：字重（400/500 对 600/700）→ 文字灰阶 → 最后才是字号。禁止靠加框、加色、加动效抬层级。
 7. **无障碍是设计约束，不是补丁。** 对比度、焦点、目标尺寸、reduced-motion 在设计阶段锁定（见第 14 章底线表）。
 8. **借鉴不抄袭。** 视觉语言以 Material 3 为骨（用户拍板，2026-07-12），以专业剪辑工具（DaVinci / CapCut）为密度参照，但不照搬任何一家的成品皮肤。不抄清单：SF 字体、毛玻璃表面、弹性滚动、ripple 波纹、spring token 数值。
+9. **尊重用户的理解力。** 先保证用户看得懂，再删除重复线索；一条清楚的文案或视觉差异已经能表达时，禁止再叠加彩底、描边、图标、标题或二次解释。界面不靠夸大状态证明自己“提醒过”，也不把用户当成需要反复教育的人。
 
 ---
 
@@ -79,6 +80,7 @@
 |---|---|---|
 | `--m3-on-surface` | `#e1e3e4` | 主文字 |
 | `--m3-on-surface-variant` | `#bfc8cb` | 次要文字、**占位文字**（对 surface-highest ≈7.2:1） |
+| `--system-text` | primary 72% + surface 28% | 会话中的宿主/系统文字；暗底对比度约 6.1:1 |
 | `--m3-outline` | `#899295` | 交互组件描边（outlined 按钮/chip、switch 轨）、状态点。**不是文字角色**；禁用文字走 7.3 的透明度方案 |
 | `--m3-outline-variant` | `#3f484b` | 分隔线、非交互装饰边（对 surface 仅 ~2:1，禁止承担交互边界） |
 
@@ -338,7 +340,7 @@ font-family: Roboto, "Helvetica Neue", -apple-system, BlinkMacSystemFont,
 | **Switch** | M3 52×32：surface-highest 轨 + 2px `--m3-outline` 描边，on = primary 轨 + on-primary 拇指；拇指 16→24 长大。仅用于即时生效的设置项，提交式表单禁用（见 11 章） |
 | **Chips**（filter/状态） | `shape-sm`，11px/500；filter chip：outlined（`--m3-outline`）⇄ 选中 tonal；状态 chip 配 tint 底 + **功能色本体亮字** |
 | **进度条** | 4px 高 `shape-full`，surface-highest 轨 + primary 填充；填充推进 120ms linear；indeterminate 滑块周期 1.4s（循环豁免档） |
-| **Banner** | `shape-md`；语义配色查 1.5 功能色表（budget=warn-tint、error=error-container、plan=primary-container、info=surface-high） |
+| **会话系统文本** | 无容器、无描边、无图标；14px/1.6，`--system-text` 深蓝。只靠来源色与 Lumeri 正文区分，不再按错误/预算/计划套不同 banner |
 | **状态点** | 8×8 圆点，色 + `title`/`aria-label` 词双通道 |
 | **时间线抽屉** | 容器 max-height 0⇄384px 快照切换（不动画）；内容 `.ptl` translateY(14px)→0 + fade，250ms emph-decel；**384px = toolbar+内容+动作条实算高度**，改抽屉内容必须同步此值 |
 | **滚动条** | 自绘 11px，thumb surface-highest，密集区（时间线）专属 |
@@ -365,6 +367,7 @@ Lumeri 是 agent 产品，对话流是第一界面。以下规则来自 06 手�
 - **文案禁词**：技术黑话（LLM/神经网络/magic…）、全能宣称（总是/保证/100%…）。
 - **文字精简纪律**（用户拍板 2026-07-13）：状态词进 `title`/`aria`，界面留形；分组标题降级为分隔线；按钮短词；说明性长段删除。a11y 通道（aria-label/title）全程保留。
 - **机器话禁令**：内部 ID（asset_…、hash 文件名、session id）、错误码、枚举原文禁止直接示人；退 `title` 悬停或复制动作，卡面只留人话。
+- **会话来源即层级**（用户拍板 2026-07-22）：Lumeri 生成的自然语言固定用 `--m3-on-surface` 白字；宿主/系统写入的状态文字（包括错误、预算、计划等待）固定用 `--system-text` 深蓝字、透明背景。来源已经一目了然时，禁止再加红框、彩底、警告图标或重复标题。红色只留给真正需要用户处理的失败对象与破坏性动作，不给普通会话状态。
 
 ---
 
@@ -432,6 +435,7 @@ Lumeri 表单面积小（登录、设置），规则按体量分两档。**定�
 - 批量选中浮出操作条时，行内单项操作必须禁用（两通道互斥）。
 - 排序图标只在被排序列常驻。
 - 时间线专业化基线（对齐 DaVinci/CapCut）：真实缩放滚动、playhead 细而醒目（`--tl-playhead` 专用红，见 1.5）、marker 用 warn 系、snap 有微反馈、trim 手柄可抓、clip 选中双圈 ring（1.5px primary + 3px primary-container）、拖拽全部配非拖拽替代。
+- **视频微调交互内核**：预览对象、时间线 clip、对象旁微调条和可独立打开的“属性”模块必须共享同一选择与编辑状态；空间用画布左上角为原点的对象中心点绝对坐标，时间用帧对齐。完整键盘、吸附、提交、冲突和无障碍契约见 [`INTERACTION-KERNEL.md`](./INTERACTION-KERNEL.md)，该文档是本章的强制实现细则。
 - **动态密度容错（v1.1 起草义务，Antigravity 指出的盲区）**：长 UUID/多标签/时码在 400px rail 内的溢出、换行、截断策略必须在组件规格里显式给出。
 - 高密度是专业工具的合法审美；慢的"美"界面是低密度界面。
 
@@ -471,7 +475,7 @@ Lumeri 表单面积小（登录、设置），规则按体量分两档。**定�
 
 ## 15. 反模式速查（见即修；括号内为依据章节）
 
-仅靠 font-size 拉层级(0.6)｜纯黑/纯白文字(1.5)｜em 组件字号(2.2)｜彩底灰字(1.5)｜冰蓝强调正文——链接/命令等交互文字除外(1.5)｜浮层描边/白边(5.1)｜到处画 1px 线(5.1)｜`outline:none` 无替代(7.2)｜div 装按钮(14)｜正数 tabindex(14)｜placeholder 当 label——微表单例外(11)｜blur 时校验(11)｜禁用提交按钮(11)｜<1s spinner(10.1)｜空视图正中 spinner(10.2)｜frame-only skeleton(10.2)｜`scale(0)` 弹出(6.2)｜enter 用 ease-in(6.2)｜动 width/height/margin(6.2)｜纯颜色传状态(1.5)｜modal 焦点不困不还(7.2)｜自动动效 >5s 无停止(6.2)｜裸 hex/档外字面量(0.5, 17.1)｜同义两色/一色两义(1.5)｜静止组件用 elev-4/5(5.2)｜密集卡大圆角(4)｜数字列比例字体/居中(12)｜错误码裸奔(9)｜机器 ID 示人(9)｜错误文案开玩笑(10.3)｜emoji 进 UI(13)。
+仅靠 font-size 拉层级(0.6)｜纯黑/纯白文字(1.5)｜em 组件字号(2.2)｜彩底灰字(1.5)｜冰蓝强调正文——链接/命令等交互文字除外(1.5)｜浮层描边/白边(5.1)｜到处画 1px 线(5.1)｜一句状态再叠彩底/描边/图标/标题(0.9, 9)｜会话系统状态套红色警报框(9)｜`outline:none` 无替代(7.2)｜div 装按钮(14)｜正数 tabindex(14)｜placeholder 当 label——微表单例外(11)｜blur 时校验(11)｜禁用提交按钮(11)｜<1s spinner(10.1)｜空视图正中 spinner(10.2)｜frame-only skeleton(10.2)｜`scale(0)` 弹出(6.2)｜enter 用 ease-in(6.2)｜动 width/height/margin(6.2)｜纯颜色传状态(1.5)｜modal 焦点不困不还(7.2)｜自动动效 >5s 无停止(6.2)｜裸 hex/档外字面量(0.5, 17.1)｜同义两色/一色两义(1.5)｜静止组件用 elev-4/5(5.2)｜密集卡大圆角(4)｜数字列比例字体/居中(12)｜错误码裸奔(9)｜机器 ID 示人(9)｜错误文案开玩笑(10.3)｜emoji 进 UI(13)。
 
 ---
 

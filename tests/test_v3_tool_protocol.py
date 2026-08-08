@@ -10,6 +10,7 @@ import gemia.agent_loop_v3 as loop_mod
 import pytest
 from gemia.agent_loop_v3 import (
     AgentLoopV3,
+    _DisplayStreamGate,
     _activity_text_from_model_preamble,
     _progress_report_from_model_preamble,
     _strip_activity_markup,
@@ -126,6 +127,25 @@ def test_model_activity_label_is_attached_before_tool_execution(
         "我已经理顺了开场素材，主体现在更容易看清。接下来会收紧字幕节奏。"
     )
     assert events.index(ready) < events.index(start)
+    assert not [
+        event
+        for event in events
+        if event.get("kind") == "model_text_delta"
+        and "<activity>" in str(event.get("delta") or "")
+        and event.get("display") == "stream"
+    ]
+    final_delta = next(
+        event
+        for event in events
+        if event.get("kind") == "model_text_delta"
+        and event.get("delta") == "这一步已经完成。"
+    )
+    assert final_delta["display"] == "stream"
+    assert events.index(final_delta) < next(
+        index
+        for index, event in enumerate(events)
+        if event.get("kind") == "turn_complete"
+    )
 
     # The UI-only protocol text must not re-enter provider history.
     assistant = next(
@@ -134,6 +154,24 @@ def test_model_activity_label_is_attached_before_tool_execution(
         if message.get("role") == "assistant" and message.get("tool_calls")
     )
     assert assistant["content"] is None
+
+
+def test_display_stream_gate_withholds_split_tool_ui_prefix() -> None:
+    gate = _DisplayStreamGate()
+    assert gate.feed(" \n<re") == []
+    assert gate.feed("port>阶段进展") == []
+    assert gate.feed("</report><activity>继续处理</activity>") == []
+    assert gate.withheld is True
+    assert gate.emitted is False
+
+
+def test_display_stream_gate_releases_real_model_chunks() -> None:
+    gate = _DisplayStreamGate()
+    assert gate.feed("这") == ["这"]
+    assert gate.feed("一步") == ["一步"]
+    assert gate.feed("已经完成。") == ["已经完成。"]
+    assert gate.streamable is True
+    assert gate.emitted is True
 
 
 @pytest.mark.parametrize(
@@ -192,9 +230,9 @@ def test_agent_loop_preserves_gemini_tool_call_extra_content(tmp_path: Path) -> 
 
     asyncio.run(loop.run_turn("做个mg动画"))
 
-    # The tool protocol remains intact; because the creative goal produced no
-    # asset, the ledger performs one full-route retry before ending incomplete.
-    assert client.calls == 3
+    # The tool protocol remains intact and the model's next no-tool response
+    # ends naturally; the activity record does not trigger a host retry.
+    assert client.calls == 2
     second_messages = client.seen_messages[1]
     assistant = next(
         msg for msg in second_messages
@@ -208,6 +246,7 @@ def test_agent_loop_preserves_gemini_tool_call_extra_content(tmp_path: Path) -> 
     tool_msg = next(msg for msg in second_messages if msg.get("role") == "tool")
     assert "no matching session or media-library assets found" in tool_msg["content"]
     assert not [event for event in events if event.get("kind") == "tool_exec_error"]
+    assert [event for event in events if event.get("kind") == "turn_complete"]
 
 
 def test_parse_chunk_forwards_tool_call_extra_content() -> None:

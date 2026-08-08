@@ -4,20 +4,59 @@ Two writer populations exist in production: agent verbs on the session's
 asyncio thread, and /timeline/op + undo on ThreadingHTTPServer handler
 threads. Before the per-project lock, both could read ``patch_seq == N`` and
 write ``patches/000(N+1).json`` — one history entry silently clobbered and the
-last ``state.json`` write won. These tests hammer the store from many threads
-and assert the log is gapless and every write survived; plus the
+last ``state.json`` write won. These tests hammer the store from threads and
+independent processes and assert the log is gapless and every write survived; plus the
 SessionRunner.run_project_edit loop-hop contract.
 """
 from __future__ import annotations
 
 import json
+import multiprocessing
 import threading
+import time
 from pathlib import Path
+from types import MethodType
 from typing import Any
 
 import pytest
 
 from gemia.project_store import ProjectStore
+from gemia.production_store import RevisionConflictError
+
+
+def _multiprocess_apply_once(
+    root: str,
+    project_id: str,
+    asset_id: str,
+    start_barrier: Any,
+) -> None:
+    """Write through an independent store/process with a widened race window."""
+    store = ProjectStore(root)
+    original_load_meta = store.load_meta
+
+    def _slow_load_meta(pid: str) -> dict[str, Any]:
+        meta = original_load_meta(pid)
+        # Before the process lock, both writers read patch_seq=0 during this
+        # pause and then clobbered 0001.json/state.json. With the lock, the
+        # second process cannot enter the read-modify-write cycle yet.
+        time.sleep(0.2)
+        return meta
+
+    store.load_meta = _slow_load_meta  # type: ignore[method-assign]
+    start_barrier.wait(timeout=10)
+    store.apply_patches(
+        project_id,
+        [{"version": 1, "ops": [{"op": "upsert_asset", "asset": {
+            "id": asset_id,
+            "asset_id": asset_id,
+            "name": f"{asset_id}.mp4",
+            "media_kind": "video",
+            "source_path": f"/tmp/{asset_id}.mp4",
+            "duration": 1.0,
+        }}]}],
+        session_id=f"sid-{asset_id}",
+        script_hash="multiprocess-regression",
+    )
 
 
 def _seed_store(tmp_path: Path) -> tuple[ProjectStore, str]:
@@ -25,6 +64,22 @@ def _seed_store(tmp_path: Path) -> tuple[ProjectStore, str]:
     pid = "proj-conc"
     store.create(pid)
     return store, pid
+
+
+def test_storage_project_id_is_the_canonical_document_identity(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path)
+    state = store.create("durable-project")
+    assert state["project_id"] == "durable-project"
+    assert store.load("durable-project")["project_id"] == "durable-project"
+
+    updated = store.apply_patches(
+        "durable-project",
+        [{"version": 1, "ops": [{"op": "set_project_title", "title": "回声协议"}]}],
+        session_id="sid",
+        script_hash="identity-regression",
+    )["project_state"]
+    assert updated["project_id"] == "durable-project"
+    assert updated["title"] == "回声协议"
 
 
 def test_concurrent_apply_patches_loses_nothing(tmp_path: Path) -> None:
@@ -71,6 +126,35 @@ def test_concurrent_apply_patches_loses_nothing(tmp_path: Path) -> None:
     assets = {a["id"] for a in store.load(pid)["assets"]}
     expected = {f"a{w:02d}_{i:02d}" for w in range(threads) for i in range(per_thread)}
     assert expected <= assets
+
+
+def test_independent_processes_apply_without_clobbering_patch_seq(tmp_path: Path) -> None:
+    store, pid = _seed_store(tmp_path)
+    ctx = multiprocessing.get_context("spawn")
+    barrier = ctx.Barrier(2)
+    processes = [
+        ctx.Process(
+            target=_multiprocess_apply_once,
+            args=(str(store.root), pid, asset_id, barrier),
+        )
+        for asset_id in ("process_a", "process_b")
+    ]
+
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=20)
+    assert all(not process.is_alive() for process in processes)
+    assert [process.exitcode for process in processes] == [0, 0]
+
+    assert int(store.load_meta(pid)["patch_seq"]) == 2
+    patch_files = sorted(store.patches_dir(pid).glob("*.json"))
+    assert [path.name for path in patch_files] == ["0001.json", "0002.json"]
+    assert [json.loads(path.read_text())["seq"] for path in patch_files] == [1, 2]
+    assert {asset["id"] for asset in store.load(pid)["assets"]} >= {
+        "process_a",
+        "process_b",
+    }
 
 
 def test_concurrent_undo_and_apply_keep_log_consistent(tmp_path: Path) -> None:
@@ -175,3 +259,74 @@ def test_run_project_edit_executes_on_the_session_loop_thread() -> None:
             runner._loop.call_soon_threadsafe(runner._loop.stop)
             t.join(timeout=5)
             runner._loop.close()
+
+
+def test_run_project_edit_coalesces_event_persist_and_keeps_fallback() -> None:
+    import asyncio
+
+    from gemia.session_manager import SessionRunner
+
+    runner = SessionRunner.__new__(SessionRunner)
+    runner._loop = asyncio.new_event_loop()
+    runner._state_lock = threading.Lock()
+    runner._runtime_persist_generation = 0
+    runner.last_used_at = 0.0
+    runner._sync_project_revision = MethodType(lambda self: 4, runner)
+    attempts: list[str] = []
+
+    def _persist(self, *, project_revision=None) -> None:
+        attempts.append("persist")
+        self._runtime_persist_generation += 1
+
+    runner._persist_runtime_state = MethodType(_persist, runner)
+    ready = threading.Event()
+
+    def _run() -> None:
+        asyncio.set_event_loop(runner._loop)
+        ready.set()
+        runner._loop.run_forever()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    ready.wait(timeout=5)
+    try:
+        # A normal ProjectHandle patch synchronously persists via timeline_op.
+        assert runner.run_project_edit(
+            lambda: (runner._persist_runtime_state(), "patched")[1]
+        ) == "patched"
+        assert attempts == ["persist"]
+
+        # Undo has no timeline_op callback, so the post-fn fallback persists it.
+        assert runner.run_project_edit(lambda: "undone") == "undone"
+        assert attempts == ["persist", "persist"]
+
+        flaky_attempts: list[str] = []
+
+        def _flaky_persist(self, *, project_revision=None) -> None:
+            flaky_attempts.append("persist")
+            if len(flaky_attempts) == 1:
+                raise OSError("injected event receipt failure")
+            self._runtime_persist_generation += 1
+
+        runner._persist_runtime_state = MethodType(_flaky_persist, runner)
+
+        def _patch_with_caught_event_failure() -> str:
+            try:
+                runner._persist_runtime_state()
+            except OSError:
+                pass  # mirrors _emit_event's persisted-error capture
+            return "retried"
+
+        assert runner.run_project_edit(_patch_with_caught_event_failure) == "retried"
+        assert flaky_attempts == ["persist", "persist"]
+
+        # A stale optimistic lock performs neither mutation nor persistence.
+        with pytest.raises(RevisionConflictError, match="revision mismatch"):
+            runner.run_project_edit(
+                lambda: "must-not-run", expected_project_revision=3
+            )
+        assert flaky_attempts == ["persist", "persist"]
+    finally:
+        runner._loop.call_soon_threadsafe(runner._loop.stop)
+        thread.join(timeout=5)
+        runner._loop.close()

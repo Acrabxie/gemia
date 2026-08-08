@@ -228,9 +228,10 @@ def test_load_reconciles_midflight_and_replays_unseen_notices(tmp_path: Path) ->
     # both terminal jobs restored as-is
     assert jobs.get("shell_done_unseen").last_polled_status == "done"
     assert jobs.get("shell_done_seen").last_polled_status == "done"
-    # the video LRO was skipped, not restored
-    with pytest.raises(KeyError):
-        jobs.get("video_x")
+    # Provider LROs outlive the local process and remain pollable after resume.
+    restored_video = jobs.get("video_x")
+    assert restored_video.kind == "video"
+    assert restored_video.last_polled_status not in ("done", "failed")
 
     # notices: mid-flight + terminal-unseen (2), NOT the already-announced one
     assert loop.has_pending_background_notifications()
