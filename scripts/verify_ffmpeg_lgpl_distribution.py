@@ -73,6 +73,22 @@ def read_manifest(directory: Path) -> dict[str, Any]:
     require(isinstance(source_url, str) and source_url.startswith("https://"), "FFmpeg source bundle must use an HTTPS URL")
     source_sha = source_bundle.get("sha256")
     require(isinstance(source_sha, str) and len(source_sha) == 64 and all(c in "0123456789abcdef" for c in source_sha.lower()), "FFmpeg source bundle needs a SHA-256")
+    materials = source_bundle.get("materials")
+    require(isinstance(materials, dict), "FFmpeg manifest has no corresponding-source materials")
+    for name in ("source", "buildScript", "configureArguments"):
+        record = materials.get(name)
+        require(isinstance(record, dict), f"FFmpeg manifest lacks source material: {name}")
+        relative = record.get("path")
+        expected_sha = record.get("sha256")
+        require(isinstance(relative, str) and relative, f"FFmpeg source material has no path: {name}")
+        parts = Path(relative).parts
+        require(not Path(relative).is_absolute() and all(part not in {"", ".", ".."} for part in parts), f"unsafe FFmpeg source material path: {name}")
+        require(isinstance(expected_sha, str) and len(expected_sha) == 64 and all(c in "0123456789abcdef" for c in expected_sha.lower()), f"FFmpeg source material needs a SHA-256: {name}")
+        candidate = directory.joinpath(*parts)
+        require(candidate.is_file() and not candidate.is_symlink(), f"missing bundled FFmpeg source material: {name}")
+        require(sha256(candidate) == expected_sha, f"FFmpeg source material SHA-256 differs: {name}")
+        if name == "source":
+            require(expected_sha.lower() == source_sha.lower(), "FFmpeg source archive does not match sourceBundle SHA-256")
     binaries = manifest.get("binaries")
     require(isinstance(binaries, dict), "FFmpeg manifest has no binary digests")
     for name in ("ffmpeg", "ffprobe"):

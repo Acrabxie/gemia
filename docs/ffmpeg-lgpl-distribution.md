@@ -10,19 +10,22 @@ Every DMG that includes `ffmpeg` or `ffprobe` must include
 - `COPYING.LGPL-2.1-or-later`;
 - `NOTICE`, naming FFmpeg and the public corresponding-source URL; and
 - `manifest.json`, which binds the exact FFmpeg and ffprobe SHA-256 values to
-  that source bundle's URL and SHA-256.
+  that source bundle's URL and SHA-256; and
+- `source/`, containing the exact FFmpeg source archive, build script, and
+  configure-argument receipt, each hash-bound in `manifest.json`.
 
 The packaging gate is `scripts/verify_ffmpeg_lgpl_distribution.py`. It
 executes both binaries, requires an explicit `--disable-gpl`, rejects
 `--enable-gpl`, `--enable-nonfree`, and nonredistributable output, and verifies
-the bytes against material shipped with the DMG.
+the binaries plus all corresponding-source materials against hashes shipped
+with the DMG.
 
 The packaging input is a vendor directory with this shape:
 
 ```
 bin/ffmpeg
 bin/ffprobe
-LEGAL/FFmpeg/{manifest.json,COPYING.LGPL-2.1-or-later,NOTICE}
+LEGAL/FFmpeg/{manifest.json,COPYING.LGPL-2.1-or-later,NOTICE,source/}
 ```
 
 macOS and Windows packers must take that directory explicitly; they must not

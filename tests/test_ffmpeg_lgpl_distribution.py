@@ -10,6 +10,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 VERIFIER = ROOT / "scripts" / "verify_ffmpeg_lgpl_distribution.py"
+BUILDER = ROOT / "scripts" / "build_ffmpeg_lgpl_macos.sh"
 
 
 def digest(path: Path) -> str:
@@ -41,12 +42,28 @@ def fake_binary(path: Path, *, mode: str = "lgpl") -> None:
 
 def compliance(directory: Path, ffmpeg: Path, ffprobe: Path) -> None:
     source_url = "https://github.com/Acrabxie/lumeri/releases/download/ffmpeg-source/ffmpeg-source.tar.xz"
+    source_dir = directory / "source"
+    source_dir.mkdir(exist_ok=True)
+    source = source_dir / "ffmpeg-source.tar.xz"
+    build_script = source_dir / "build-ffmpeg-lgpl.sh"
+    configure_arguments = source_dir / "configure.args"
+    source.write_bytes(b"FFmpeg corresponding source fixture\n")
+    build_script.write_text("#!/bin/sh\n# fixture build script\n", encoding="utf-8")
+    configure_arguments.write_text("--disable-gpl\n--disable-nonfree\n", encoding="utf-8")
     (directory / "COPYING.LGPL-2.1-or-later").write_text("GNU LESSER GENERAL PUBLIC LICENSE\nVersion 2.1\n", encoding="utf-8")
     (directory / "NOTICE").write_text(f"Lumeri includes FFmpeg. Corresponding source: {source_url}\n", encoding="utf-8")
     (directory / "manifest.json").write_text(json.dumps({
         "schema": "lumeri.ffmpeg-distribution.v1",
         "license": "LGPL-2.1-or-later",
-        "sourceBundle": {"url": source_url, "sha256": "a" * 64},
+        "sourceBundle": {
+            "url": source_url,
+            "sha256": digest(source),
+            "materials": {
+                "source": {"path": "source/ffmpeg-source.tar.xz", "sha256": digest(source)},
+                "buildScript": {"path": "source/build-ffmpeg-lgpl.sh", "sha256": digest(build_script)},
+                "configureArguments": {"path": "source/configure.args", "sha256": digest(configure_arguments)},
+            },
+        },
         "binaries": {
             "ffmpeg": {"sha256": digest(ffmpeg)},
             "ffprobe": {"sha256": digest(ffprobe)},
@@ -59,6 +76,22 @@ def verify(ffmpeg: Path, ffprobe: Path, legal: Path) -> subprocess.CompletedProc
         sys.executable, str(VERIFIER), "--ffmpeg", str(ffmpeg),
         "--ffprobe", str(ffprobe), "--compliance-dir", str(legal),
     ], capture_output=True, text=True)
+
+
+builder = BUILDER.read_text(encoding="utf-8")
+for required in (
+    "ffmpeg-8.1.2.tar.xz",
+    "--disable-gpl",
+    "--disable-nonfree",
+    "--disable-libx264",
+    "--disable-libx265",
+    "--disable-libfdk-aac",
+    "--disable-autodetect",
+    "--enable-videotoolbox",
+    "LEGAL/FFmpeg/source",
+    "verify_ffmpeg_lgpl_distribution.py",
+):
+    assert required in builder
 
 
 with tempfile.TemporaryDirectory() as temporary:
@@ -82,3 +115,9 @@ with tempfile.TemporaryDirectory() as temporary:
         rejected = verify(ffmpeg, ffprobe, legal)
         assert rejected.returncode != 0
         assert expected in rejected.stderr
+
+    source = legal / "source" / "ffmpeg-source.tar.xz"
+    source.write_bytes(b"tampered corresponding source fixture\n")
+    rejected = verify(ffmpeg, ffprobe, legal)
+    assert rejected.returncode != 0
+    assert "source material SHA-256 differs" in rejected.stderr
