@@ -21,6 +21,14 @@ sudo apt-get install ffmpeg
 
 ## Running tests
 
+### Bundled FFmpeg releases
+
+DMG packaging must use the LGPL-only distribution gate in
+`scripts/verify_ffmpeg_lgpl_distribution.py`. Do not use an FFmpeg binary built
+with `--enable-gpl` or `--enable-nonfree`. See
+[`docs/ffmpeg-lgpl-distribution.md`](docs/ffmpeg-lgpl-distribution.md) for the
+required binary, notice, and corresponding-source materials.
+
 ```bash
 pytest tests/ -v --ignore=tests/test_ai --ignore=tests/test_video
 ```
