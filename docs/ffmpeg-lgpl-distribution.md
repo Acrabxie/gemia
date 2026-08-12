@@ -33,6 +33,12 @@ An LGPL-only FFmpeg build does not include GPL encoders such as `libx264` or
 platform encoder and keep a tested fallback; a successful license gate alone
 is not feature acceptance.
 
+The macOS backend installs Lumeri's MIT-licensed `lumeri-ffmpeg-adapter.sh` as
+its `ffmpeg` command and keeps the verified FFmpeg executable as
+`ffmpeg-lgpl`. The adapter translates legacy x264/x265 export requests to
+VideoToolbox where available, then retries with built-in MPEG-4. It lets older
+tool call sites remain functional without making GPL codecs part of the DMG.
+
 The corresponding-source bundle must contain the exact FFmpeg source, build
 scripts, configuration, patches, and a checksum manifest. It must exclude GPL
 components such as x264, x265, and vid.stab. Hosting or changing that public
