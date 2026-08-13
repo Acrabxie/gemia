@@ -115,7 +115,7 @@ def verify_binary(name: str, binary: Path, expected_sha: str) -> None:
     require("unredistributable" not in license_output and "nonfree" not in license_output, f"{name} reports a nonredistributable license")
     require(re.search(r"(?<!l)gpl(?:\s|$)", license_output) is None, f"{name} reports a GPL license; LGPL-only distribution required")
     require(
-        "lgpl" in license_output or "gnu lesser general public license" in license_output,
+        "lgpl" in license_output or re.search(r"gnu\s+lesser\s+general\s+public\s+license", license_output) is not None,
         f"{name} does not report an LGPL license",
     )
 
