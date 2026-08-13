@@ -111,7 +111,7 @@ def verify_binary(name: str, binary: Path, expected_sha: str) -> None:
     require("--enable-nonfree" not in buildconf, f"{name} enables nonfree code and is not redistributable")
     require("--enable-gpl" not in buildconf, f"{name} enables GPL code; LGPL-only distribution required")
     require("--disable-gpl" in buildconf, f"{name} build configuration must explicitly disable GPL code")
-    license_output = run(binary, "-hide_banner", "-l").lower()
+    license_output = run(binary, "-hide_banner", "-L").lower()
     require("unredistributable" not in license_output and "nonfree" not in license_output, f"{name} reports a nonredistributable license")
     require(re.search(r"(?<!l)gpl(?:\s|$)", license_output) is None, f"{name} reports a GPL license; LGPL-only distribution required")
     require("lgpl" in license_output, f"{name} does not report an LGPL license")

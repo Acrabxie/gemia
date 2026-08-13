@@ -32,7 +32,7 @@ def fake_binary(path: Path, *, mode: str = "lgpl") -> None:
         "#!/bin/sh\n"
         "case \"$*\" in\n"
         f"  *-buildconf*) printf '%s\\n' 'configuration: {config}' ;;\n"
-        f"  *-l*) printf '%s\\n' '{license_line}' ;;\n"
+        f"  *-L*) printf '%s\\n' '{license_line}' ;;\n"
         "  *) printf '%s\\n' 'ffmpeg version test' ;;\n"
         "esac\n",
         encoding="utf-8",
