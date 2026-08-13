@@ -18,6 +18,7 @@ for required in (
     "CMAKE_MODULE_PATH",
     "BUILD_SHARED_LIBS=OFF",
     "BUILD_opencv_python3=ON",
+    "python3,python_bindings_generator",
     "OPENCV_ENABLE_NONFREE=OFF",
     "WITH_FFMPEG=ON",
     "OPENCV_FFMPEG_USE_FIND_PACKAGE=FFMPEG",

@@ -129,7 +129,7 @@ cmake -S "$OPENCV_SOURCE_ROOT" -B "$BUILD_ROOT" -G Ninja \
   -DCMAKE_MODULE_PATH="$FFMPEG_CMAKE_MODULE_ROOT" \
   -DCMAKE_INSTALL_PREFIX="$SITE_PACKAGES_ROOT/_install" \
   -DBUILD_SHARED_LIBS=OFF \
-  -DBUILD_LIST=core,imgproc,imgcodecs,photo,features2d,flann,calib3d,objdetect,ml,dnn,video,videoio,highgui,stitching,gapi \
+  -DBUILD_LIST=core,imgproc,imgcodecs,photo,features2d,flann,calib3d,objdetect,ml,dnn,video,videoio,highgui,stitching,gapi,python3,python_bindings_generator \
   -DBUILD_opencv_apps=OFF \
   -DBUILD_opencv_python3=ON \
   -DBUILD_TESTS=OFF \
