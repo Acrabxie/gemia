@@ -62,6 +62,10 @@ PYTHONDONTWRITEBYTECODE=1 "$PYTHON_BIN" "$SCRIPT_ROOT/verify_ffmpeg_lgpl_distrib
 PYTHON_INCLUDE="$($PYTHON_BIN -c 'import sysconfig; print(sysconfig.get_path("include"))')"
 PYTHON_NUMPY_INCLUDE="$($PYTHON_BIN -c 'import numpy; print(numpy.get_include())')"
 PYTHON_LIBRARY="$($PYTHON_BIN -c 'import os, sysconfig; print(os.path.join(sysconfig.get_config_var("LIBDIR"), sysconfig.get_config_var("LDLIBRARY")))')"
+PYTHON_VERSION="$($PYTHON_BIN -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')"
+PYTHON_MAJOR="$($PYTHON_BIN -c 'import sys; print(sys.version_info.major)')"
+PYTHON_MINOR="$($PYTHON_BIN -c 'import sys; print(sys.version_info.minor)')"
+PYTHON_NUMPY_VERSION="$($PYTHON_BIN -c 'import numpy; print(numpy.version.version)')"
 if [[ -z "$PYTHON_INCLUDE" || -z "$PYTHON_NUMPY_INCLUDE" || ! -f "$PYTHON_LIBRARY" ]]; then
   echo "Python development headers or NumPy headers are unavailable." >&2
   exit 1
@@ -145,10 +149,18 @@ cmake -S "$OPENCV_SOURCE_ROOT" -B "$BUILD_ROOT" -G Ninja \
   -DWITH_EIGEN=OFF \
   -DWITH_OPENEXR=OFF \
   -DPYTHON3_EXECUTABLE="$PYTHON_BIN" \
+  -DPYTHON3INTERP_FOUND=TRUE \
+  -DPYTHON3LIBS_FOUND=TRUE \
+  -DPYTHON3_VERSION_STRING="$PYTHON_VERSION" \
+  -DPYTHON3LIBS_VERSION_STRING="$PYTHON_VERSION" \
+  -DPYTHON3_VERSION_MAJOR="$PYTHON_MAJOR" \
+  -DPYTHON3_VERSION_MINOR="$PYTHON_MINOR" \
   -DPYTHON3_INCLUDE_PATH="$PYTHON_INCLUDE" \
+  -DPYTHON3_INCLUDE_DIR="$PYTHON_INCLUDE" \
   -DPYTHON3_LIBRARY="$PYTHON_LIBRARY" \
   -DPYTHON3_LIBRARIES="$PYTHON_LIBRARY" \
   -DPYTHON3_NUMPY_INCLUDE_DIRS="$PYTHON_NUMPY_INCLUDE" \
+  -DPYTHON3_NUMPY_VERSION="$PYTHON_NUMPY_VERSION" \
   -DOPENCV_PYTHON3_INSTALL_PATH="$SITE_PACKAGES_ROOT" \
   | tee "$BUILD_ROOT/configure.log"
 
