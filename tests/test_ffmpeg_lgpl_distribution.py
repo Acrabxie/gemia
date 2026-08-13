@@ -93,6 +93,7 @@ for required in (
     "--enable-shared",
     "--disable-static",
     "--extra-ldflags=-Wl,-rpath,@loader_path/../lib",
+    "--install-name-dir=@rpath",
     "/usr/bin/make install",
     "LEGAL/FFmpeg/source",
     "verify_ffmpeg_lgpl_distribution.py",

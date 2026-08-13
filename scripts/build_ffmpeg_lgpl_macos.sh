@@ -119,6 +119,7 @@ if [[ "$SHARED_LIBRARIES_MODE" == "--with-shared-libraries" ]]; then
     "--enable-audiotoolbox"
     "--enable-videotoolbox"
     "--extra-ldflags=-Wl,-rpath,@loader_path/../lib"
+    "--install-name-dir=@rpath"
     "--prefix=$VENDOR_ROOT"
   )
 fi
