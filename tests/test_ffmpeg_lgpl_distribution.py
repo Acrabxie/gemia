@@ -89,6 +89,7 @@ for required in (
     "--disable-autodetect",
     "--enable-videotoolbox",
     "--with-shared-libraries",
+    "FFmpeg vendor root must not contain whitespace.",
     "--enable-shared",
     "--disable-static",
     "--extra-ldflags=-Wl,-rpath,@loader_path/../lib",

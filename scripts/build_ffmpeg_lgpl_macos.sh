@@ -20,6 +20,12 @@ VENDOR_ROOT="${2:-}"
 SHARED_LIBRARIES_MODE="${3:-}"
 [[ -n "$SOURCE_ARCHIVE" && -n "$VENDOR_ROOT" ]] || usage
 [[ -z "$SHARED_LIBRARIES_MODE" || "$SHARED_LIBRARIES_MODE" == "--with-shared-libraries" ]] || usage
+case "$VENDOR_ROOT" in
+  *[[:space:]]*)
+    echo "FFmpeg vendor root must not contain whitespace." >&2
+    exit 1
+    ;;
+esac
 [[ -f "$SOURCE_ARCHIVE" && ! -L "$SOURCE_ARCHIVE" ]] || {
   echo "FFmpeg source archive must be a regular non-symlink file." >&2
   exit 1
