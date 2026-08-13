@@ -74,7 +74,6 @@ CONFIGURE_ARGUMENTS=(
   "--enable-pthreads"
   "--enable-bzlib"
   "--enable-zlib"
-  "--enable-iconv"
   "--enable-avfoundation"
   "--enable-coreimage"
   "--enable-metal"
