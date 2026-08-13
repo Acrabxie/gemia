@@ -22,7 +22,7 @@ PYTHON_BIN="$3"
 BUILD_ROOT="$4"
 SITE_PACKAGES_ROOT="$5"
 
-for path in "$OPENCV_SOURCE_ROOT" "$FFMPEG_VENDOR_ROOT" "$PYTHON_BIN"; do
+for path in "$OPENCV_SOURCE_ROOT" "$FFMPEG_VENDOR_ROOT"; do
   if [[ ! -e "$path" || -L "$path" ]]; then
     echo "Required input is missing or is a symlink: $path" >&2
     exit 1
