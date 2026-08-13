@@ -88,6 +88,11 @@ for required in (
     "--disable-libfdk-aac",
     "--disable-autodetect",
     "--enable-videotoolbox",
+    "--with-shared-libraries",
+    "--enable-shared",
+    "--disable-static",
+    "--extra-ldflags=-Wl,-rpath,@loader_path/../lib",
+    "/usr/bin/make install",
     "LEGAL/FFmpeg/source",
     "verify_ffmpeg_lgpl_distribution.py",
 ):

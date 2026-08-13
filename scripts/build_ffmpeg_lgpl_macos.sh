@@ -11,13 +11,15 @@ SOURCE_URL="https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz"
 SOURCE_SHA256="464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c"
 
 usage() {
-  echo "usage: $0 <ffmpeg-8.1.2.tar.xz> <new-vendor-root>" >&2
+  echo "usage: $0 <ffmpeg-8.1.2.tar.xz> <new-vendor-root> [--with-shared-libraries]" >&2
   exit 64
 }
 
 SOURCE_ARCHIVE="${1:-}"
 VENDOR_ROOT="${2:-}"
+SHARED_LIBRARIES_MODE="${3:-}"
 [[ -n "$SOURCE_ARCHIVE" && -n "$VENDOR_ROOT" ]] || usage
+[[ -z "$SHARED_LIBRARIES_MODE" || "$SHARED_LIBRARIES_MODE" == "--with-shared-libraries" ]] || usage
 [[ -f "$SOURCE_ARCHIVE" && ! -L "$SOURCE_ARCHIVE" ]] || {
   echo "FFmpeg source archive must be a regular non-symlink file." >&2
   exit 1
@@ -82,20 +84,65 @@ CONFIGURE_ARGUMENTS=(
   "--enable-videotoolbox"
 )
 
+if [[ "$SHARED_LIBRARIES_MODE" == "--with-shared-libraries" ]]; then
+  # Build the programs and the shared libraries in one pass.  The prior
+  # static-first approach made multi-gigabyte intermediate archives only to
+  # discard them before the shared build that OpenCV actually needs.
+  CONFIGURE_ARGUMENTS=(
+    "--arch=arm64"
+    "--target-os=darwin"
+    "--disable-static"
+    "--enable-shared"
+    "--disable-doc"
+    "--disable-debug"
+    "--disable-gpl"
+    "--disable-version3"
+    "--disable-nonfree"
+    "--disable-libx264"
+    "--disable-libx265"
+    "--disable-libfdk-aac"
+    "--disable-autodetect"
+    "--enable-pic"
+    "--enable-pthreads"
+    "--enable-bzlib"
+    "--enable-zlib"
+    "--enable-avfoundation"
+    "--enable-coreimage"
+    "--enable-metal"
+    "--enable-securetransport"
+    "--enable-audiotoolbox"
+    "--enable-videotoolbox"
+    "--extra-ldflags=-Wl,-rpath,@loader_path/../lib"
+    "--prefix=$VENDOR_ROOT"
+  )
+fi
+
 printf '%s\n' "${CONFIGURE_ARGUMENTS[@]}" > "$WORK_ROOT/configure.args"
 (
   cd "$SOURCE_TREE"
   ./configure "${CONFIGURE_ARGUMENTS[@]}"
   /usr/bin/make -j"$(/usr/sbin/sysctl -n hw.ncpu)"
+  if [[ "$SHARED_LIBRARIES_MODE" == "--with-shared-libraries" ]]; then
+    /usr/bin/make install
+  fi
 )
-[[ -x "$SOURCE_TREE/ffmpeg" && -x "$SOURCE_TREE/ffprobe" ]] || {
+if [[ "$SHARED_LIBRARIES_MODE" == "--with-shared-libraries" ]]; then
+  FFMPEG_BINARY="$VENDOR_ROOT/bin/ffmpeg"
+  FFPROBE_BINARY="$VENDOR_ROOT/bin/ffprobe"
+else
+  FFMPEG_BINARY="$SOURCE_TREE/ffmpeg"
+  FFPROBE_BINARY="$SOURCE_TREE/ffprobe"
+fi
+[[ -x "$FFMPEG_BINARY" && -x "$FFPROBE_BINARY" ]] || {
   echo "FFmpeg build did not produce both executable programs." >&2
   exit 1
 }
 
 mkdir -p "$VENDOR_ROOT/bin" "$VENDOR_ROOT/LEGAL/FFmpeg/source"
-/usr/bin/install -m 0755 "$SOURCE_TREE/ffmpeg" "$VENDOR_ROOT/bin/ffmpeg"
-/usr/bin/install -m 0755 "$SOURCE_TREE/ffprobe" "$VENDOR_ROOT/bin/ffprobe"
+if [[ "$SHARED_LIBRARIES_MODE" != "--with-shared-libraries" ]]; then
+  /usr/bin/install -m 0755 "$FFMPEG_BINARY" "$VENDOR_ROOT/bin/ffmpeg"
+  /usr/bin/install -m 0755 "$FFPROBE_BINARY" "$VENDOR_ROOT/bin/ffprobe"
+fi
 /usr/bin/install -m 0644 "$SOURCE_TREE/COPYING.LGPLv2.1" \
   "$VENDOR_ROOT/LEGAL/FFmpeg/COPYING.LGPL-2.1-or-later"
 /usr/bin/install -m 0644 "$SOURCE_ARCHIVE" \
@@ -104,20 +151,28 @@ mkdir -p "$VENDOR_ROOT/bin" "$VENDOR_ROOT/LEGAL/FFmpeg/source"
   "$VENDOR_ROOT/LEGAL/FFmpeg/source/build-ffmpeg-lgpl-macos.sh"
 /usr/bin/install -m 0644 "$WORK_ROOT/configure.args" \
   "$VENDOR_ROOT/LEGAL/FFmpeg/source/configure.args"
+
+if [[ "$SHARED_LIBRARIES_MODE" == "--with-shared-libraries" ]]; then
+  /usr/bin/find "$VENDOR_ROOT/lib" -type f -name 'libav*.dylib' -print -quit | /usr/bin/grep -q . || {
+    echo "Shared LGPL FFmpeg libraries were not installed." >&2
+    exit 1
+  }
+fi
+
 printf '%s\n' \
   "Lumeri includes FFmpeg $FFMPEG_VERSION as a separate LGPL-2.1-or-later program." \
   "Corresponding source: $SOURCE_URL" \
   "The exact source archive, build script, and configure arguments are included in source/." \
   > "$VENDOR_ROOT/LEGAL/FFmpeg/NOTICE"
 
-/usr/bin/python3 - "$VENDOR_ROOT" "$FFMPEG_VERSION" "$SOURCE_URL" "$SOURCE_SHA256" <<'PY'
+/usr/bin/python3 - "$VENDOR_ROOT" "$FFMPEG_VERSION" "$SOURCE_URL" "$SOURCE_SHA256" "$SHARED_LIBRARIES_MODE" <<'PY'
 import hashlib
 import json
 from pathlib import Path
 import sys
 
 root = Path(sys.argv[1])
-version, source_url, source_sha256 = sys.argv[2:]
+version, source_url, source_sha256, shared_libraries_mode = sys.argv[2:]
 
 def digest(path: Path) -> str:
     hasher = hashlib.sha256()
@@ -149,6 +204,12 @@ manifest = {
         for name in ("ffmpeg", "ffprobe")
     },
 }
+if shared_libraries_mode == "--with-shared-libraries":
+    manifest["sharedLibraries"] = {
+        path.name: {"sha256": digest(path)}
+        for path in sorted((root / "lib").glob("libav*.dylib"))
+        if path.is_file() and not path.is_symlink()
+    }
 (legal / "manifest.json").write_text(
     json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
 )
