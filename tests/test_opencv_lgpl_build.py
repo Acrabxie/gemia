@@ -21,6 +21,7 @@ for required in (
     "OPENCV_ENABLE_NONFREE=OFF",
     "WITH_FFMPEG=ON",
     "OPENCV_FFMPEG_USE_FIND_PACKAGE=FFMPEG",
+    "PYTHON3_LIBRARY",
     "OPENCV_PYTHON3_INSTALL_PATH",
     "@loader_path/.dylibs",
     "libx264*.dylib",
