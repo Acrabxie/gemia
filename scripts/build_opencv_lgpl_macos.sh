@@ -178,7 +178,7 @@ if [[ -z "$CV2_EXTENSION" ]]; then
   exit 1
 fi
 
-CV2_DYLIB_ROOT="$SITE_PACKAGES_ROOT/cv2/.dylibs"
+CV2_DYLIB_ROOT="$(dirname "$CV2_EXTENSION")/.dylibs"
 /usr/bin/ditto "$FFMPEG_VENDOR_ROOT/lib" "$CV2_DYLIB_ROOT"
 
 rewrite_cv2_linkage() {
