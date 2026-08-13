@@ -73,7 +73,6 @@ CONFIGURE_ARGUMENTS=(
   "--enable-pic"
   "--enable-pthreads"
   "--enable-bzlib"
-  "--enable-lzma"
   "--enable-zlib"
   "--enable-iconv"
   "--enable-avfoundation"
