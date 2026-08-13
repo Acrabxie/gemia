@@ -27,6 +27,7 @@ for required in (
     "PYTHON3LIBS_FOUND=TRUE",
     "OPENCV_PYTHON3_INSTALL_PATH",
     "@loader_path/.dylibs",
+    "tail -n +3",
     "libx264*.dylib",
     "libx265*.dylib",
     "imageio_ffmpeg/binaries",

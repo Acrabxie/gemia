@@ -202,7 +202,7 @@ rewrite_dylib_linkage() {
         install_name_tool -change "$linked" "@loader_path/$base" "$library"
         ;;
     esac
-  done < <(otool -L "$library" | tail -n +2)
+  done < <(otool -L "$library" | tail -n +3)
 }
 
 rewrite_cv2_linkage
@@ -214,11 +214,12 @@ if otool -L "$CV2_EXTENSION" | tail -n +2 | grep -Eq '@rpath/(libav|libsw)'; the
   echo "OpenCV extension still has unresolved FFmpeg rpath linkage." >&2
   exit 1
 fi
-if find "$CV2_DYLIB_ROOT" -maxdepth 1 -type f -name '*.dylib' -print0 | \
-    xargs -0 -n1 otool -L | tail -n +2 | grep -Eq '@rpath/(libav|libsw)'; then
-  echo "Bundled FFmpeg shared libraries still have unresolved rpath linkage." >&2
-  exit 1
-fi
+while IFS= read -r -d '' library; do
+  if otool -L "$library" | tail -n +3 | grep -Eq '@rpath/(libav|libsw)'; then
+    echo "Bundled FFmpeg shared libraries still have unresolved rpath linkage: $library" >&2
+    exit 1
+  fi
+done < <(find "$CV2_DYLIB_ROOT" -maxdepth 1 -type f -name '*.dylib' -print0)
 if find "$SITE_PACKAGES_ROOT" -type f \( -name 'libx264*.dylib' -o -name 'libx265*.dylib' -o -path '*/imageio_ffmpeg/binaries/*' \) -print -quit | grep -q .; then
   echo "Refusing GPL media payload in the custom OpenCV site-packages output." >&2
   exit 1
