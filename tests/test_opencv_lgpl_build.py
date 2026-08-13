@@ -14,13 +14,13 @@ assert checked.returncode == 0, checked.stderr
 builder = BUILDER.read_text(encoding="utf-8")
 for required in (
     "verify_ffmpeg_lgpl_distribution.py",
-    "PKG_CONFIG_PATH",
-    "PKG_CONFIG_LIBDIR",
+    "FindFFMPEG.cmake",
+    "CMAKE_MODULE_PATH",
     "BUILD_SHARED_LIBS=OFF",
     "BUILD_opencv_python3=ON",
     "OPENCV_ENABLE_NONFREE=OFF",
     "WITH_FFMPEG=ON",
-    "OPENCV_FFMPEG_USE_FIND_PACKAGE=OFF",
+    "OPENCV_FFMPEG_USE_FIND_PACKAGE=FFMPEG",
     "OPENCV_PYTHON3_INSTALL_PATH",
     "@loader_path/.dylibs",
     "libx264*.dylib",
