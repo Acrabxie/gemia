@@ -61,7 +61,6 @@ CONFIGURE_ARGUMENTS=(
   "--target-os=darwin"
   "--enable-static"
   "--disable-shared"
-  "--enable-programs"
   "--disable-doc"
   "--disable-debug"
   "--disable-gpl"
