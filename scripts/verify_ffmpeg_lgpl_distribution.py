@@ -114,7 +114,10 @@ def verify_binary(name: str, binary: Path, expected_sha: str) -> None:
     license_output = run(binary, "-hide_banner", "-L").lower()
     require("unredistributable" not in license_output and "nonfree" not in license_output, f"{name} reports a nonredistributable license")
     require(re.search(r"(?<!l)gpl(?:\s|$)", license_output) is None, f"{name} reports a GPL license; LGPL-only distribution required")
-    require("lgpl" in license_output, f"{name} does not report an LGPL license")
+    require(
+        "lgpl" in license_output or "gnu lesser general public license" in license_output,
+        f"{name} does not report an LGPL license",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -19,7 +19,7 @@ def digest(path: Path) -> str:
 
 def fake_binary(path: Path, *, mode: str = "lgpl") -> None:
     config = "--disable-gpl"
-    license_line = "This version of ffmpeg is licensed under the LGPL version 2.1 or later"
+    license_line = "This version of ffmpeg is licensed under the GNU Lesser General Public License version 2.1 or later"
     if mode == "gpl":
         config = "--enable-gpl"
         license_line = "This version of ffmpeg is licensed under GPL version 3 or later"
