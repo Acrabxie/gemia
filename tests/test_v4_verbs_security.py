@@ -5,7 +5,7 @@ the boundary still holds once the real verbs are wired on top of it: it drives t
 actual ``run_shell`` / ``fetch`` dispatchers (not an ad-hoc profile) and asserts
 the worst-case injection paths are sealed.
 
-Acrab's required probe matrix (must show DENIED, not a verbal "it's wired"):
+Acrabxie's required probe matrix (must show DENIED, not a verbal "it's wired"):
   * run_shell `cat ~/.gemia/config.json`            → DENIED, secret never in stdout
   * run_shell `cat ~/.config/gcloud/...`            → DENIED
   * run_shell network connect (curl external)       → DENIED (exfil only on host fetch)

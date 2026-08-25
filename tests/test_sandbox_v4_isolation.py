@@ -1,6 +1,6 @@
 """M1 isolation probe (rerunnable) for the v4 build two-tier sandbox.
 
-These tests ARE the security probe Acrab asked for: they drive the *shipped*
+These tests ARE the security probe Acrabxie asked for: they drive the *shipped*
 ``build_two_tier_profile`` through a real ``sandbox-exec`` wrapper and assert the
 two-tier boundary actually holds at the kernel level. Unlike a throwaway script
 they live in the repo and re-run with the suite, so a future profile regression
