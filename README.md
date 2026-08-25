@@ -1,8 +1,40 @@
 <p align="center">
-  <img src="docs/assets/lumeri-working.gif" width="180" alt="Lumeri working animation" />
+  <a href="https://lumeri.io/">
+    <img src="docs/assets/lumeri-working.gif" width="240" alt="Lumeri working animation" />
+  </a>
 </p>
 
-# Lumeri
+<h1 align="center">Lumeri</h1>
+
+<p align="center">
+  <strong>the LUI for creation</strong>
+</p>
+
+<p align="center">
+  An AI Creative Workflow Engine for turning an idea into a real, editable media project.
+</p>
+
+<p align="center">
+  <a href="https://lumeri.io/"><strong>Official website</strong></a>
+  ·
+  <a href="#product-loop">Product loop</a>
+  ·
+  <a href="#install">Install</a>
+  ·
+  <a href="#architecture">Architecture</a>
+  ·
+  <a href="CONTRIBUTING.md">Contribute</a>
+</p>
+
+<p align="center">
+  <a href="https://lumeri.io/">
+    <img src="https://img.shields.io/badge/website-lumeri.io-5FC6DE?style=for-the-badge" alt="Lumeri official website" />
+  </a>
+  <img src="https://img.shields.io/badge/Python-3.12%2B-1F2937?style=for-the-badge&amp;logo=python&amp;logoColor=white" alt="Python 3.12 or newer" />
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-1F2937?style=for-the-badge" alt="MIT license" />
+  </a>
+</p>
 
 **Lumeri** is a family of AI creative tools built around a small vocabulary of
 clean, composable primitives that a model can plan and execute.
@@ -11,8 +43,23 @@ clean, composable primitives that a model can plan and execute.
 workspace where the model works over a persistent timeline using structured
 tools while you watch, edit, and correct the result.
 
+More than a prompt box, Lumeri keeps the creative process inspectable: projects
+persist, tool calls are structured, timeline changes remain editable, and every
+preview can become the starting point for the next revision.
+
 > The public product and GitHub repository name is **Lumeri**. The Python
 > package and some engineering paths still use the historical name `gemia`.
+
+## Why Lumeri
+
+- **Project-native** — work lives in a persistent project and timeline, not a
+  disposable chat response.
+- **Structured by design** — the model plans with explicit media tools and
+  applies reviewable timeline patches instead of emitting opaque editor macros.
+- **Built for iteration** — preview, inspect, revise, and export from the same
+  creative loop.
+- **Open foundation** — the public engine, media tools, project model, and local
+  workspace are available here under the MIT license.
 
 ## Product loop
 
