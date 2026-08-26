@@ -48,7 +48,7 @@ interop = [
 # `pip install lumeri[mcp]` to run `python -m gemia mcp-serve`. The core install
 # stays light; gemia/mcp/server.py imports the SDK lazily inside its serve
 # entrypoints, so importing gemia without this extra never fails.
-mcp = ["mcp>=1.12,<2"]
+mcp = ["mcp>=1.12,<3"]
 
 [tool.ruff]
 target-version = "py312"
