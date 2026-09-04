@@ -9,7 +9,7 @@ This is **Lumeri Video** — an agentic video project workspace.
 - `server.py` — HTTP server entry point, serves web UI and delegates to v3 routes
 - `gemia/v3_routes.py` — Session HTTP API (`/sessions/*`)
 - `gemia/agent_loop_v3.py` — Multi-turn model ↔ tool conversation loop
-- `gemia/tools/` — 18 media tools using FFmpeg directly and Google GenAI
+- `gemia/tools/` — 66 media tools using FFmpeg directly and Google GenAI
 - `gemia/gemini_client.py` — Gemini API client for the agent loop
 - `gemia/ai/google_genai_client.py` — Google GenAI client for generative tools
 - `gemia/budget_guard.py` — Step and cost budget enforcement
